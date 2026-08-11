@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<service>
+  <id>three-fees-api</id>
+  <name>Three Fees API</name>
+  <description>智能物业管理系统 Java API，只监听本机回环地址。</description>
+  <executable>__JAVA_EXE__</executable>
+  <arguments>-Dfile.encoding=UTF-8 -Djava.io.tmpdir="__DEPLOYMENT_ROOT__\shared\tmp\api" -jar "__DEPLOYMENT_ROOT__\current\backend\three-fees-api.jar"</arguments>
+  <workingdirectory>__DEPLOYMENT_ROOT__\current\backend</workingdirectory>
+  <env name="SPRING_PROFILES_ACTIVE" value="prod" />
+  <env name="SERVER_ADDRESS" value="127.0.0.1" />
+  <env name="SERVER_PORT" value="8080" />
+  <env name="THREE_FEES_PROCESS_ROLE" value="api" />
+  <startmode>Automatic</startmode>
+  <delayedAutoStart />
+  <stoptimeout>30 sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <serviceaccount>
+    <domain>NT AUTHORITY</domain>
+    <user>NetworkService</user>
+  </serviceaccount>
+  <logpath>__DEPLOYMENT_ROOT__\shared\logs\api</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>10</keepFiles>
+  </log>
+</service>

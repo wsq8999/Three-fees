@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "ExtractedFact": {
+      "additionalProperties": false,
+      "properties": {
+        "factId": {
+          "title": "Factid",
+          "type": "string"
+        },
+        "fieldName": {
+          "title": "Fieldname",
+          "type": "string"
+        },
+        "sourceSegmentIds": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Sourcesegmentids",
+          "type": "array"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "factId",
+        "fieldName",
+        "value",
+        "sourceSegmentIds"
+      ],
+      "title": "ExtractedFact",
+      "type": "object"
+    },
+    "ResponseMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "jobId": {
+          "title": "Jobid",
+          "type": "string"
+        },
+        "modelProvider": {
+          "const": "fake",
+          "default": "fake",
+          "title": "Modelprovider",
+          "type": "string"
+        },
+        "traceId": {
+          "title": "Traceid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "traceId"
+      ],
+      "title": "ResponseMetadata",
+      "type": "object"
+    }
+  },
+  "$id": "https://three-fees.example/contracts/ai/v1/fact-extraction-response.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "facts": {
+      "items": {
+        "$ref": "#/$defs/ExtractedFact"
+      },
+      "title": "Facts",
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ResponseMetadata"
+    }
+  },
+  "required": [
+    "metadata",
+    "facts"
+  ],
+  "title": "FactExtractionResponse",
+  "type": "object"
+}

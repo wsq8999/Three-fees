@@ -1,0 +1,81 @@
+{
+  "$defs": {
+    "CorrectionOperation": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "enum": [
+            "title",
+            "situation",
+            "analysis",
+            "rectification"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "replacement": {
+          "title": "Replacement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "replacement"
+      ],
+      "title": "CorrectionOperation",
+      "type": "object"
+    },
+    "ResponseMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "jobId": {
+          "title": "Jobid",
+          "type": "string"
+        },
+        "modelProvider": {
+          "const": "fake",
+          "default": "fake",
+          "title": "Modelprovider",
+          "type": "string"
+        },
+        "traceId": {
+          "title": "Traceid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "traceId"
+      ],
+      "title": "ResponseMetadata",
+      "type": "object"
+    }
+  },
+  "$id": "https://three-fees.example/contracts/ai/v1/correction-interpretation-response.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "metadata": {
+      "$ref": "#/$defs/ResponseMetadata"
+    },
+    "operations": {
+      "items": {
+        "$ref": "#/$defs/CorrectionOperation"
+      },
+      "title": "Operations",
+      "type": "array"
+    }
+  },
+  "required": [
+    "metadata",
+    "operations"
+  ],
+  "title": "CorrectionInterpretationResponse",
+  "type": "object"
+}

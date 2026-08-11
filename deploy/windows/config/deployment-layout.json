@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "defaultDeploymentRoot": "C:\\ProgramData\\ThreeFees",
+  "services": [
+    {
+      "id": "three-fees-api",
+      "startMode": "Automatic",
+      "bindAddress": "127.0.0.1",
+      "port": 8080
+    },
+    {
+      "id": "three-fees-worker",
+      "startMode": "Automatic",
+      "bindAddress": null,
+      "port": null
+    },
+    {
+      "id": "three-fees-ai",
+      "startMode": "Automatic",
+      "bindAddress": "127.0.0.1",
+      "port": 8100
+    }
+  ],
+  "iis": {
+    "publicProxyPrefixes": [
+      "/api/",
+      "/actuator/health"
+    ],
+    "blockedPrefixes": [
+      "/internal/",
+      "/actuator/"
+    ]
+  }
+}

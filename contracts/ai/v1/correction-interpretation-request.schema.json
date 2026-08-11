@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "RequestMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": "1.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Idempotencykey",
+          "type": "string"
+        },
+        "inputSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Inputsha256",
+          "type": "string"
+        },
+        "jobId": {
+          "maxLength": 64,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Jobid",
+          "type": "string"
+        },
+        "traceId": {
+          "maxLength": 64,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Traceid",
+          "type": "string"
+        },
+        "workflowVersion": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Workflowversion",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "workflowVersion",
+        "jobId",
+        "idempotencyKey",
+        "inputSha256",
+        "traceId"
+      ],
+      "title": "RequestMetadata",
+      "type": "object"
+    }
+  },
+  "$id": "https://three-fees.example/contracts/ai/v1/correction-interpretation-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "editableFields": {
+      "items": {
+        "enum": [
+          "title",
+          "situation",
+          "analysis",
+          "rectification"
+        ],
+        "type": "string"
+      },
+      "maxItems": 4,
+      "minItems": 1,
+      "title": "Editablefields",
+      "type": "array"
+    },
+    "instruction": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Instruction",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/RequestMetadata"
+    }
+  },
+  "required": [
+    "metadata",
+    "instruction",
+    "editableFields"
+  ],
+  "title": "CorrectionInterpretationRequest",
+  "type": "object"
+}

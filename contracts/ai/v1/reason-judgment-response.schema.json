@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "ResponseMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "jobId": {
+          "title": "Jobid",
+          "type": "string"
+        },
+        "modelProvider": {
+          "const": "fake",
+          "default": "fake",
+          "title": "Modelprovider",
+          "type": "string"
+        },
+        "traceId": {
+          "title": "Traceid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jobId",
+        "traceId"
+      ],
+      "title": "ResponseMetadata",
+      "type": "object"
+    }
+  },
+  "$id": "https://three-fees.example/contracts/ai/v1/reason-judgment-response.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "citedEvidenceIds": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Citedevidenceids",
+      "type": "array"
+    },
+    "metadata": {
+      "$ref": "#/$defs/ResponseMetadata"
+    },
+    "overLimit": {
+      "title": "Overlimit",
+      "type": "boolean"
+    },
+    "reasonSummary": {
+      "title": "Reasonsummary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "metadata",
+    "overLimit",
+    "reasonSummary",
+    "citedEvidenceIds"
+  ],
+  "title": "ReasonJudgmentResponse",
+  "type": "object"
+}

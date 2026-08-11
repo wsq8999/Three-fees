@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+src/types/components.d.ts
+.env.local
+.env.*.local
+*.log

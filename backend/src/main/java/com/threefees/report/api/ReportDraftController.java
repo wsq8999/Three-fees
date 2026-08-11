@@ -1,0 +1,206 @@
+package com.threefees.report.api;
+
+import com.threefees.ai.application.AiServiceClient.ReportSections;
+import com.threefees.identity.application.CurrentUser;
+import com.threefees.identity.application.ResourceConflictException;
+import com.threefees.report.application.ReportDraftService;
+import com.threefees.report.application.ReportDraftService.Draft;
+import com.threefees.report.application.ReportDraftService.DraftMessage;
+import com.threefees.report.application.ReportDraftService.DraftVersion;
+import com.threefees.task.domain.BusinessTask;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import java.net.URI;
+import java.time.LocalDateTime;
+import java.util.List;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+@Validated
+@RestController
+@RequestMapping("/api/v1/report-drafts")
+public class ReportDraftController {
+
+  private final ReportDraftService service;
+
+  public ReportDraftController(ReportDraftService service) {
+    this.service = service;
+  }
+
+  @PostMapping
+  public ResponseEntity<DraftResponse> createOrResume(
+      @Valid @RequestBody CreateDraftRequest request, @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.createOrResume(request.billingPointPeriodId(), actor);
+    return draftResponse(draft)
+        .location(URI.create("/api/v1/report-drafts/" + draft.publicId()))
+        .body(DraftResponse.from(draft));
+  }
+
+  @GetMapping("/{publicId}")
+  public ResponseEntity<DraftResponse> find(
+      @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.find(publicId, actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
+  }
+
+  @PatchMapping("/{publicId}")
+  public ResponseEntity<DraftResponse> edit(
+      @PathVariable String publicId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @Valid @RequestBody UpdateDraftRequest request,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.edit(publicId, request.toSections(), parseVersion(ifMatch), actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
+  }
+
+  @PostMapping("/{publicId}/messages")
+  public ResponseEntity<DraftResponse> assist(
+      @PathVariable String publicId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @RequestHeader(name = "X-Trace-Id", required = false) String traceId,
+      @Valid @RequestBody AssistanceRequest request,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft =
+        service.assist(
+            publicId,
+            request.intent(),
+            request.content(),
+            request.imageFileIds(),
+            parseVersion(ifMatch),
+            traceId == null ? "" : traceId,
+            actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
+  }
+
+  @PostMapping(value = "/{publicId}/images", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  public ResponseEntity<ImageUploadResponse> uploadImage(
+      @PathVariable String publicId,
+      @RequestParam("file") MultipartFile file,
+      @AuthenticationPrincipal CurrentUser actor) {
+    String fileId = service.uploadImage(publicId, file, actor);
+    return ResponseEntity.created(URI.create("/api/v1/files/" + fileId))
+        .body(new ImageUploadResponse(fileId));
+  }
+
+  @GetMapping("/{publicId}/versions")
+  public List<DraftVersion> versions(
+      @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
+    return service.versions(publicId, actor);
+  }
+
+  @PostMapping("/{publicId}/versions/{versionId}/restorations")
+  public ResponseEntity<DraftResponse> restore(
+      @PathVariable String publicId,
+      @PathVariable String versionId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.restore(publicId, versionId, parseVersion(ifMatch), actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
+  }
+
+  @PostMapping("/{publicId}/formal-report")
+  public ResponseEntity<TaskAcceptedResponse> submitFormal(
+      @PathVariable String publicId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @AuthenticationPrincipal CurrentUser actor) {
+    BusinessTask task = service.submitFormal(publicId, parseVersion(ifMatch), actor);
+    return ResponseEntity.accepted()
+        .location(URI.create("/api/v1/tasks/" + task.publicId()))
+        .body(new TaskAcceptedResponse(task.publicId(), task.type().name(), task.status().name()));
+  }
+
+  private ResponseEntity.BodyBuilder draftResponse(Draft draft) {
+    return ResponseEntity.ok().eTag(Long.toString(draft.entityVersion()));
+  }
+
+  private long parseVersion(String ifMatch) {
+    String value = ifMatch == null ? "" : ifMatch.trim();
+    if (value.startsWith("W/")) {
+      value = value.substring(2);
+    }
+    if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+      value = value.substring(1, value.length() - 1);
+    }
+    try {
+      return Long.parseLong(value);
+    } catch (NumberFormatException exception) {
+      throw new ResourceConflictException("IF_MATCH_INVALID", "If-Match 必须是当前资源版本号");
+    }
+  }
+
+  public record CreateDraftRequest(@NotBlank String billingPointPeriodId) {}
+
+  public record UpdateDraftRequest(
+      @NotBlank @Size(max = 500) String title,
+      @NotBlank @Size(max = 100_000) String situation,
+      @NotBlank @Size(max = 100_000) String analysis,
+      @NotBlank @Size(max = 100_000) String rectification) {
+
+    ReportSections toSections() {
+      return new ReportSections(title, situation, analysis, rectification);
+    }
+  }
+
+  public record AssistanceRequest(
+      @Size(max = 32) String intent,
+      @NotBlank @Size(max = 4_000) String content,
+      @NotNull @Size(max = 10) List<String> imageFileIds) {}
+
+  public record ImageUploadResponse(String fileId) {}
+
+  public record TaskAcceptedResponse(String taskId, String type, String status) {}
+
+  public record DraftResponse(
+      String id,
+      String billingPointPeriodId,
+      String billingPointCode,
+      String billingPointName,
+      String cityCode,
+      String period,
+      String auditStatus,
+      String status,
+      ReportSections sections,
+      int currentVersion,
+      List<String> currentImageFileIds,
+      String formalReportId,
+      List<DraftMessage> messages,
+      LocalDateTime createdAt,
+      LocalDateTime updatedAt,
+      long version) {
+
+    static DraftResponse from(Draft draft) {
+      return new DraftResponse(
+          draft.publicId(),
+          draft.billingPointPeriodId(),
+          draft.billingPointCode(),
+          draft.billingPointName(),
+          draft.cityCode(),
+          draft.period(),
+          draft.auditStatus(),
+          draft.status(),
+          draft.sections(),
+          draft.currentVersion(),
+          draft.currentImageFileIds(),
+          draft.formalReportId(),
+          draft.messages(),
+          draft.createdAt(),
+          draft.updatedAt(),
+          draft.entityVersion());
+    }
+  }
+}

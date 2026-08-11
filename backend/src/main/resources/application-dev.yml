@@ -1,0 +1,16 @@
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+server:
+  servlet:
+    session:
+      cookie:
+        secure: false
+
+three-fees:
+  process-role: ${THREE_FEES_PROCESS_ROLE:all}
+
+app:
+  ai:
+    enabled: ${AI_SERVICE_ENABLED:false}

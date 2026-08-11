@@ -1,0 +1,96 @@
+{
+  "$defs": {
+    "RequestMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": "1.0",
+          "title": "Contractversion",
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "maxLength": 128,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Idempotencykey",
+          "type": "string"
+        },
+        "inputSha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Inputsha256",
+          "type": "string"
+        },
+        "jobId": {
+          "maxLength": 64,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Jobid",
+          "type": "string"
+        },
+        "traceId": {
+          "maxLength": 64,
+          "minLength": 8,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Traceid",
+          "type": "string"
+        },
+        "workflowVersion": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "title": "Workflowversion",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contractVersion",
+        "workflowVersion",
+        "jobId",
+        "idempotencyKey",
+        "inputSha256",
+        "traceId"
+      ],
+      "title": "RequestMetadata",
+      "type": "object"
+    }
+  },
+  "$id": "https://three-fees.example/contracts/ai/v1/document-parse-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "maxLength": 120000,
+      "minLength": 1,
+      "title": "Content",
+      "type": "string"
+    },
+    "mediaType": {
+      "const": "text/plain",
+      "title": "Mediatype",
+      "type": "string"
+    },
+    "metadata": {
+      "$ref": "#/$defs/RequestMetadata"
+    },
+    "sourceLabel": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sourcelabel"
+    }
+  },
+  "required": [
+    "metadata",
+    "mediaType",
+    "content"
+  ],
+  "title": "DocumentParseRequest",
+  "type": "object"
+}
