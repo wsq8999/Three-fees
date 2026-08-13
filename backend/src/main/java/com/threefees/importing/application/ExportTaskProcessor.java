@@ -145,7 +145,6 @@ public class ExportTaskProcessor implements TaskProcessor {
               """
               SELECT s.data_json
                 FROM billing_point_snapshot s
-                JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
                WHERE s.data_period = ? AND s.city_code = ? AND s.billing_point_code IN (
               """
                   + placeholders
@@ -153,18 +152,25 @@ public class ExportTaskProcessor implements TaskProcessor {
               String.class,
               arguments.toArray());
     } else {
-      arguments.addFirst(datasetType.name());
+      String tableName =
+          switch (datasetType) {
+            case PAYMENT -> "payment_detail";
+            case METER_READING -> "meter_reading";
+            case BENCHMARK -> "benchmark_value";
+            case BILLING_POINT -> throw new IllegalStateException("Handled above");
+          };
       jsonRows =
           jdbcTemplate.queryForList(
               """
-              SELECT r.values_json
-                FROM imported_record r
-                JOIN import_batch b ON b.id = r.batch_id AND b.status = 'ACTIVE'
-               WHERE r.dataset_type = ? AND r.data_period = ? AND r.city_code = ?
-                 AND r.is_active = TRUE AND r.billing_point_code IN (
+              SELECT values_json
+                FROM 
+              """
+                  + tableName
+                  + """
+               WHERE data_period = ? AND city_code = ? AND billing_point_code IN (
               """
                   + placeholders
-                  + ") ORDER BY r.billing_point_code, r.id",
+                  + ") ORDER BY billing_point_code, id",
               String.class,
               arguments.toArray());
     }

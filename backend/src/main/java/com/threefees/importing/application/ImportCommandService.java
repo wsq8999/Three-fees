@@ -10,12 +10,13 @@ import com.threefees.importing.domain.ImportBatch;
 import com.threefees.organization.application.CityQueryService;
 import com.threefees.task.application.BusinessTaskRepository;
 import com.threefees.task.domain.TaskType;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.YearMonth;
-import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -35,6 +36,8 @@ public class ImportCommandService {
   private final BusinessTaskRepository taskRepository;
   private final ImportBatchRepository batchRepository;
   private final CityQueryService cityQueryService;
+  private final TabularFileReader tabularFileReader;
+  private final ImportRowMapper importRowMapper;
   private final ObjectMapper objectMapper;
 
   public ImportCommandService(
@@ -42,68 +45,99 @@ public class ImportCommandService {
       BusinessTaskRepository taskRepository,
       ImportBatchRepository batchRepository,
       CityQueryService cityQueryService,
+      TabularFileReader tabularFileReader,
+      ImportRowMapper importRowMapper,
       ObjectMapper objectMapper) {
     this.storedFileService = storedFileService;
     this.taskRepository = taskRepository;
     this.batchRepository = batchRepository;
     this.cityQueryService = cityQueryService;
+    this.tabularFileReader = tabularFileReader;
+    this.importRowMapper = importRowMapper;
     this.objectMapper = objectMapper;
   }
 
   @Transactional
-  public ImportBatch submit(
+  public List<ImportBatch> submit(
       DatasetType datasetType,
-      String period,
+      String fallbackPeriod,
       String requestedCityCode,
       MultipartFile file,
       String idempotencyKey,
       CurrentUser actor) {
-    validatePeriod(period);
-    String cityCode = cityScope(actor, requestedCityCode);
+    validateFallbackPeriod(fallbackPeriod);
+    String cityConstraint = cityConstraint(actor, requestedCityCode);
     String normalizedKey =
         idempotencyKey == null || idempotencyKey.isBlank()
             ? UUID.randomUUID().toString()
             : idempotencyKey;
     if (normalizedKey.length() < 8 || normalizedKey.length() > 128) {
-      throw new BusinessRuleException("IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 长度必须为 8 至 128");
-    }
-    String businessKey =
-        "IMPORT:" + datasetType + ":" + cityCode + ":" + period + ":" + digest(normalizedKey);
-    var existing = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
-    if (existing.isPresent()) {
-      String batchId = readPayloadBatchId(existing.orElseThrow().payloadJson());
-      return batchRepository
-          .findByPublicId(batchId)
-          .orElseThrow(() -> new ResourceNotFoundException("导入批次"));
+      throw new BusinessRuleException(
+          "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key length must be 8 to 128");
     }
 
-    String batchPublicId = UUID.randomUUID().toString();
-    String payload = writeJson(Map.of("batchId", batchPublicId));
-    com.threefees.task.domain.BusinessTask task;
-    try {
-      task = taskRepository.create(TaskType.IMPORT, businessKey, payload, actor.username(), 3);
-    } catch (DuplicateKeyException exception) {
-      var concurrent = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
-      if (concurrent.isPresent()) {
-        String concurrentBatchId = readPayloadBatchId(concurrent.orElseThrow().payloadJson());
-        return batchRepository
-            .findByPublicId(concurrentBatchId)
-            .orElseThrow(() -> new ResourceNotFoundException("导入批次"));
-      }
-      throw exception;
+    byte[] bytes = readUploadBytes(file);
+    TabularData data = tabularFileReader.read(bytes, file.getOriginalFilename());
+    List<ImportRowGroup> groups =
+        importRowMapper.mapAuto(datasetType, cityConstraint, fallbackPeriod, data);
+    if (groups.isEmpty()) {
+      throw new BusinessRuleException("IMPORT_DATA_EMPTY", "No importable rows found");
     }
+
     var storedFile =
         storedFileService.storeUpload(
             file, Set.of("xlsx", "xls", "csv"), "IMPORT_SOURCE", actor.username());
     registerRollbackCleanup(storedFile);
-    return batchRepository.create(
-        batchPublicId,
-        datasetType,
-        period,
-        cityCode,
-        storedFile.id(),
-        task.publicId(),
-        actor.username());
+
+    var created = new ArrayList<ImportBatch>();
+    for (ImportRowGroup group : groups) {
+      String businessKey =
+          "IMPORT:"
+              + datasetType
+              + ":"
+              + group.cityCode()
+              + ":"
+              + group.period()
+              + ":"
+              + digest(normalizedKey);
+      var existing = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
+      if (existing.isPresent()) {
+        String batchId = readPayloadBatchId(existing.orElseThrow().payloadJson());
+        created.add(
+            batchRepository
+                .findByPublicId(batchId)
+                .orElseThrow(() -> new ResourceNotFoundException("import batch")));
+        continue;
+      }
+
+      String batchPublicId = UUID.randomUUID().toString();
+      String payload = writeJson(Map.of("batchId", batchPublicId));
+      com.threefees.task.domain.BusinessTask task;
+      try {
+        task = taskRepository.create(TaskType.IMPORT, businessKey, payload, actor.username(), 3);
+      } catch (DuplicateKeyException exception) {
+        var concurrent = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
+        if (concurrent.isPresent()) {
+          String concurrentBatchId = readPayloadBatchId(concurrent.orElseThrow().payloadJson());
+          created.add(
+              batchRepository
+                  .findByPublicId(concurrentBatchId)
+                  .orElseThrow(() -> new ResourceNotFoundException("import batch")));
+          continue;
+        }
+        throw exception;
+      }
+      created.add(
+          batchRepository.create(
+              batchPublicId,
+              datasetType,
+              group.period(),
+              group.cityCode(),
+              storedFile.id(),
+              task.publicId(),
+              actor.username()));
+    }
+    return List.copyOf(created);
   }
 
   private void registerRollbackCleanup(com.threefees.file.domain.StoredFile storedFile) {
@@ -121,7 +155,7 @@ public class ImportCommandService {
         });
   }
 
-  private String cityScope(CurrentUser actor, String requestedCityCode) {
+  private String cityConstraint(CurrentUser actor, String requestedCityCode) {
     if (!actor.roles().contains(Role.SUPER_ADMIN)) {
       if (requestedCityCode != null
           && !requestedCityCode.isBlank()
@@ -131,21 +165,32 @@ public class ImportCommandService {
       return actor.cityCode();
     }
     if (requestedCityCode == null || requestedCityCode.isBlank()) {
-      throw new BusinessRuleException("CITY_REQUIRED", "超级管理员导入时必须选择地市");
+      return null;
     }
     boolean known =
         cityQueryService.findAll().stream().anyMatch(city -> city.code().equals(requestedCityCode));
     if (!known) {
-      throw new BusinessRuleException("CITY_UNKNOWN", "地市编码不存在");
+      throw new BusinessRuleException("CITY_UNKNOWN", "Unknown city code");
     }
     return requestedCityCode;
   }
 
-  private void validatePeriod(String period) {
+  private void validateFallbackPeriod(String period) {
+    if (period == null || period.isBlank()) {
+      return;
+    }
     try {
-      YearMonth.parse(period);
-    } catch (DateTimeParseException exception) {
-      throw new BusinessRuleException("PERIOD_INVALID", "账期必须使用 YYYY-MM 格式");
+      java.time.YearMonth.parse(period);
+    } catch (java.time.format.DateTimeParseException exception) {
+      throw new BusinessRuleException("PERIOD_INVALID", "Period must use YYYY-MM");
+    }
+  }
+
+  private byte[] readUploadBytes(MultipartFile file) {
+    try {
+      return file.getBytes();
+    } catch (IOException exception) {
+      throw new BusinessRuleException("FILE_READ_FAILED", "Unable to read upload file");
     }
   }
 

@@ -4,23 +4,19 @@ import com.threefees.audit.domain.AuditCalculationInput;
 import com.threefees.audit.domain.AuditCalculationResult;
 import com.threefees.audit.domain.AuditCalculator;
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.time.LocalDate;
 import java.time.YearMonth;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.JacksonException;
-import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class AuditRecalculationService {
-
-  private static final TypeReference<LinkedHashMap<String, String>> STRING_MAP =
-      new TypeReference<>() {};
 
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
@@ -42,7 +38,6 @@ public class AuditRecalculationService {
            AND billing_point_code NOT IN (
              SELECT s.billing_point_code
                FROM billing_point_snapshot s
-               JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
               WHERE s.data_period = ? AND s.city_code = ?
            )
         """,
@@ -55,7 +50,6 @@ public class AuditRecalculationService {
             """
             SELECT s.billing_point_code
               FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
              WHERE s.data_period = ? AND s.city_code = ?
              ORDER BY s.billing_point_code
             """,
@@ -68,6 +62,7 @@ public class AuditRecalculationService {
   }
 
   private void recalculateOne(YearMonth period, String cityCode, String billingPointCode) {
+    SnapshotInfo snapshot = loadSnapshot(period, cityCode, billingPointCode);
     EnergyAndPayment current = loadActual(period, cityCode, billingPointCode);
     BigDecimal benchmarkTotal = loadBenchmarkTotal(period, cityCode, billingPointCode);
     AuditCalculationInput.ReferencePeriod yoy =
@@ -94,7 +89,29 @@ public class AuditRecalculationService {
             yoy,
             mom,
             result);
-    upsert(period, cityCode, billingPointCode, current.actualAmount(), evidence);
+    upsert(period, cityCode, snapshot, current, evidence);
+  }
+
+  private SnapshotInfo loadSnapshot(YearMonth period, String cityCode, String billingPointCode) {
+    return jdbcTemplate.queryForObject(
+        """
+        SELECT billing_point_code, billing_point_name, city_code, district_code,
+               data_period, period_start, period_end
+          FROM billing_point_snapshot
+         WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+        """,
+        (resultSet, rowNumber) ->
+            new SnapshotInfo(
+                resultSet.getString("billing_point_code"),
+                resultSet.getString("billing_point_name"),
+                resultSet.getString("city_code"),
+                resultSet.getString("district_code"),
+                resultSet.getString("data_period"),
+                resultSet.getObject("period_start", LocalDate.class),
+                resultSet.getObject("period_end", LocalDate.class)),
+        period.toString(),
+        cityCode,
+        billingPointCode);
   }
 
   private AuditCalculationInput.ReferencePeriod previousEligibleReference(
@@ -104,7 +121,6 @@ public class AuditRecalculationService {
             """
             SELECT DISTINCT s.data_period
               FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
              WHERE s.city_code = ? AND s.billing_point_code = ? AND s.data_period < ?
              ORDER BY s.data_period DESC
             """,
@@ -140,94 +156,166 @@ public class AuditRecalculationService {
   }
 
   private EnergyAndPayment loadActual(YearMonth period, String cityCode, String billingPointCode) {
-    List<String> meterJson = activeRows("METER_READING", period, cityCode, billingPointCode);
-    BigDecimal actualEnergy = null;
-    if (!meterJson.isEmpty()) {
-      actualEnergy = BigDecimal.ZERO;
-      for (String json : meterJson) {
-        String raw = readMap(json).getOrDefault("分摊后度数", "");
-        if (!raw.isBlank()) {
-          actualEnergy = actualEnergy.add(decimal(raw));
-        }
-      }
-    }
+    BigDecimal actualEnergy =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COALESCE(SUM(allocated_kwh), 0)
+              FROM meter_reading
+             WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+            """,
+            BigDecimal.class,
+            period.toString(),
+            cityCode,
+            billingPointCode);
+    Integer meterCount =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+              FROM meter_reading
+             WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+            """,
+            Integer.class,
+            period.toString(),
+            cityCode,
+            billingPointCode);
 
-    List<String> paymentJson = activeRows("PAYMENT", period, cityCode, billingPointCode);
-    boolean eligible = !paymentJson.isEmpty();
+    List<PaymentStatusAndAmount> payments =
+        jdbcTemplate.query(
+            """
+            SELECT audit_status, actual_report_amount
+              FROM payment_detail
+             WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+            """,
+            (resultSet, rowNumber) ->
+                new PaymentStatusAndAmount(
+                    resultSet.getString("audit_status"),
+                    resultSet.getBigDecimal("actual_report_amount")),
+            period.toString(),
+            cityCode,
+            billingPointCode);
+    boolean hasPayments = !payments.isEmpty();
+    boolean eligible = hasPayments;
     BigDecimal actualAmount = BigDecimal.ZERO;
-    for (String json : paymentJson) {
-      Map<String, String> values = readMap(json);
-      String status = firstNonBlank(values.get("审核结果"), values.get("审核状态"), values.get("当前审核环节"));
-      eligible &= isApproved(status);
-      String amount = values.getOrDefault("实际报账金额", "");
-      if (!amount.isBlank()) {
-        actualAmount = actualAmount.add(decimal(amount));
+    for (PaymentStatusAndAmount payment : payments) {
+      eligible &= isApproved(payment.auditStatus());
+      if (payment.actualAmount() != null) {
+        actualAmount = actualAmount.add(payment.actualAmount());
       }
     }
     return new EnergyAndPayment(
-        actualEnergy,
-        paymentJson.isEmpty() ? null : actualAmount,
-        !paymentJson.isEmpty(),
+        meterCount == null || meterCount == 0 ? null : actualEnergy,
+        hasPayments ? actualAmount : null,
+        payments.size(),
+        hasPayments,
         eligible);
   }
 
   private BigDecimal loadBenchmarkTotal(
       YearMonth period, String cityCode, String billingPointCode) {
-    List<String> records = activeRows("BENCHMARK", period, cityCode, billingPointCode);
-    if (records.size() != 1) {
-      return null;
-    }
-    Map<String, String> values = readMap(records.getFirst());
-    BigDecimal total = BigDecimal.ZERO;
-    for (int day = 1; day <= period.lengthOfMonth(); day++) {
-      String raw = values.getOrDefault(Integer.toString(day), "");
-      if (raw.isBlank()) {
-        return null;
-      }
-      total = total.add(decimal(raw));
-    }
-    return total;
-  }
-
-  private List<String> activeRows(
-      String datasetType, YearMonth period, String cityCode, String billingPointCode) {
-    return jdbcTemplate.queryForList(
-        """
-        SELECT r.values_json
-          FROM imported_record r
-          JOIN import_batch b ON b.id = r.batch_id AND b.status = 'ACTIVE'
-         WHERE r.dataset_type = ? AND r.data_period = ? AND r.city_code = ?
-           AND r.billing_point_code = ? AND r.is_active = TRUE
-         ORDER BY r.id
-        """,
-        String.class,
-        datasetType,
-        period.toString(),
-        cityCode,
-        billingPointCode);
+    return jdbcTemplate.query(
+            """
+            SELECT calculated_day_total
+              FROM benchmark_value
+             WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+            """,
+            (resultSet, rowNumber) -> resultSet.getBigDecimal("calculated_day_total"),
+            period.toString(),
+            cityCode,
+            billingPointCode)
+        .stream()
+        .findFirst()
+        .orElse(null);
   }
 
   private void upsert(
       YearMonth period,
       String cityCode,
-      String billingPointCode,
-      BigDecimal actualAmount,
+      SnapshotInfo snapshot,
+      EnergyAndPayment current,
       AuditEvidence evidence) {
     AuditCalculationResult result = evidence.result();
+    String reportStatus = result.status().name().equals("OVER_LIMIT") ? "WAITING" : "NA";
+    String paymentEligibilityReason =
+        current.hasPayments()
+            ? current.paymentEligible() ? "全部缴费明细审核通过" : "存在未审核通过的缴费明细"
+            : "无缴费明细";
     int updated =
         jdbcTemplate.update(
             """
             UPDATE audit_result
-               SET payment_eligible = ?, actual_energy = ?, actual_amount = ?,
+               SET billing_point_name = ?, district_code = ?, period_start = ?, period_end = ?,
+                   payment_count = ?, payment_eligible = ?, payment_eligibility_reason = ?,
+                   actual_report_amount = ?, actual_total_kwh = ?, current_daily_avg_kwh = ?,
+                   yoy_applicable = ?, yoy_na_reason = ?, yoy_reference_period = ?,
+                   yoy_reference_start = ?, yoy_reference_end = ?, yoy_reference_total_kwh = ?,
+                   yoy_reference_daily_kwh_c = ?, yoy_current_benchmark_avg_a = ?,
+                   yoy_reference_benchmark_avg_b = ?, yoy_factor_k = ?,
+                   yoy_threshold_daily_kwh = ?, yoy_exceed_ratio = ?, yoy_result = ?,
+                   mom_applicable = ?, mom_na_reason = ?, mom_reference_period = ?,
+                   mom_reference_start = ?, mom_reference_end = ?, mom_reference_total_kwh = ?,
+                   mom_reference_daily_kwh_c = ?, mom_current_benchmark_avg_a = ?,
+                   mom_reference_benchmark_avg_b = ?, mom_factor_k = ?,
+                   mom_threshold_daily_kwh = ?, mom_exceed_ratio = ?, mom_result = ?,
+                   rated_applicable = ?, rated_na_reason = ?, rated_total_kwh = ?,
+                   rated_month_avg_kwh = ?, rated_exceed_ratio = ?, rated_result = ?,
+                   audit_status = ?, exceed_type = ?, max_exceed_ratio = ?, report_status = ?,
+                   calculation_detail = ?,
+                   actual_energy = ?, actual_amount = ?,
                    yoy_reference_energy = ?, mom_reference_energy = ?,
                    rated_benchmark_energy = ?, yoy_ratio = ?, mom_ratio = ?, rated_ratio = ?,
-                   max_ratio = ?, audit_status = ?, over_limit_type = ?, detail_json = ?,
+                   max_ratio = ?, over_limit_type = ?, detail_json = ?,
                    calculated_at = CURRENT_TIMESTAMP(3), version = version + 1
              WHERE billing_point_code = ? AND data_period = ?
             """,
-            evidence.currentPaymentEligible(),
+            snapshot.billingPointName(),
+            snapshot.districtCode(),
+            snapshot.periodStart(),
+            snapshot.periodEnd(),
+            current.paymentCount(),
+            current.paymentEligible(),
+            paymentEligibilityReason,
+            current.actualAmount(),
             result.actualEnergy(),
-            actualAmount,
+            result.currentDailyEnergy(),
+            result.yoy().applicable(),
+            notApplicableReason(result.yoy()),
+            referencePeriod(evidence.yoyReference()),
+            referenceStart(evidence.yoyReference()),
+            referenceEnd(evidence.yoyReference()),
+            referenceEnergy(evidence.yoyReference()),
+            referenceDaily(evidence.yoyReference()),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            referenceBenchmarkAverage(evidence.yoyReference()),
+            factorK(evidence.currentBenchmarkTotal(), period, evidence.yoyReference()),
+            result.yoy().threshold(),
+            result.yoy().ratioPercent(),
+            metricStatus(result.yoy()),
+            result.mom().applicable(),
+            notApplicableReason(result.mom()),
+            referencePeriod(evidence.momReference()),
+            referenceStart(evidence.momReference()),
+            referenceEnd(evidence.momReference()),
+            referenceEnergy(evidence.momReference()),
+            referenceDaily(evidence.momReference()),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            referenceBenchmarkAverage(evidence.momReference()),
+            factorK(evidence.currentBenchmarkTotal(), period, evidence.momReference()),
+            result.mom().threshold(),
+            result.mom().ratioPercent(),
+            metricStatus(result.mom()),
+            result.rated().applicable(),
+            notApplicableReason(result.rated()),
+            evidence.currentBenchmarkTotal(),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            result.rated().ratioPercent(),
+            metricStatus(result.rated()),
+            result.status().name(),
+            result.overLimitType().name(),
+            result.maxRatioPercent(),
+            reportStatus,
+            writeJson(evidence),
+            result.actualEnergy(),
+            current.actualAmount(),
             referenceEnergy(evidence.yoyReference()),
             referenceEnergy(evidence.momReference()),
             evidence.currentBenchmarkTotal(),
@@ -235,28 +323,89 @@ public class AuditRecalculationService {
             result.mom().ratioPercent(),
             result.rated().ratioPercent(),
             result.maxRatioPercent(),
-            result.status().name(),
             result.overLimitType().name(),
             writeJson(evidence),
-            billingPointCode,
+            snapshot.billingPointCode(),
             period.toString());
     if (updated == 0) {
       jdbcTemplate.update(
           """
           INSERT INTO audit_result
-            (public_id, billing_point_code, city_code, data_period, payment_eligible,
+            (public_id, billing_point_code, billing_point_name, city_code, district_code,
+             data_period, period_start, period_end,
+             payment_count, payment_eligible, payment_eligibility_reason,
+             actual_report_amount, actual_total_kwh, current_daily_avg_kwh,
+             yoy_applicable, yoy_na_reason, yoy_reference_period, yoy_reference_start,
+             yoy_reference_end, yoy_reference_total_kwh, yoy_reference_daily_kwh_c,
+             yoy_current_benchmark_avg_a, yoy_reference_benchmark_avg_b, yoy_factor_k,
+             yoy_threshold_daily_kwh, yoy_exceed_ratio, yoy_result,
+             mom_applicable, mom_na_reason, mom_reference_period, mom_reference_start,
+             mom_reference_end, mom_reference_total_kwh, mom_reference_daily_kwh_c,
+             mom_current_benchmark_avg_a, mom_reference_benchmark_avg_b, mom_factor_k,
+             mom_threshold_daily_kwh, mom_exceed_ratio, mom_result,
+             rated_applicable, rated_na_reason, rated_total_kwh, rated_month_avg_kwh,
+             rated_exceed_ratio, rated_result,
+             audit_status, exceed_type, max_exceed_ratio, report_status, calculation_detail,
              actual_energy, actual_amount, yoy_reference_energy, mom_reference_energy,
              rated_benchmark_energy, yoy_ratio, mom_ratio, rated_ratio, max_ratio,
-             audit_status, over_limit_type, detail_json)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             over_limit_type, detail_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           UUID.randomUUID().toString(),
-          billingPointCode,
+          snapshot.billingPointCode(),
+          snapshot.billingPointName(),
           cityCode,
+          snapshot.districtCode(),
           period.toString(),
-          evidence.currentPaymentEligible(),
+          snapshot.periodStart(),
+          snapshot.periodEnd(),
+          current.paymentCount(),
+          current.paymentEligible(),
+          paymentEligibilityReason,
+          current.actualAmount(),
           result.actualEnergy(),
-          actualAmount,
+          result.currentDailyEnergy(),
+          result.yoy().applicable(),
+          notApplicableReason(result.yoy()),
+          referencePeriod(evidence.yoyReference()),
+          referenceStart(evidence.yoyReference()),
+          referenceEnd(evidence.yoyReference()),
+          referenceEnergy(evidence.yoyReference()),
+          referenceDaily(evidence.yoyReference()),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          referenceBenchmarkAverage(evidence.yoyReference()),
+          factorK(evidence.currentBenchmarkTotal(), period, evidence.yoyReference()),
+          result.yoy().threshold(),
+          result.yoy().ratioPercent(),
+          metricStatus(result.yoy()),
+          result.mom().applicable(),
+          notApplicableReason(result.mom()),
+          referencePeriod(evidence.momReference()),
+          referenceStart(evidence.momReference()),
+          referenceEnd(evidence.momReference()),
+          referenceEnergy(evidence.momReference()),
+          referenceDaily(evidence.momReference()),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          referenceBenchmarkAverage(evidence.momReference()),
+          factorK(evidence.currentBenchmarkTotal(), period, evidence.momReference()),
+          result.mom().threshold(),
+          result.mom().ratioPercent(),
+          metricStatus(result.mom()),
+          result.rated().applicable(),
+          notApplicableReason(result.rated()),
+          evidence.currentBenchmarkTotal(),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          result.rated().ratioPercent(),
+          metricStatus(result.rated()),
+          result.status().name(),
+          result.overLimitType().name(),
+          result.maxRatioPercent(),
+          reportStatus,
+          writeJson(evidence),
+          result.actualEnergy(),
+          current.actualAmount(),
           referenceEnergy(evidence.yoyReference()),
           referenceEnergy(evidence.momReference()),
           evidence.currentBenchmarkTotal(),
@@ -264,7 +413,6 @@ public class AuditRecalculationService {
           result.mom().ratioPercent(),
           result.rated().ratioPercent(),
           result.maxRatioPercent(),
-          result.status().name(),
           result.overLimitType().name(),
           writeJson(evidence));
     }
@@ -274,12 +422,59 @@ public class AuditRecalculationService {
     return reference == null ? null : reference.actualEnergy();
   }
 
-  private Map<String, String> readMap(String json) {
-    try {
-      return objectMapper.readValue(json, STRING_MAP);
-    } catch (JacksonException exception) {
-      throw new IllegalStateException("Persisted imported row is invalid JSON", exception);
+  private String referencePeriod(AuditCalculationInput.ReferencePeriod reference) {
+    return reference == null ? null : reference.period().toString();
+  }
+
+  private LocalDate referenceStart(AuditCalculationInput.ReferencePeriod reference) {
+    return reference == null ? null : reference.period().atDay(1);
+  }
+
+  private LocalDate referenceEnd(AuditCalculationInput.ReferencePeriod reference) {
+    return reference == null ? null : reference.period().atEndOfMonth();
+  }
+
+  private BigDecimal referenceDaily(AuditCalculationInput.ReferencePeriod reference) {
+    return reference == null
+        ? null
+        : divide(reference.actualEnergy(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
+  }
+
+  private BigDecimal benchmarkAverage(BigDecimal benchmarkTotal, YearMonth period) {
+    return divide(benchmarkTotal, BigDecimal.valueOf(period.lengthOfMonth()));
+  }
+
+  private BigDecimal referenceBenchmarkAverage(AuditCalculationInput.ReferencePeriod reference) {
+    return reference == null
+        ? null
+        : divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
+  }
+
+  private BigDecimal factorK(
+      BigDecimal currentBenchmarkTotal,
+      YearMonth currentPeriod,
+      AuditCalculationInput.ReferencePeriod reference) {
+    BigDecimal currentAverage = benchmarkAverage(currentBenchmarkTotal, currentPeriod);
+    BigDecimal referenceAverage = referenceBenchmarkAverage(reference);
+    if (currentAverage == null || referenceAverage == null || referenceAverage.signum() <= 0) {
+      return null;
     }
+    return currentAverage.divide(referenceAverage, MathContext.DECIMAL128).max(BigDecimal.ONE);
+  }
+
+  private BigDecimal divide(BigDecimal numerator, BigDecimal denominator) {
+    return numerator == null || denominator == null ? null : numerator.divide(denominator, MathContext.DECIMAL128);
+  }
+
+  private String metricStatus(com.threefees.audit.domain.MetricResult metric) {
+    if (!metric.applicable()) {
+      return "NA";
+    }
+    return metric.overLimit() ? "OVER_LIMIT" : "NORMAL";
+  }
+
+  private String notApplicableReason(com.threefees.audit.domain.MetricResult metric) {
+    return metric.applicable() ? null : metric.note();
   }
 
   private String writeJson(Object value) {
@@ -290,34 +485,33 @@ public class AuditRecalculationService {
     }
   }
 
-  private BigDecimal decimal(String value) {
-    return new BigDecimal(value.replace(",", ""));
-  }
-
   private boolean isApproved(String status) {
     if (status == null) {
       return false;
     }
     String normalized = status.trim();
-    return (normalized.contains("通过") || normalized.equalsIgnoreCase("APPROVED"))
-        && !normalized.contains("未")
-        && !normalized.contains("不通过");
-  }
-
-  private String firstNonBlank(String... values) {
-    for (String value : values) {
-      if (value != null && !value.isBlank()) {
-        return value;
-      }
-    }
-    return "";
+    return (normalized.contains("\u901a\u8fc7") || normalized.equalsIgnoreCase("APPROVED"))
+        && !normalized.contains("\u672a")
+        && !normalized.contains("\u4e0d\u901a\u8fc7");
   }
 
   private record EnergyAndPayment(
       BigDecimal actualEnergy,
       BigDecimal actualAmount,
+      int paymentCount,
       boolean hasPayments,
       boolean paymentEligible) {}
+
+  private record PaymentStatusAndAmount(String auditStatus, BigDecimal actualAmount) {}
+
+  private record SnapshotInfo(
+      String billingPointCode,
+      String billingPointName,
+      String cityCode,
+      String districtCode,
+      String dataPeriod,
+      LocalDate periodStart,
+      LocalDate periodEnd) {}
 
   /** Immutable evidence envelope persisted with each calculation for report snapshots and audit. */
   public record AuditEvidence(

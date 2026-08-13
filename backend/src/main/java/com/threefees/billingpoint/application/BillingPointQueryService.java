@@ -99,7 +99,6 @@ public class BillingPointQueryService {
         """
         SELECT s.data_period, s.city_code, c.name AS city_name, s.data_json
           FROM billing_point_snapshot s
-          JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
           JOIN city c ON c.code = s.city_code
          WHERE 1 = 1
         """);
@@ -140,8 +139,6 @@ public class BillingPointQueryService {
                a.max_ratio, a.audit_status, a.over_limit_type,
                d.public_id AS draft_id, r.public_id AS report_id, r.report_number
           FROM billing_point_snapshot s
-          JOIN import_batch active_batch
-            ON active_batch.id = s.source_batch_id AND active_batch.status = 'ACTIVE'
           JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
             ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
@@ -203,12 +200,10 @@ public class BillingPointQueryService {
   private List<String> paymentCodes(String period, String cityCode, String billingPointCode) {
     return jdbcTemplate.queryForList(
         """
-        SELECT DISTINCT r.payment_code
-          FROM imported_record r
-          JOIN import_batch b ON b.id = r.batch_id AND b.status = 'ACTIVE'
-         WHERE r.dataset_type = 'PAYMENT' AND r.data_period = ? AND r.city_code = ?
-           AND r.billing_point_code = ? AND r.is_active = TRUE AND r.payment_code IS NOT NULL
-         ORDER BY r.payment_code
+        SELECT DISTINCT payment_bill_code
+          FROM payment_detail
+         WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+         ORDER BY payment_bill_code
         """,
         String.class,
         period,
@@ -217,27 +212,7 @@ public class BillingPointQueryService {
   }
 
   private List<RecordDetail> records(DatasetType type, SnapshotRow snapshot) {
-    List<RowValue> rows =
-        jdbcTemplate.query(
-            """
-            SELECT r.id, r.payment_code, r.meter_code, r.values_json
-              FROM imported_record r
-              JOIN import_batch b ON b.id = r.batch_id AND b.status = 'ACTIVE'
-             WHERE r.dataset_type = ? AND r.data_period = ? AND r.city_code = ?
-               AND r.billing_point_code = ? AND r.is_active = TRUE
-             ORDER BY r.id
-            """,
-            (resultSet, rowNumber) ->
-                new RowValue(
-                    resultSet.getLong("id"),
-                    resultSet.getString("payment_code"),
-                    resultSet.getString("meter_code"),
-                    resultSet.getString("values_json")),
-            type.name(),
-            snapshot.period(),
-            snapshot.cityCode(),
-            snapshot.billingPointCode());
-    return rows.stream()
+    return formalRows(type, snapshot).stream()
         .map(
             row -> {
               List<FieldValue> fields = fieldValues(type, readMap(row.json()));
@@ -249,6 +224,56 @@ public class BillingPointQueryService {
                   fields);
             })
         .toList();
+  }
+
+  private List<RowValue> formalRows(DatasetType type, SnapshotRow snapshot) {
+    return switch (type) {
+      case PAYMENT ->
+          jdbcTemplate.query(
+              """
+              SELECT id, payment_bill_code AS payment_code, NULL AS meter_code, values_json
+                FROM payment_detail
+               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               ORDER BY id
+              """,
+              this::mapRowValue,
+              snapshot.period(),
+              snapshot.cityCode(),
+              snapshot.billingPointCode());
+      case METER_READING ->
+          jdbcTemplate.query(
+              """
+              SELECT id, payment_bill_code AS payment_code, meter_code, values_json
+                FROM meter_reading
+               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               ORDER BY id
+              """,
+              this::mapRowValue,
+              snapshot.period(),
+              snapshot.cityCode(),
+              snapshot.billingPointCode());
+      case BENCHMARK ->
+          jdbcTemplate.query(
+              """
+              SELECT id, NULL AS payment_code, NULL AS meter_code, values_json
+                FROM benchmark_value
+               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               ORDER BY id
+              """,
+              this::mapRowValue,
+              snapshot.period(),
+              snapshot.cityCode(),
+              snapshot.billingPointCode());
+      case BILLING_POINT -> List.of();
+    };
+  }
+
+  private RowValue mapRowValue(ResultSet resultSet, int rowNumber) throws SQLException {
+    return new RowValue(
+        resultSet.getLong("id"),
+        resultSet.getString("payment_code"),
+        resultSet.getString("meter_code"),
+        resultSet.getString("values_json"));
   }
 
   private List<FieldValue> fieldValues(DatasetType type, Map<String, String> values) {
@@ -303,7 +328,6 @@ public class BillingPointQueryService {
             """
             SELECT s.public_id, s.billing_point_code, s.city_code, s.data_period, s.data_json
               FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
              WHERE s.public_id = ?
             """,
             (resultSet, rowNumber) ->
@@ -348,7 +372,6 @@ public class BillingPointQueryService {
         """
         SELECT MAX(s.data_period)
           FROM billing_point_snapshot s
-          JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
         """
             + (cityScope == null ? "" : " WHERE s.city_code = ?");
     return cityScope == null

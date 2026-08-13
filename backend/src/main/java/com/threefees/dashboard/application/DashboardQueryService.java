@@ -213,8 +213,8 @@ public class DashboardQueryService {
         new StringBuilder(
             """
             SELECT b.public_id, b.dataset_type, b.data_period, b.status, f.original_name,
-                   b.created_at, b.activated_at, b.row_count, b.error_count, b.errors_json
-              FROM import_batch b
+                   b.created_at, b.completed_at AS activated_at, b.row_count, b.error_count, b.errors_json
+              FROM import_job b
               JOIN stored_file f ON f.id = b.source_file_id
              WHERE b.dataset_type = ? AND b.data_period = ? AND b.status = 'ACTIVE'
             """);
@@ -225,7 +225,7 @@ public class DashboardQueryService {
       sql.append(" AND (b.city_code IS NULL OR b.city_code = ?)");
       args.add(cityScope);
     }
-    sql.append(" ORDER BY b.activated_at DESC, b.id DESC LIMIT 1");
+    sql.append(" ORDER BY b.completed_at DESC, b.id DESC LIMIT 1");
     return jdbcTemplate
         .query(sql.toString(), this::mapImportBatch, args.toArray())
         .stream()

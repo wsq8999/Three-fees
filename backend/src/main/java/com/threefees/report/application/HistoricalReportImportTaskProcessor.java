@@ -52,9 +52,7 @@ public class HistoricalReportImportTaskProcessor implements TaskProcessor {
     boolean finalized = false;
     try {
       StoredFile source = storedFileService.find(input.sourceFilePublicId());
-      String text =
-          documentGenerator.extractWordText(
-              storedFileService.readBytes(source), input.originalName());
+      String text = extractWordText(input, source, task.createdBy());
       if (text.isBlank()) {
         throw new TaskExecutionException("HISTORICAL_REPORT_EMPTY", "历史 Word 不包含可预览正文", false);
       }
@@ -88,12 +86,24 @@ public class HistoricalReportImportTaskProcessor implements TaskProcessor {
       throw exception;
     } catch (IllegalArgumentException exception) {
       compensate(pdf, finalized);
-      historicalService.markFailed(input.id(), "HISTORICAL_WORD_INVALID", task.createdBy());
-      throw new TaskExecutionException("HISTORICAL_WORD_INVALID", "历史 Word 无法解析", false);
+      historicalService.markFailed(input.id(), "HISTORICAL_CONVERSION_FAILED", task.createdBy());
+      throw new TaskExecutionException(
+          "HISTORICAL_CONVERSION_FAILED", "Historical report conversion failed", true);
     } catch (RuntimeException exception) {
       compensate(pdf, finalized);
       historicalService.markFailed(input.id(), "HISTORICAL_CONVERSION_FAILED", task.createdBy());
       throw new TaskExecutionException("HISTORICAL_CONVERSION_FAILED", "历史报告转换失败", true);
+    }
+  }
+
+  private String extractWordText(
+      HistoricalReportService.HistoricalTaskInput input, StoredFile source, String actor) {
+    try {
+      return documentGenerator.extractWordText(storedFileService.readBytes(source), input.originalName());
+    } catch (IllegalArgumentException exception) {
+      historicalService.markFailed(input.id(), "HISTORICAL_WORD_INVALID", actor);
+      throw new TaskExecutionException(
+          "HISTORICAL_WORD_INVALID", "Historical Word could not be parsed", false);
     }
   }
 

@@ -10,6 +10,7 @@ import type {
   DatasetType,
   DraftBlock,
   DraftIntent,
+  HistoricalReportCandidate,
   ImportBatch,
   ManagedUser,
   PageResult,
@@ -277,10 +278,12 @@ function makeBillingPoint(
   cityCode: string,
   status: AuditStatus,
   name: string,
+  period = "2026-06",
+  codeIndex = index,
 ): BillingPointDetail {
   const pointCity = city(cityCode);
   const id = `bp-${index}`;
-  const code = `${cityCode}-BP-${String(index).padStart(4, "0")}`;
+  const code = `${cityCode}-BP-${String(codeIndex).padStart(4, "0")}`;
   const actual =
     status === "NOT_APPLICABLE" ? null : `${12850 + index * 137}.36`;
   const benchmark =
@@ -303,7 +306,7 @@ function makeBillingPoint(
       code,
       name,
       city: pointCity,
-      period: "2026-06",
+      period,
       address: `${pointCity.name}鼓楼区示范路 ${index} 号`,
       electricityCategory: index % 2 === 0 ? "商业用电" : "公共服务用电",
       paymentEligibility: eligible ? "ELIGIBLE" : "PENDING",
@@ -731,6 +734,46 @@ function initialReports(): ReportSummary[] {
       corrections: [],
     },
     {
+      id: "report-3",
+      reportNumber: "BG-202605-000003",
+      billingPointId: "bp-13",
+      billingPointCode: point.summary.code,
+      billingPointName: point.summary.name,
+      city: point.summary.city,
+      period: "2026-05",
+      status: "FINAL",
+      source: "SYSTEM",
+      generatedAt: "2026-06-12T15:20:00+08:00",
+      correctedAt: null,
+      correctionCount: 0,
+      wordFileName: "BG-202605-000003.docx",
+      pdfFileName: "BG-202605-000003.pdf",
+      summary: "该报账点 2026-05 已生成正式报告。",
+      archivedAudit: clone(point.audit.comparisons),
+      latestAudit: clone(point.audit.comparisons),
+      corrections: [],
+    },
+    {
+      id: "report-4",
+      reportNumber: "BG-202603-000004",
+      billingPointId: "bp-11",
+      billingPointCode: point.summary.code,
+      billingPointName: point.summary.name,
+      city: point.summary.city,
+      period: "2026-03",
+      status: "FINAL",
+      source: "SYSTEM",
+      generatedAt: "2026-04-12T15:20:00+08:00",
+      correctedAt: null,
+      correctionCount: 0,
+      wordFileName: "BG-202603-000004.docx",
+      pdfFileName: "BG-202603-000004.pdf",
+      summary: "该报账点 2026-03 已生成正式报告。",
+      archivedAudit: clone(point.audit.comparisons),
+      latestAudit: clone(point.audit.comparisons),
+      corrections: [],
+    },
+    {
       id: "report-2",
       reportNumber: "BG-202505-000012",
       billingPointId: "bp-2",
@@ -757,6 +800,9 @@ function initialState(): ScenarioSnapshot {
   return {
     imports: initialImports(),
     billingPoints: [
+      makeBillingPoint(11, "320100", "OVER_LIMIT", "南京中心广场", "2026-03", 1),
+      makeBillingPoint(12, "320100", "OVER_LIMIT", "南京中心广场", "2026-04", 1),
+      makeBillingPoint(13, "320100", "OVER_LIMIT", "南京中心广场", "2026-05", 1),
       makeBillingPoint(1, "320100", "OVER_LIMIT", "南京中心广场"),
       makeBillingPoint(2, "320100", "OVER_LIMIT", "南京科创园"),
       makeBillingPoint(3, "320100", "OVER_LIMIT", "南京滨江商务楼"),
@@ -868,9 +914,12 @@ export interface ScenarioStore {
   generateFormalReport(draftId: string): ReportSummary;
   listReports(query: ReportQuery): PageResult<ReportSummary>;
   getReport(id: string): ReportSummary | undefined;
+  listHistoricalCandidates(query: {
+    cityCode: string;
+    keyword: string;
+  }): HistoricalReportCandidate[];
   importHistoricalReport(input: {
-    billingPointId: string;
-    period: string;
+    billingPointPeriodId: string;
     fileName: string;
   }): ReportSummary;
   correctReport(
@@ -971,7 +1020,8 @@ export function createScenarioStore(): ScenarioStore {
       return found === undefined ? undefined : clone(found);
     },
     createImport(input) {
-      if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(input.period)) {
+      const period = input.period ?? "2026-06";
+      if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(period)) {
         throw new Error("IMPORT_PERIOD_INVALID");
       }
       if (!/\.(?:xlsx|xls|csv)$/i.test(input.fileName)) {
@@ -980,6 +1030,7 @@ export function createScenarioStore(): ScenarioStore {
       const batch: ImportBatch = {
         id: `batch-${++sequence}`,
         ...input,
+        period,
         status: "PROCESSING",
         createdAt: now(),
         completedAt: null,
@@ -1318,31 +1369,77 @@ export function createScenarioStore(): ScenarioStore {
       const found = state.reports.find((item) => item.id === id);
       return found === undefined ? undefined : clone(found);
     },
+    listHistoricalCandidates(query) {
+      const keyword = query.keyword.trim().toLowerCase();
+      const filtered = state.billingPoints
+        .map((item) => item.summary)
+        .filter(
+          (item) =>
+            (query.cityCode.length === 0 ||
+              item.city.code === query.cityCode) &&
+            !state.reports.some(
+              (report) =>
+                report.billingPointCode === item.code &&
+                report.period === item.period,
+            ) &&
+            (keyword.length === 0 ||
+              [item.code, item.name].some((value) =>
+                value.toLowerCase().includes(keyword),
+              )),
+        )
+        .map(
+          (item): HistoricalReportCandidate => ({
+            billingPointPeriodId: item.id,
+            billingPointCode: item.code,
+            billingPointName: item.name,
+            cityCode: item.city.code,
+            cityName: item.city.name,
+            period: item.period,
+            overLimitType: item.overLimitType,
+            maxRatio: item.deviationRate,
+          }),
+        )
+        .sort(
+          (left, right) =>
+            left.billingPointCode.localeCompare(right.billingPointCode) ||
+            right.period.localeCompare(left.period),
+        );
+      return clone(filtered);
+    },
     importHistoricalReport(input) {
-      if (!/\.docx$/i.test(input.fileName))
+      if (!/\.docx?$/i.test(input.fileName))
         throw new Error("HISTORICAL_FILE_TYPE_INVALID");
       const point = state.billingPoints.find(
-        (item) => item.summary.id === input.billingPointId,
+        (item) => item.summary.id === input.billingPointPeriodId,
       );
       if (point === undefined) throw new Error("BILLING_POINT_NOT_FOUND");
-      const reportNumber = `BG-${input.period.replace("-", "")}-${String(
+      if (
+        state.reports.some(
+          (report) =>
+            report.billingPointCode === point.summary.code &&
+            report.period === point.summary.period,
+        )
+      ) {
+        throw new Error("HISTORICAL_REPORT_ALREADY_EXISTS");
+      }
+      const reportNumber = `BG-${point.summary.period.replace("-", "")}-${String(
         state.reports.length + 1,
       ).padStart(6, "0")}`;
       const report: ReportSummary = {
         id: `report-${++sequence}`,
         reportNumber,
-        billingPointId: input.billingPointId,
+        billingPointId: input.billingPointPeriodId,
         billingPointCode: point.summary.code,
         billingPointName: point.summary.name,
         city: clone(point.summary.city),
-        period: input.period,
+        period: point.summary.period,
         status: "HISTORICAL_IMPORTED",
         source: "HISTORICAL_IMPORT",
         generatedAt: now(),
         correctedAt: null,
         correctionCount: 0,
         wordFileName: input.fileName,
-        pdfFileName: input.fileName.replace(/\.docx$/i, ".pdf"),
+        pdfFileName: input.fileName.replace(/\.docx?$/i, ".pdf"),
         summary: "历史 Word 文件已保留，并生成 PDF 预览。",
         archivedAudit: [],
         latestAudit: [],

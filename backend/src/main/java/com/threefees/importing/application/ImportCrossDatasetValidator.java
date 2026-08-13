@@ -1,7 +1,6 @@
 package com.threefees.importing.application;
 
 import com.threefees.importing.application.ImportBatchRepository.ImportedRow;
-import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportError;
 import java.util.ArrayList;
@@ -42,21 +41,21 @@ public class ImportCrossDatasetValidator {
     for (ImportedRow row : rows) {
       incomingPairs.add(pair(row.billingPointCode(), row.paymentCode()));
     }
-    for (ReferenceRow meter : activeReferences(batch, DatasetType.METER_READING)) {
+    for (ReferenceRow meter : meterReferences(batch)) {
       if (!incomingPairs.contains(pair(meter.billingPointCode(), meter.paymentCode()))) {
         add(
             errors,
             0,
             "缴费单编码",
             "ACTIVE_METER_PAYMENT_MISSING",
-            "当前有效电表读数仍引用将被移除的缴费单：" + meter.paymentCode());
+            "当前有效电表读数仍引用将被替换的缴费单：" + meter.paymentCode());
       }
     }
   }
 
   private void validateMeters(ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
     Set<String> activePayments = new HashSet<>();
-    for (ReferenceRow payment : activeReferences(batch, DatasetType.PAYMENT)) {
+    for (ReferenceRow payment : paymentReferences(batch)) {
       activePayments.add(pair(payment.billingPointCode(), payment.paymentCode()));
     }
     for (ImportedRow row : rows) {
@@ -66,22 +65,22 @@ public class ImportCrossDatasetValidator {
             row.sourceRow(),
             "缴费单编码",
             "PAYMENT_REFERENCE_NOT_FOUND",
-            "同城市同账期不存在对应报账点的当前有效缴费单");
+            "同城市同账期不存在对应报账点的缴费单");
       }
     }
   }
 
   private void validateBillingPointReferences(
       ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
-    Set<String> activePoints = activeBillingPointCodes(batch);
+    Set<String> knownPoints = knownBillingPointCodes(batch);
     for (ImportedRow row : rows) {
-      if (!activePoints.contains(row.billingPointCode())) {
+      if (!knownPoints.contains(row.billingPointCode())) {
         add(
             errors,
             row.sourceRow(),
             "报账点编码",
             "BILLING_POINT_REFERENCE_NOT_FOUND",
-            "同城市同账期不存在当前有效报账点清单记录");
+            "同城市不存在已导入的报账点主数据");
       }
     }
   }
@@ -90,48 +89,93 @@ public class ImportCrossDatasetValidator {
       ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
     Set<String> incoming = new HashSet<>();
     rows.forEach(row -> incoming.add(row.billingPointCode()));
-    for (DatasetType dependent :
-        List.of(DatasetType.PAYMENT, DatasetType.METER_READING, DatasetType.BENCHMARK)) {
-      for (ReferenceRow reference : activeReferences(batch, dependent)) {
-        if (!incoming.contains(reference.billingPointCode())) {
-          add(
-              errors,
-              0,
-              "报账点编码",
-              "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
-              dependent + " 当前有效批次仍引用将被移除的报账点：" + reference.billingPointCode());
-        }
+    for (ReferenceRow reference : paymentReferences(batch)) {
+      if (!incoming.contains(reference.billingPointCode())) {
+        add(
+            errors,
+            0,
+            "报账点编码",
+            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
+            "当前有效缴费明细仍引用将被移除的报账点：" + reference.billingPointCode());
+      }
+    }
+    for (ReferenceRow reference : meterReferences(batch)) {
+      if (!incoming.contains(reference.billingPointCode())) {
+        add(
+            errors,
+            0,
+            "报账点编码",
+            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
+            "当前有效电表读数仍引用将被移除的报账点：" + reference.billingPointCode());
+      }
+    }
+    for (ReferenceRow reference : benchmarkReferences(batch)) {
+      if (!incoming.contains(reference.billingPointCode())) {
+        add(
+            errors,
+            0,
+            "报账点编码",
+            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
+            "当前有效标杆值仍引用将被移除的报账点：" + reference.billingPointCode());
       }
     }
   }
 
-  private Set<String> activeBillingPointCodes(ImportBatch batch) {
+  private Set<String> knownBillingPointCodes(ImportBatch batch) {
     return new HashSet<>(
         jdbcTemplate.queryForList(
             """
-            SELECT r.billing_point_code
-              FROM imported_record r
-              JOIN import_batch b ON b.id=r.batch_id AND b.status='ACTIVE'
-             WHERE r.dataset_type='BILLING_POINT' AND r.data_period=? AND r.city_code=?
-               AND r.is_active=TRUE
+            SELECT billing_point_code
+              FROM billing_point_master
+             WHERE city_code = ?
+            UNION
+            SELECT billing_point_code
+              FROM billing_point_snapshot
+             WHERE city_code = ?
             """,
             String.class,
-            batch.period(),
+            batch.cityCode(),
             batch.cityCode()));
   }
 
-  private List<ReferenceRow> activeReferences(ImportBatch batch, DatasetType type) {
+  private List<ReferenceRow> paymentReferences(ImportBatch batch) {
     return jdbcTemplate.query(
         """
-        SELECT r.billing_point_code, r.payment_code
-          FROM imported_record r
-          JOIN import_batch b ON b.id=r.batch_id AND b.status='ACTIVE'
-         WHERE r.dataset_type=? AND r.data_period=? AND r.city_code=? AND r.is_active=TRUE
+        SELECT billing_point_code, payment_bill_code
+          FROM payment_detail
+         WHERE data_period = ? AND city_code = ?
         """,
         (resultSet, rowNumber) ->
             new ReferenceRow(
-                resultSet.getString("billing_point_code"), resultSet.getString("payment_code")),
-        type.name(),
+                resultSet.getString("billing_point_code"),
+                resultSet.getString("payment_bill_code")),
+        batch.period(),
+        batch.cityCode());
+  }
+
+  private List<ReferenceRow> meterReferences(ImportBatch batch) {
+    return jdbcTemplate.query(
+        """
+        SELECT billing_point_code, payment_bill_code
+          FROM meter_reading
+         WHERE data_period = ? AND city_code = ?
+        """,
+        (resultSet, rowNumber) ->
+            new ReferenceRow(
+                resultSet.getString("billing_point_code"),
+                resultSet.getString("payment_bill_code")),
+        batch.period(),
+        batch.cityCode());
+  }
+
+  private List<ReferenceRow> benchmarkReferences(ImportBatch batch) {
+    return jdbcTemplate.query(
+        """
+        SELECT billing_point_code, NULL AS payment_bill_code
+          FROM benchmark_value
+         WHERE data_period = ? AND city_code = ?
+        """,
+        (resultSet, rowNumber) -> new ReferenceRow(resultSet.getString("billing_point_code"), null),
         batch.period(),
         batch.cityCode());
   }

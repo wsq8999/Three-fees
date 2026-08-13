@@ -9,13 +9,18 @@ import { businessApi, saveBlob } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type {
-  BillingPointDetail,
   BusinessCity,
+  HistoricalReportCandidate,
   PageResult,
   ReportSummary,
 } from "@/types/business";
 
-type BillingSummary = BillingPointDetail["summary"];
+interface ImportPointOption {
+  key: string;
+  code: string;
+  name: string;
+  cityName: string;
+}
 
 const route = useRoute();
 const router = useRouter();
@@ -26,15 +31,16 @@ const downloadingId = ref("");
 const errorMessage = ref("");
 const pageData = ref<PageResult<ReportSummary> | null>(null);
 const optionReports = ref<ReportSummary[]>([]);
-const billingPoints = ref<BillingSummary[]>([]);
+const historicalCandidates = ref<HistoricalReportCandidate[]>([]);
+const importOptionsLoading = ref(false);
 const importVisible = ref(false);
 const importError = ref("");
 const selectedRows = ref<ReportSummary[]>([]);
 const tableRef = ref<TableInstance>();
 
 const importForm = reactive({
-  billingPointId: "",
-  period: "",
+  billingPointKey: "",
+  billingPointPeriodId: "",
   file: null as File | null,
 });
 
@@ -71,6 +77,29 @@ const districtOptions = computed(() =>
       .map((item) => item.district ?? ""),
   ),
 );
+const importPointOptions = computed<ImportPointOption[]>(() => {
+  const map = new Map<string, ImportPointOption>();
+  for (const item of historicalCandidates.value) {
+    const key = importPointKey(item);
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        code: item.billingPointCode,
+        name: item.billingPointName,
+        cityName: item.cityName,
+      });
+    }
+  }
+  return Array.from(map.values()).sort((left, right) =>
+    left.code.localeCompare(right.code),
+  );
+});
+const importPeriodOptions = computed(() =>
+  historicalCandidates.value
+    .filter((item) => importPointKey(item) === importForm.billingPointKey)
+    .slice()
+    .sort((left, right) => right.period.localeCompare(left.period)),
+);
 const range = computed(() => {
   const total = pageData.value?.totalElements ?? 0;
   if (total === 0) return "已显示 0-0 条，共 0 条";
@@ -81,6 +110,18 @@ const range = computed(() => {
 
 function uniqueOptions(values: string[]): string[] {
   return Array.from(new Set(values.filter((value) => value.length > 0)));
+}
+
+function hasText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function importPointKey(candidate: HistoricalReportCandidate): string {
+  return [
+    candidate.cityCode,
+    candidate.billingPointCode,
+    candidate.billingPointName,
+  ].join("|");
 }
 
 function reportQuery(page = filters.page, size = filters.size) {
@@ -155,17 +196,81 @@ function reset(): void {
 async function openImport(): Promise<void> {
   if (!canImport.value) return;
   importError.value = "";
-  Object.assign(importForm, { billingPointId: "", period: "", file: null });
-  const result = await businessApi.billingPoints.list({
-    cityCode: session.currentUser?.city?.code ?? "",
-    period: "",
-    keyword: "",
-    auditStatus: "",
-    page: 1,
-    size: 100,
+  Object.assign(importForm, {
+    billingPointKey: "",
+    billingPointPeriodId: "",
+    file: null,
   });
-  billingPoints.value = result.items;
+  historicalCandidates.value = [];
   importVisible.value = true;
+  importOptionsLoading.value = true;
+  try {
+    historicalCandidates.value = await businessApi.reports.listHistoricalCandidates({
+      cityCode: session.currentUser?.city?.code ?? "",
+      keyword: "",
+    });
+  } catch (error) {
+    importError.value =
+      error instanceof Error ? error.message : "历史报告候选账期加载失败";
+  } finally {
+    importOptionsLoading.value = false;
+  }
+}
+
+function importPointChanged(): void {
+  importForm.billingPointPeriodId = "";
+  importError.value = "";
+}
+
+function importPeriodChanged(): void {
+  importError.value = "";
+}
+
+async function searchImportCandidates(keyword: string): Promise<void> {
+  importOptionsLoading.value = true;
+  try {
+    historicalCandidates.value = await businessApi.reports.listHistoricalCandidates({
+      cityCode: session.currentUser?.city?.code ?? "",
+      keyword,
+    });
+    if (
+      hasText(importForm.billingPointKey) &&
+      !importPointOptions.value.some((item) => item.key === importForm.billingPointKey)
+    ) {
+      importPointChanged();
+      importForm.billingPointKey = "";
+    }
+  } catch (error) {
+    importError.value =
+      error instanceof Error ? error.message : "历史报告候选账期加载失败";
+  } finally {
+    importOptionsLoading.value = false;
+  }
+}
+
+function pointOptionLabel(point: ImportPointOption): string {
+  return `${point.code}｜${point.name}｜${point.cityName}`;
+}
+
+function periodOptionLabel(candidate: HistoricalReportCandidate): string {
+  return candidate.period;
+}
+
+function noPeriodPlaceholder(): string {
+  if (!hasText(importForm.billingPointKey)) return "请先选择报账点";
+  return importOptionsLoading.value ? "正在加载账期" : "该报账点暂无缺失报告账期";
+}
+
+function removeFile(): void {
+  importForm.file = null;
+}
+
+function canSubmitImport(): boolean {
+  return (
+    hasText(importForm.billingPointKey) &&
+    hasText(importForm.billingPointPeriodId) &&
+    importForm.file !== null
+  );
 }
 
 function fileChanged(file: UploadFile): void {
@@ -182,25 +287,31 @@ function fileChanged(file: UploadFile): void {
 
 async function importHistorical(): Promise<void> {
   importError.value = "";
-  if (
-    importForm.billingPointId.length === 0 ||
-    importForm.period.length === 0 ||
-    importForm.file === null
-  ) {
+  const file = importForm.file;
+  if (!canSubmitImport() || file === null) {
     importError.value = "请选择报账点、账期和 Word 文件。";
     return;
   }
 
   importing.value = true;
   try {
-    await businessApi.reports.importHistorical({
-      billingPointId: importForm.billingPointId,
-      period: importForm.period,
-      file: importForm.file,
+    const imported = await businessApi.reports.importHistorical({
+      billingPointPeriodId: importForm.billingPointPeriodId,
+      file,
     });
     importVisible.value = false;
     await loadOptions();
-    await load();
+    Object.assign(filters, {
+      keyword: "",
+      period: imported.period,
+      cityCode: cityLocked.value
+        ? (session.currentUser?.city?.code ?? "")
+        : imported.city.code,
+      district: "",
+      source: "",
+      page: 1,
+    });
+    await syncRouteAndLoad();
     ElMessage.success("历史报告已导入");
   } catch (error) {
     importError.value =
@@ -530,41 +641,61 @@ onMounted(async () => {
         <div class="import-fields">
           <ElFormItem label="报账点编码 *">
             <ElSelect
-              v-model="importForm.billingPointId"
+              v-model="importForm.billingPointKey"
               filterable
+              remote
+              :remote-method="searchImportCandidates"
+              :loading="importOptionsLoading"
               placeholder="请选择报账点编码"
+              no-data-text="暂无缺失正式报告的报账点"
+              @change="importPointChanged"
             >
               <ElOption
-                v-for="point in billingPoints"
-                :key="point.id"
+                v-for="point in importPointOptions"
+                :key="point.key"
                 :label="point.code"
-                :value="point.id"
+                :value="point.key"
               />
             </ElSelect>
           </ElFormItem>
           <ElFormItem label="报账点名称 *">
             <ElSelect
-              v-model="importForm.billingPointId"
+              v-model="importForm.billingPointKey"
               filterable
+              remote
+              :remote-method="searchImportCandidates"
+              :loading="importOptionsLoading"
               placeholder="请选择报账点名称"
+              no-data-text="暂无缺失正式报告的报账点"
+              @change="importPointChanged"
             >
               <ElOption
-                v-for="point in billingPoints"
-                :key="point.id"
-                :label="point.name"
-                :value="point.id"
+                v-for="point in importPointOptions"
+                :key="point.key"
+                :label="pointOptionLabel(point)"
+                :value="point.key"
               />
             </ElSelect>
           </ElFormItem>
         </div>
         <ElFormItem label="账期 *">
-          <ElDatePicker
-            v-model="importForm.period"
-            type="month"
-            value-format="YYYY-MM"
-            format="YYYY年MM月"
-            placeholder="请选择账期"
-          />
+          <ElSelect
+            v-model="importForm.billingPointPeriodId"
+            :disabled="
+              !hasText(importForm.billingPointKey) ||
+              importPeriodOptions.length === 0
+            "
+            :placeholder="noPeriodPlaceholder()"
+            no-data-text="该报账点暂无缺失报告账期"
+            @change="importPeriodChanged"
+          >
+            <ElOption
+              v-for="candidate in importPeriodOptions"
+              :key="candidate.billingPointPeriodId"
+              :label="periodOptionLabel(candidate)"
+              :value="candidate.billingPointPeriodId"
+            />
+          </ElSelect>
         </ElFormItem>
       </ElForm>
     </section>
@@ -577,7 +708,7 @@ onMounted(async () => {
         :limit="1"
         accept=".doc,.docx"
         :on-change="fileChanged"
-        :on-remove="() => (importForm.file = null)"
+        :on-remove="removeFile"
       >
         <div class="upload-box">
           <span class="file-icon">W</span>

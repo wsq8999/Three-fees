@@ -44,7 +44,7 @@ class ImportCommandServiceIntegrationTest {
             "text/csv",
             "报账点编码\nE2E-BP-0001\n".getBytes(StandardCharsets.UTF_8));
 
-    var batch =
+    var batches =
         commandService.submit(
             DatasetType.BILLING_POINT,
             "2026-06",
@@ -52,6 +52,7 @@ class ImportCommandServiceIntegrationTest {
             upload,
             UUID.randomUUID().toString(),
             administrator());
+    var batch = batches.getFirst();
 
     assertThat(batch.status()).isEqualTo(ImportBatchStatus.QUEUED);
     assertThat(batch.taskPublicId()).isNotBlank();

@@ -93,7 +93,6 @@ public class ReportDraftService {
     if (key == null) {
       throw new IllegalStateException("Draft key was not generated");
     }
-    insertVersion(key.longValue(), 0, "INITIAL", sections, List.of(), actor.username());
     return find(publicId, actor);
   }
 
@@ -184,25 +183,9 @@ public class ReportDraftService {
                   .toList()
               : draft.currentImageFileIds();
       updateDraft(draft.id(), updated, nextImages, version, actor.username(), expectedVersion);
-      insertVersion(draft.id(), version, normalizedIntent, updated, nextImages, actor.username());
     } else {
       lockVersion(draft.id(), expectedVersion);
     }
-    jdbcTemplate.update(
-        """
-        INSERT INTO report_draft_message
-          (public_id, draft_id, intent, user_content, assistant_content,
-           changed_draft, image_file_ids_json, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        UUID.randomUUID().toString(),
-        draft.id(),
-        normalizedIntent,
-        safeInstruction,
-        answer,
-        changed,
-        writeJson(safeImageIds),
-        actor.username());
     return find(publicId, actor);
   }
 
@@ -236,33 +219,21 @@ public class ReportDraftService {
     if (updated != 1) {
       throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
     }
-    insertVersion(draft.id(), nextVersion, "MANUAL", sections, List.of(), actor.username());
     return find(publicId, actor);
   }
 
   @Transactional(readOnly = true)
   public List<DraftVersion> versions(String publicId, CurrentUser actor) {
     Draft draft = find(publicId, actor);
-    return jdbcTemplate.query(
-        """
-        SELECT public_id, version_no, change_type, title, situation, analysis,
-               rectification, image_file_ids_json, created_at, created_by
-          FROM report_draft_version WHERE draft_id = ? ORDER BY version_no DESC, id DESC
-        """,
-        (resultSet, rowNumber) ->
-            new DraftVersion(
-                resultSet.getString("public_id"),
-                resultSet.getInt("version_no"),
-                resultSet.getString("change_type"),
-                new ReportSections(
-                    resultSet.getString("title"),
-                    resultSet.getString("situation"),
-                    resultSet.getString("analysis"),
-                    resultSet.getString("rectification")),
-                readStringList(resultSet.getString("image_file_ids_json")),
-                resultSet.getObject("created_at", LocalDateTime.class),
-                resultSet.getString("created_by")),
-        draft.id());
+    return List.of(
+        new DraftVersion(
+            draft.publicId(),
+            draft.currentVersion(),
+            "CURRENT",
+            draft.sections(),
+            draft.currentImageFileIds(),
+            draft.updatedAt(),
+            actor.username()));
   }
 
   @Transactional
@@ -270,33 +241,11 @@ public class ReportDraftService {
       String publicId, String versionPublicId, long expectedVersion, CurrentUser actor) {
     Draft draft = find(publicId, actor);
     ensureEditable(draft);
-    if (draft.entityVersion() != expectedVersion) {
-      throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
+    requireExpectedVersion(draft, expectedVersion);
+    if (!draft.publicId().equals(versionPublicId)) {
+      throw new ResourceNotFoundException("?????");
     }
-    DraftVersion selected =
-        versions(publicId, actor).stream()
-            .filter(version -> version.id().equals(versionPublicId))
-            .findFirst()
-            .orElseThrow(() -> new ResourceNotFoundException("工作稿版本"));
-    if (selected.version() == draft.currentVersion()) {
-      throw new ResourceConflictException("DRAFT_VERSION_ALREADY_CURRENT", "当前版本无需恢复");
-    }
-    int nextVersion = draft.currentVersion() + 1;
-    updateDraft(
-        draft.id(),
-        selected.sections(),
-        selected.imageFileIds(),
-        nextVersion,
-        actor.username(),
-        expectedVersion);
-    insertVersion(
-        draft.id(),
-        nextVersion,
-        "RESTORE",
-        selected.sections(),
-        selected.imageFileIds(),
-        actor.username());
-    return find(publicId, actor);
+    return draft;
   }
 
   public String uploadImage(String publicId, MultipartFile image, CurrentUser actor) {
@@ -370,32 +319,6 @@ public class ReportDraftService {
     return statement;
   }
 
-  private void insertVersion(
-      long draftId,
-      int version,
-      String changeType,
-      ReportSections sections,
-      List<String> imageFileIds,
-      String actor) {
-    jdbcTemplate.update(
-        """
-        INSERT INTO report_draft_version
-          (public_id, draft_id, version_no, change_type, title, situation, analysis,
-           rectification, image_file_ids_json, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        UUID.randomUUID().toString(),
-        draftId,
-        version,
-        changeType,
-        sections.title(),
-        sections.situation(),
-        sections.analysis(),
-        sections.rectification(),
-        writeJson(imageFileIds),
-        actor);
-  }
-
   private void updateDraft(
       long draftId,
       ReportSections sections,
@@ -464,7 +387,7 @@ public class ReportDraftService {
                     resultSet.getInt("current_version_no"),
                     readStringList(resultSet.getString("current_image_file_ids_json")),
                     resultSet.getString("formal_report_public_id"),
-                    messages(resultSet.getLong("id")),
+                    List.of(),
                     resultSet.getObject("created_at", LocalDateTime.class),
                     resultSet.getObject("updated_at", LocalDateTime.class),
                     resultSet.getLong("version")),
@@ -472,25 +395,6 @@ public class ReportDraftService {
         .stream()
         .findFirst()
         .orElseThrow(() -> new ResourceNotFoundException("报告工作稿"));
-  }
-
-  private List<DraftMessage> messages(long draftId) {
-    return jdbcTemplate.query(
-        """
-        SELECT public_id, intent, user_content, assistant_content, changed_draft,
-               image_file_ids_json, created_at
-          FROM report_draft_message WHERE draft_id = ? ORDER BY created_at, id
-        """,
-        (resultSet, rowNumber) ->
-            new DraftMessage(
-                resultSet.getString("public_id"),
-                resultSet.getString("intent"),
-                resultSet.getString("user_content"),
-                resultSet.getString("assistant_content"),
-                resultSet.getBoolean("changed_draft"),
-                readStringList(resultSet.getString("image_file_ids_json")),
-                resultSet.getObject("created_at", LocalDateTime.class)),
-        draftId);
   }
 
   private Snapshot snapshot(String publicId) {
@@ -501,7 +405,6 @@ public class ReportDraftService {
                    s.city_code, s.data_period, COALESCE(a.audit_status, 'NOT_APPLICABLE') audit_status,
                    r.public_id AS report_id
               FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
               LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
