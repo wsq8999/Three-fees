@@ -6,16 +6,12 @@ import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
 import com.threefees.importing.domain.ImportError;
 import java.sql.PreparedStatement;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.YearMonth;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.stereotype.Repository;
-import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
@@ -48,10 +44,10 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
           PreparedStatement statement =
               connection.prepareStatement(
                   """
-                  INSERT INTO import_batch
+                  INSERT INTO import_job
                     (public_id, dataset_type, data_period, city_code, status, source_file_id,
-                     task_public_id, errors_json, created_by, updated_by)
-                  VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, '[]', ?, ?)
+                     task_public_id, row_count, error_count, errors_json, created_by, updated_by)
+                  VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, 0, 0, '[]', ?, ?)
                   """,
                   new String[] {"id"});
           statement.setString(1, publicId);
@@ -93,7 +89,7 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
 
   @Override
   public long count(DatasetType datasetType, String period, String cityCode) {
-    var sql = new StringBuilder("SELECT COUNT(*) FROM import_batch WHERE 1 = 1");
+    var sql = new StringBuilder("SELECT COUNT(*) FROM import_job WHERE 1 = 1");
     var arguments = new java.util.ArrayList<>();
     appendFilters(sql, arguments, datasetType, period, cityCode);
     Long result = jdbcTemplate.queryForObject(sql.toString(), Long.class, arguments.toArray());
@@ -103,17 +99,14 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   @Override
   public boolean prerequisitesActive(ImportBatch batch) {
     for (DatasetType prerequisite : batch.datasetType().prerequisites()) {
-      Integer count =
-          jdbcTemplate.queryForObject(
-              """
-              SELECT COUNT(*) FROM import_batch
-               WHERE dataset_type = ? AND data_period = ? AND city_code = ? AND status = 'ACTIVE'
-              """,
-              Integer.class,
-              prerequisite.name(),
-              batch.period(),
-              batch.cityCode());
-      if (count == null || count == 0) {
+      boolean ready =
+          switch (prerequisite) {
+            case BILLING_POINT -> hasKnownBillingPoints(batch.cityCode());
+            case PAYMENT -> hasRows("payment_detail", batch.cityCode(), batch.period());
+            case METER_READING -> hasRows("meter_reading", batch.cityCode(), batch.period());
+            case BENCHMARK -> hasRows("benchmark_value", batch.cityCode(), batch.period());
+          };
+      if (!ready) {
         return false;
       }
     }
@@ -121,10 +114,111 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   }
 
   @Override
+  public Optional<String> findActiveCityForPayment(
+      String period, String billingPointCode, String paymentCode) {
+    if (period == null
+        || period.isBlank()
+        || billingPointCode == null
+        || billingPointCode.isBlank()
+        || paymentCode == null
+        || paymentCode.isBlank()) {
+      return Optional.empty();
+    }
+    return jdbcTemplate
+        .queryForList(
+            """
+            SELECT DISTINCT city_code
+              FROM payment_detail
+             WHERE data_period = ? AND billing_point_code = ? AND payment_bill_code = ?
+             ORDER BY city_code
+             LIMIT 2
+            """,
+            String.class,
+            period,
+            billingPointCode,
+            paymentCode)
+        .stream()
+        .findFirst();
+  }
+
+  @Override
+  public Optional<String> findActiveCityForBillingPoint(String period, String billingPointCode) {
+    if (billingPointCode == null || billingPointCode.isBlank()) {
+      return Optional.empty();
+    }
+    if (period != null && !period.isBlank()) {
+      Optional<String> samePeriod =
+          jdbcTemplate
+              .queryForList(
+                  """
+                  SELECT DISTINCT city_code
+                    FROM billing_point_snapshot
+                   WHERE data_period = ? AND billing_point_code = ?
+                   ORDER BY city_code
+                   LIMIT 2
+                  """,
+                  String.class,
+                  period,
+                  billingPointCode)
+              .stream()
+              .findFirst();
+      if (samePeriod.isPresent()) {
+        return samePeriod;
+      }
+    }
+    return jdbcTemplate
+        .queryForList(
+            """
+            SELECT city_code
+              FROM billing_point_master
+             WHERE billing_point_code = ?
+            UNION
+            SELECT city_code
+              FROM billing_point_snapshot
+             WHERE billing_point_code = ?
+            ORDER BY city_code
+            LIMIT 2
+            """,
+            String.class,
+            billingPointCode,
+            billingPointCode)
+        .stream()
+        .findFirst();
+  }
+
+  @Override
+  public void replaceImportedRecords(ImportBatch batch, List<ImportedRow> rows) {
+    jdbcTemplate.update("DELETE FROM imported_record WHERE import_job_id = ?", batch.id());
+    jdbcTemplate.batchUpdate(
+        """
+        INSERT INTO imported_record
+          (import_job_id, dataset_type, data_period, city_code, source_row_no,
+           billing_point_code, billing_point_name, payment_bill_code, meter_code,
+           business_key, values_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+        500,
+        (statement, row) -> {
+          statement.setLong(1, batch.id());
+          statement.setString(2, batch.datasetType().name());
+          statement.setString(3, batch.period());
+          statement.setString(4, row.cityCode());
+          statement.setInt(5, row.sourceRow());
+          statement.setString(6, row.billingPointCode());
+          statement.setString(7, row.billingPointName());
+          statement.setString(8, row.paymentCode());
+          statement.setString(9, row.meterCode());
+          statement.setString(10, row.businessKey());
+          statement.setString(11, row.valuesJson());
+        });
+  }
+
+  @Override
   public void markProcessing(long id) {
     jdbcTemplate.update(
         """
-        UPDATE import_batch
+        UPDATE import_job
            SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP(3),
                updated_by = 'WORKER', version = version + 1
          WHERE id = ? AND status IN ('QUEUED', 'FAILED')
@@ -133,168 +227,32 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   }
 
   @Override
-  @Transactional
-  public void replaceRows(long batchId, List<ImportedRow> rows) {
-    jdbcTemplate.update("DELETE FROM imported_record WHERE batch_id = ?", batchId);
-    jdbcTemplate.batchUpdate(
-        """
-        INSERT INTO imported_record
-          (batch_id, dataset_type, data_period, city_code, billing_point_code,
-           payment_code, meter_code, business_key, source_row, values_json, is_active)
-        SELECT b.id, b.dataset_type, b.data_period, ?, ?, ?, ?, ?, ?, ?, FALSE
-          FROM import_batch b WHERE b.id = ?
-        """,
-        rows,
-        500,
-        (statement, row) -> {
-          statement.setString(1, row.cityCode());
-          statement.setString(2, row.billingPointCode());
-          statement.setString(3, row.paymentCode());
-          statement.setString(4, row.meterCode());
-          statement.setString(5, row.businessKey());
-          statement.setInt(6, row.sourceRow());
-          statement.setString(7, row.valuesJson());
-          statement.setLong(8, batchId);
-        });
-  }
-
-  @Override
-  @Transactional
-  public void activate(ImportBatch batch, List<ImportedRow> rows) {
+  public void markSucceeded(ImportBatch batch, int rowCount) {
     jdbcTemplate.update(
         """
-        UPDATE imported_record SET is_active = FALSE
-         WHERE batch_id IN (
-           SELECT id FROM import_batch
-            WHERE dataset_type = ? AND data_period = ? AND city_code = ? AND status = 'ACTIVE'
-         )
-        """,
-        batch.datasetType().name(),
-        batch.period(),
-        batch.cityCode());
-    jdbcTemplate.update(
-        """
-        UPDATE import_batch
-           SET status = 'SUPERSEDED', superseded_at = CURRENT_TIMESTAMP(3),
-               updated_at = CURRENT_TIMESTAMP(3), updated_by = 'WORKER', version = version + 1
-         WHERE dataset_type = ? AND data_period = ? AND city_code = ?
-           AND status = 'ACTIVE' AND id <> ?
-        """,
-        batch.datasetType().name(),
-        batch.period(),
-        batch.cityCode(),
-        batch.id());
-    jdbcTemplate.update(
-        "UPDATE imported_record SET is_active = TRUE WHERE batch_id = ?", batch.id());
-    jdbcTemplate.update(
-        """
-        UPDATE import_batch
+        UPDATE import_job
            SET status = 'ACTIVE', row_count = ?, error_count = 0, errors_json = '[]',
-               activated_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3),
+               completed_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3),
                updated_by = 'WORKER', version = version + 1
          WHERE id = ?
         """,
-        rows.size(),
+        rowCount,
         batch.id());
-    if (batch.datasetType() == DatasetType.BILLING_POINT) {
-      for (ImportedRow row : rows) {
-        upsertSnapshot(batch, row);
-        upsertMaster(batch, row);
-      }
-    }
   }
 
   @Override
   public void markFailed(long id, List<ImportError> errors) {
     jdbcTemplate.update(
         """
-        UPDATE import_batch
+        UPDATE import_job
            SET status = 'FAILED', error_count = ?, errors_json = ?,
-               updated_at = CURRENT_TIMESTAMP(3), updated_by = 'WORKER', version = version + 1
+               completed_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3),
+               updated_by = 'WORKER', version = version + 1
          WHERE id = ?
         """,
         errors.size(),
         writeJson(errors),
         id);
-  }
-
-  private void upsertSnapshot(ImportBatch batch, ImportedRow row) {
-    YearMonth month = YearMonth.parse(batch.period());
-    int updated =
-        jdbcTemplate.update(
-            """
-            UPDATE billing_point_snapshot
-               SET city_code = ?, billing_point_name = ?, period_start = ?, period_end = ?,
-                   data_json = ?, source_batch_id = ?, updated_at = CURRENT_TIMESTAMP(3),
-                   version = version + 1
-             WHERE billing_point_code = ? AND data_period = ?
-            """,
-            row.cityCode(),
-            row.billingPointName(),
-            LocalDate.of(month.getYear(), month.getMonth(), 1),
-            month.atEndOfMonth(),
-            row.valuesJson(),
-            batch.id(),
-            row.billingPointCode(),
-            batch.period());
-    if (updated == 0) {
-      jdbcTemplate.update(
-          """
-          INSERT INTO billing_point_snapshot
-            (public_id, billing_point_code, city_code, billing_point_name, data_period,
-             period_start, period_end, data_json, source_batch_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          """,
-          UUID.randomUUID().toString(),
-          row.billingPointCode(),
-          row.cityCode(),
-          row.billingPointName(),
-          batch.period(),
-          month.atDay(1),
-          month.atEndOfMonth(),
-          row.valuesJson(),
-          batch.id());
-    }
-  }
-
-  private void upsertMaster(ImportBatch batch, ImportedRow row) {
-    int updated =
-        jdbcTemplate.update(
-            """
-            UPDATE billing_point_master
-               SET city_code = ?, billing_point_name = ?, current_period = ?, data_json = ?,
-                   source_batch_id = ?, updated_at = CURRENT_TIMESTAMP(3), version = version + 1
-             WHERE billing_point_code = ? AND current_period <= ?
-            """,
-            row.cityCode(),
-            row.billingPointName(),
-            batch.period(),
-            row.valuesJson(),
-            batch.id(),
-            row.billingPointCode(),
-            batch.period());
-    if (updated == 0) {
-      Integer exists =
-          jdbcTemplate.queryForObject(
-              "SELECT COUNT(*) FROM billing_point_master WHERE billing_point_code = ?",
-              Integer.class,
-              row.billingPointCode());
-      if (exists != null && exists == 0) {
-        jdbcTemplate.update(
-            """
-            INSERT INTO billing_point_master
-              (billing_point_code, city_code, billing_point_name, current_period,
-               data_json, source_batch_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            row.billingPointCode(),
-            row.cityCode(),
-            row.billingPointName(),
-            batch.period(),
-            row.valuesJson(),
-            batch.id());
-      }
-    }
   }
 
   private void appendFilters(
@@ -321,9 +279,9 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
     return jdbcTemplate.query(
         """
         SELECT id, public_id, dataset_type, data_period, city_code, status, source_file_id,
-               task_public_id, row_count, error_count, errors_json, activated_at,
+               task_public_id, row_count, error_count, errors_json, completed_at,
                created_at, created_by, updated_at, version
-          FROM import_batch
+          FROM import_job
         """
             + predicate,
         (resultSet, rowNumber) ->
@@ -339,7 +297,7 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
                 resultSet.getInt("row_count"),
                 resultSet.getInt("error_count"),
                 readErrors(resultSet.getString("errors_json")),
-                resultSet.getObject("activated_at", LocalDateTime.class),
+                resultSet.getObject("completed_at", LocalDateTime.class),
                 resultSet.getObject("created_at", LocalDateTime.class),
                 resultSet.getString("created_by"),
                 resultSet.getObject("updated_at", LocalDateTime.class),
@@ -347,11 +305,42 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
         arguments);
   }
 
+  private boolean hasKnownBillingPoints(String cityCode) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT billing_point_code
+                      FROM billing_point_master
+                     WHERE city_code = ?
+                    UNION
+                    SELECT billing_point_code
+                      FROM billing_point_snapshot
+                     WHERE city_code = ?
+                   ) known_points
+            """,
+            Integer.class,
+            cityCode,
+            cityCode);
+    return count != null && count > 0;
+  }
+
+  private boolean hasRows(String tableName, String cityCode, String period) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM " + tableName + " WHERE city_code = ? AND data_period = ?",
+            Integer.class,
+            cityCode,
+            period);
+    return count != null && count > 0;
+  }
+
   private String writeJson(Object value) {
     try {
       return objectMapper.writeValueAsString(value);
     } catch (JacksonException exception) {
-      throw new IllegalStateException("Import state could not be serialized", exception);
+      throw new IllegalStateException("Import job state could not be serialized", exception);
     }
   }
 
@@ -359,7 +348,7 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
     try {
       return objectMapper.readValue(json, ERROR_LIST);
     } catch (JacksonException exception) {
-      throw new IllegalStateException("Persisted import errors are invalid", exception);
+      throw new IllegalStateException("Persisted import job errors are invalid", exception);
     }
   }
 }

@@ -1,6 +1,10 @@
 spring:
   application:
     name: three-fees-api
+  servlet:
+    multipart:
+      max-file-size: -1
+      max-request-size: -1
   datasource:
     url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&sslMode=DISABLED}
     username: ${DB_USERNAME:}
@@ -42,10 +46,7 @@ app:
     initial-password: ${INITIAL_ACCOUNT_PASSWORD:}
   file:
     root: ${APP_FILE_ROOT:}
-    max-upload-bytes: 104857600
     max-import-rows: 200000
-    max-image-bytes: 10485760
-    max-image-pixels: 40000000
   worker:
     poll-delay: 500
     lease-seconds: 30

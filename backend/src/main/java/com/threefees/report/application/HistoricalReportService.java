@@ -53,20 +53,17 @@ public class HistoricalReportService {
       String billingPointPeriodId, MultipartFile file, String idempotencyKey, CurrentUser actor) {
     Candidate candidate = candidate(billingPointPeriodId);
     requireScope(actor, candidate.cityCode());
+    HistoricalImport prior = findBySnapshot(candidate.snapshotId());
+    if (prior != null) {
+      if ("FAILED".equals(prior.status())) {
+        return retryFailedImport(billingPointPeriodId, prior.id(), file, idempotencyKey, actor);
+      }
+      return prior;
+    }
     if (!candidate.eligible()) {
       throw new BusinessRuleException("HISTORICAL_REPORT_NOT_ELIGIBLE", "该报账点账期不符合历史报告导入条件");
     }
-    HistoricalImport prior = findBySnapshot(candidate.snapshotId());
-    if (prior != null) {
-      return prior;
-    }
-    String normalizedKey =
-        idempotencyKey == null || idempotencyKey.isBlank()
-            ? UUID.randomUUID().toString()
-            : idempotencyKey.trim();
-    if (normalizedKey.length() < 8 || normalizedKey.length() > 128) {
-      throw new BusinessRuleException("IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 长度必须为 8 至 128");
-    }
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
     String businessKey = "HISTORY:" + billingPointPeriodId + ":" + digest(normalizedKey);
     var existingTask =
         taskRepository.findByTypeAndBusinessKey(TaskType.HISTORICAL_REPORT_IMPORT, businessKey);
@@ -107,6 +104,61 @@ public class HistoricalReportService {
       throw exception;
     }
     return find(importId, actor);
+  }
+
+  private HistoricalImport retryFailedImport(
+      String billingPointPeriodId,
+      String importId,
+      MultipartFile file,
+      String idempotencyKey,
+      CurrentUser actor) {
+    String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
+    String businessKey =
+        "HISTORY_RETRY:" + billingPointPeriodId + ":" + importId + ":" + digest(normalizedKey);
+    var existingTask =
+        taskRepository.findByTypeAndBusinessKey(TaskType.HISTORICAL_REPORT_IMPORT, businessKey);
+    if (existingTask.isPresent()) {
+      return findByTask(existingTask.orElseThrow().publicId());
+    }
+    BusinessTask task =
+        taskRepository.create(
+            TaskType.HISTORICAL_REPORT_IMPORT,
+            businessKey,
+            writeJson(Map.of("historicalImportId", importId)),
+            actor.username(),
+            3);
+    StoredFile source =
+        storedFileService.storeUpload(
+            file, Set.of("doc", "docx"), "HISTORICAL_REPORT_WORD", actor.username());
+    registerRollbackCleanup(source);
+    int updated =
+        jdbcTemplate.update(
+            """
+            UPDATE historical_report_import
+               SET source_word_file_id=?, task_public_id=?, status='QUEUED',
+                   error_code=NULL, report_public_id=NULL,
+                   updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
+             WHERE public_id=? AND status='FAILED'
+            """,
+            source.id(),
+            task.publicId(),
+            actor.username(),
+            importId);
+    if (updated != 1) {
+      storedFileService.deletePhysical(source);
+    }
+    return find(importId, actor);
+  }
+
+  private String normalizeIdempotencyKey(String idempotencyKey) {
+    String normalizedKey =
+        idempotencyKey == null || idempotencyKey.isBlank()
+            ? UUID.randomUUID().toString()
+            : idempotencyKey.trim();
+    if (normalizedKey.length() < 8 || normalizedKey.length() > 128) {
+      throw new BusinessRuleException("IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 长度必须为 8 至 128");
+    }
+    return normalizedKey;
   }
 
   @Transactional(readOnly = true)
@@ -185,15 +237,8 @@ public class HistoricalReportService {
         .query(
             """
             SELECT s.id, s.city_code,
-                   CASE WHEN a.audit_status='OVER_LIMIT' AND r.id IS NULL
-                              AND s.data_period < (
-                                SELECT MAX(s2.data_period) FROM billing_point_snapshot s2
-                                 WHERE s2.billing_point_code=s.billing_point_code)
-                        THEN TRUE ELSE FALSE END AS eligible
+                   CASE WHEN r.id IS NULL THEN TRUE ELSE FALSE END AS eligible
               FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id=s.source_batch_id AND b.status='ACTIVE'
-              LEFT JOIN audit_result a
-                ON a.billing_point_code=s.billing_point_code AND a.data_period=s.data_period
               LEFT JOIN audit_report r ON r.billing_point_snapshot_id=s.id
              WHERE s.public_id=?
             """,

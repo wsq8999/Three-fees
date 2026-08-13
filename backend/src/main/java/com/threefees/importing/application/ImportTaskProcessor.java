@@ -9,12 +9,16 @@ import com.threefees.task.domain.BusinessTask;
 import com.threefees.task.domain.TaskType;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.ObjectMapper;
 
 @Component
 public class ImportTaskProcessor implements TaskProcessor {
+
+  private static final Logger LOGGER = LoggerFactory.getLogger(ImportTaskProcessor.class);
 
   private final ImportBatchRepository batchRepository;
   private final StoredFileService storedFileService;
@@ -52,7 +56,10 @@ public class ImportTaskProcessor implements TaskProcessor {
       var errors =
           List.of(
               new ImportError(
-                  0, "datasetType", "IMPORT_PREREQUISITE_MISSING", "请按报账点清单、缴费明细、电表读数、标杆值顺序导入"));
+                  0,
+                  "datasetType",
+                  "IMPORT_PREREQUISITE_MISSING",
+                  "请按报账点清单、缴费明细、电表读数、标杆值的依赖顺序导入"));
       batchRepository.markFailed(batch.id(), errors);
       throw new TaskExecutionException(
           "IMPORT_PREREQUISITE_MISSING", errors.getFirst().message(), false);
@@ -62,7 +69,23 @@ public class ImportTaskProcessor implements TaskProcessor {
       TabularData data =
           tabularFileReader.read(
               storedFileService.readBytes(storedFile), storedFile.originalName());
-      var rows = importRowMapper.map(batch.datasetType(), batch.period(), batch.cityCode(), data);
+      var rows =
+          importRowMapper.mapAuto(batch.datasetType(), null, batch.period(), data).stream()
+              .filter(
+                  group ->
+                      group.cityCode().equals(batch.cityCode())
+                          && group.period().equals(batch.period()))
+              .findFirst()
+              .map(ImportRowGroup::rows)
+              .orElseThrow(
+                  () ->
+                      new ImportValidationException(
+                          List.of(
+                              new ImportError(
+                                  0,
+                                  "datasetType",
+                                  "IMPORT_SCOPE_MISMATCH",
+                                  "Import file does not contain rows for this batch scope"))));
       importActivationService.replaceActivateAndRecalculate(batch, rows);
       return writeJson(Map.of("batchId", batch.publicId(), "status", "ACTIVE"));
     } catch (ImportValidationException exception) {
@@ -76,9 +99,23 @@ public class ImportTaskProcessor implements TaskProcessor {
     } catch (TaskExecutionException exception) {
       throw exception;
     } catch (RuntimeException exception) {
+      LOGGER.error(
+          "Import processing failed batchId={} datasetType={} period={} cityCode={}",
+          batch.publicId(),
+          batch.datasetType(),
+          batch.period(),
+          batch.cityCode(),
+          exception);
       batchRepository.markFailed(
           batch.id(),
-          List.of(new ImportError(0, "system", "IMPORT_PROCESSING_FAILED", "导入处理失败，可通过任务重试")));
+          List.of(
+              new ImportError(
+                  0,
+                  "system",
+                  "IMPORT_PROCESSING_FAILED",
+                  exception.getMessage() == null
+                      ? "导入处理失败，可通过任务重试"
+                      : exception.getMessage())));
       throw new TaskExecutionException("IMPORT_PROCESSING_FAILED", exception.getMessage(), true);
     }
   }

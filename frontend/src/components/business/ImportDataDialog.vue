@@ -4,6 +4,7 @@ import type { UploadFile } from "element-plus";
 import { ElMessageBox } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
+import { ApiProblem } from "@/api/problem-details";
 import type { DatasetType, ImportBatch } from "@/types/business";
 
 const props = defineProps<{ modelValue: boolean; defaultPeriod?: string }>();
@@ -50,6 +51,7 @@ const selectedType = ref<DatasetType>("BILLING_POINT");
 const selectedFile = ref<File | null>(null);
 const batches = ref<ImportBatch[]>([]);
 const runningBatch = ref<ImportBatch | null>(null);
+const runningBatches = ref<ImportBatch[]>([]);
 const isSubmitting = ref(false);
 const errorMessage = ref("");
 
@@ -71,13 +73,6 @@ const canSubmit = computed(
     runningBatch.value === null,
 );
 
-const progress = computed(() => {
-  if (runningBatch.value?.status === "ACTIVE") return 100;
-  if (runningBatch.value?.status === "FAILED") return 100;
-  if (runningBatch.value?.status === "PROCESSING") return 66;
-  return 20;
-});
-
 async function loadBatches(): Promise<void> {
   batches.value = await businessApi.imports.list();
 }
@@ -86,6 +81,7 @@ function resetForm(): void {
   selectedType.value = "BILLING_POINT";
   selectedFile.value = null;
   runningBatch.value = null;
+  runningBatches.value = [];
   errorMessage.value = "";
 }
 
@@ -106,19 +102,28 @@ function handleFileChange(file: UploadFile): void {
   selectedFile.value = raw;
 }
 
-async function pollBatch(id: string): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const latest = await businessApi.imports.get(id);
-    if (latest !== undefined) runningBatch.value = latest;
-    if (latest?.status === "ACTIVE" || latest?.status === "FAILED") {
+async function pollBatches(ids: string[]): Promise<void> {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const latestList = (
+      await Promise.all(ids.map((id) => businessApi.imports.get(id)))
+    ).filter((item): item is ImportBatch => item !== undefined);
+    runningBatches.value = latestList;
+    runningBatch.value = latestList[0] ?? null;
+    if (
+      latestList.length === ids.length &&
+      latestList.every(
+        (batch) => batch.status === "ACTIVE" || batch.status === "FAILED",
+      )
+    ) {
       await loadBatches();
-      if (latest.status === "ACTIVE") emit("imported", latest);
+      latestList
+        .filter((batch) => batch.status === "ACTIVE")
+        .forEach((batch) => emit("imported", batch));
       return;
     }
-    await new Promise((resolve) => globalThis.setTimeout(resolve, 300));
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
   }
-  errorMessage.value =
-    "任务仍在后台处理中，可关闭弹窗后稍后刷新查看。";
+  errorMessage.value = "导入任务仍在后台处理中，可关闭窗口后稍后刷新查看。";
 }
 
 async function submit(): Promise<void> {
@@ -128,7 +133,7 @@ async function submit(): Promise<void> {
   if (current !== undefined) {
     try {
       await ElMessageBox.confirm(
-        `当前已存在激活的${datasetMeta[selectedType.value].label}批次。新批次校验成功后将整批替换，旧批次保留为审计历史。`,
+        `当前已存在激活的${datasetMeta[selectedType.value].label}批次。新批次校验成功后将整批替换。`,
         "确认整批替换",
         {
           confirmButtonText: "继续导入",
@@ -142,30 +147,44 @@ async function submit(): Promise<void> {
   }
   isSubmitting.value = true;
   try {
-    runningBatch.value = await businessApi.imports.create(
+    const created = await businessApi.imports.create(
       {
         datasetType: selectedType.value,
-        period: period.value,
         fileName: selectedFile.value.name,
       },
       selectedFile.value,
     );
-    await pollBatch(runningBatch.value.id);
+    runningBatches.value = created;
+    runningBatch.value = created[0] ?? null;
+    await pollBatches(created.map((batch) => batch.id));
   } catch (error) {
     errorMessage.value =
-      error instanceof Error ? error.message : "导入任务提交失败";
+      error instanceof ApiProblem && error.fieldErrors.length > 0
+        ? `${error.message}：${error.fieldErrors
+            .slice(0, 5)
+            .map((item) => `${item.field} ${item.code} ${item.message}`)
+            .join("；")}`
+        : error instanceof Error
+          ? error.message
+          : "导入任务提交失败";
   } finally {
     isSubmitting.value = false;
   }
 }
 
 async function retry(): Promise<void> {
-  if (runningBatch.value === null) return;
+  const failed = runningBatches.value.filter((batch) => batch.status === "FAILED");
+  if (failed.length === 0 && runningBatch.value === null) return;
   isSubmitting.value = true;
   try {
-    runningBatch.value = await businessApi.imports.retry(runningBatch.value.id);
-    await loadBatches();
-    emit("imported", runningBatch.value);
+    const retried = await Promise.all(
+      (failed.length > 0 ? failed : [runningBatch.value as ImportBatch]).map(
+        (batch) => businessApi.imports.retry(batch.id),
+      ),
+    );
+    runningBatches.value = retried;
+    runningBatch.value = retried[0] ?? null;
+    await pollBatches(retried.map((batch) => batch.id));
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : "重试失败";
   } finally {
@@ -211,7 +230,7 @@ watch(
               <strong>{{ datasetMeta[datasetType].label }}</strong>
               <small>
                 {{ datasetMeta[datasetType].description }} ·
-                {{ datasetMeta[datasetType].fieldCount }}列
+                {{ datasetMeta[datasetType].fieldCount }} 列
               </small>
             </span>
             <i v-if="selectedType === datasetType" aria-hidden="true" />
@@ -242,58 +261,66 @@ watch(
           </div>
           <template v-else>
             <strong>点击或将文件拖到此处</strong>
-            <small>支持 .xlsx、.xls、.csv；一次只能选择一个文件</small>
+            <small>支持 .xlsx、.xls、.csv；一次只选择一个文件</small>
           </template>
         </ElUpload>
       </div>
 
       <ElAlert
-        title="月度顺序：报账点清单 → 缴费明细 → 电表读数 → 标杆值"
+        title="系统将根据文件中的所属地市/地市自动识别城市，并根据文件日期自动拆分账期；电表读数将通过报账点或缴费单关联识别。"
         type="warning"
         :closable="false"
         show-icon
       />
 
-      <section v-if="runningBatch" class="task-panel">
+      <section v-if="runningBatches.length > 0 || runningBatch" class="task-panel">
         <div>
-          <strong>导入任务 {{ runningBatch.id }}</strong>
-          <span>{{ runningBatch.fileName }}</span>
+          <strong>导入任务</strong>
+          <span>{{ selectedFile?.name }}</span>
         </div>
-        <ElProgress
-          :percentage="progress"
-          :status="
-            runningBatch.status === 'FAILED'
-              ? 'exception'
-              : runningBatch.status === 'ACTIVE'
-                ? 'success'
-                : undefined
-          "
-        />
-        <p>
-          {{
-            runningBatch.status === "ACTIVE"
-              ? "校验完成并已激活"
-              : runningBatch.status === "FAILED"
-                ? "校验失败，请查看错误后重试"
-                : "正在校验文件结构和业务关系"
-          }}
-        </p>
-        <ElAlert
-          v-if="runningBatch.status === 'FAILED'"
-          class="import-errors"
-          type="error"
-          :closable="false"
-          show-icon
+        <div
+          v-for="batch in runningBatches.length > 0 ? runningBatches : runningBatch ? [runningBatch] : []"
+          :key="batch.id"
+          class="batch-result"
         >
-          <ul>
-            <li
-              v-for="item in runningBatch.errors"
-              :key="`${item.row}-${item.column}`"
-            >
-              第{{ item.row }}行 {{ item.column }}：{{ item.message }}
-            </li>
-          </ul>
-        </ElAlert>
+          <div>
+            <strong>{{ batch.period }} / {{ batch.cityCode ?? "-" }}</strong>
+            <span>{{ batch.status }}</span>
+          </div>
+          <ElProgress
+            :percentage="
+              batch.status === 'ACTIVE' || batch.status === 'FAILED'
+                ? 100
+                : batch.status === 'PROCESSING'
+                  ? 66
+                  : 20
+            "
+            :status="
+              batch.status === 'FAILED'
+                ? 'exception'
+                : batch.status === 'ACTIVE'
+                  ? 'success'
+                  : undefined
+            "
+          />
+          <ElAlert
+            v-if="batch.status === 'FAILED'"
+            class="import-errors"
+            type="error"
+            :closable="false"
+            show-icon
+          >
+            <ul>
+              <li
+                v-for="item in batch.errors"
+                :key="`${batch.id}-${item.row}-${item.column}-${item.code ?? ''}`"
+              >
+                第 {{ item.row }} 行 {{ item.column }}
+                <template v-if="item.code">（{{ item.code }}）</template>：{{ item.message }}
+              </li>
+            </ul>
+          </ElAlert>
+        </div>
       </section>
 
       <ElAlert
@@ -307,7 +334,7 @@ watch(
 
     <template #footer>
       <ElButton
-        v-if="runningBatch?.status === 'FAILED'"
+        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
         :loading="isSubmitting"
         @click="retry"
       >
@@ -465,16 +492,26 @@ watch(
 
 .task-panel {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   padding: 16px;
   background: #f7f9fc;
   border: 1px solid #e5ecf6;
   border-radius: 10px;
 }
 
-.task-panel > div:first-child {
+.task-panel > div:first-child,
+.batch-result > div:first-child {
   display: flex;
   justify-content: space-between;
+}
+
+.batch-result {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e5ecf6;
+  border-radius: 8px;
 }
 
 .task-panel span,
@@ -484,7 +521,7 @@ watch(
 }
 
 .import-errors ul {
-  max-height: 100px;
+  max-height: 120px;
   overflow: auto;
 }
 

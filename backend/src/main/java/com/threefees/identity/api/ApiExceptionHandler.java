@@ -6,6 +6,7 @@ import com.threefees.identity.application.CsrfValidationException;
 import com.threefees.identity.application.InvalidCredentialsException;
 import com.threefees.identity.application.ResourceConflictException;
 import com.threefees.identity.application.ResourceNotFoundException;
+import com.threefees.importing.application.ImportValidationException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import java.net.URI;
@@ -118,6 +119,28 @@ public class ApiExceptionHandler {
         exception.getMessage(),
         request,
         List.of());
+  }
+
+  @ExceptionHandler(ImportValidationException.class)
+  ResponseEntity<ProblemDetail> importValidationFailed(
+      ImportValidationException exception, HttpServletRequest request) {
+    List<FieldErrorResponse> fieldErrors =
+        exception.errors().stream()
+            .map(
+                error ->
+                    new FieldErrorResponse(
+                        "row " + error.row() + " / " + error.column(),
+                        error.code(),
+                        error.message()))
+            .toList();
+    return problem(
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        "import-validation-failed",
+        "IMPORT_VALIDATION_FAILED",
+        "业务校验失败",
+        "导入文件存在校验错误，请查看具体行号和字段",
+        request,
+        fieldErrors);
   }
 
   @ExceptionHandler(MethodArgumentNotValidException.class)

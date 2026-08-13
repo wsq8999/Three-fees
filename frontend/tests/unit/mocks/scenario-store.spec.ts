@@ -148,9 +148,21 @@ describe("complete-system mock scenario", () => {
   it("uses the unified BG monthly six-digit report number contract", () => {
     const scenario = createScenarioStore();
     const generated = scenario.generateFormalReport("draft-1");
+    const candidates = scenario.listHistoricalCandidates({
+      cityCode: "320100",
+      keyword: "南京中心广场",
+    });
+    const centerPeriods = candidates
+      .filter((item) => item.billingPointCode === "320100-BP-0001")
+      .map((item) => item.period);
+    expect(centerPeriods).toEqual(["2026-04"]);
+    const centerMissingPeriod = candidates.find(
+      (item) =>
+        item.billingPointCode === "320100-BP-0001" &&
+        item.period === "2026-04",
+    );
     const imported = scenario.importHistoricalReport({
-      billingPointId: "bp-3",
-      period: "2026-04",
+      billingPointPeriodId: centerMissingPeriod?.billingPointPeriodId ?? "",
       fileName: "历史报告.docx",
     });
 

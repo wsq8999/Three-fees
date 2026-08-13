@@ -13,21 +13,25 @@ public class ImportActivationService {
   private final ImportBatchRepository batchRepository;
   private final AuditRecalculationService auditRecalculationService;
   private final ImportCrossDatasetValidator crossDatasetValidator;
+  private final FormalImportTableWriter formalImportTableWriter;
 
   public ImportActivationService(
       ImportBatchRepository batchRepository,
       AuditRecalculationService auditRecalculationService,
-      ImportCrossDatasetValidator crossDatasetValidator) {
+      ImportCrossDatasetValidator crossDatasetValidator,
+      FormalImportTableWriter formalImportTableWriter) {
     this.batchRepository = batchRepository;
     this.auditRecalculationService = auditRecalculationService;
     this.crossDatasetValidator = crossDatasetValidator;
+    this.formalImportTableWriter = formalImportTableWriter;
   }
 
   @Transactional
   public void replaceActivateAndRecalculate(ImportBatch batch, List<ImportedRow> rows) {
-    batchRepository.replaceRows(batch.id(), rows);
     crossDatasetValidator.validate(batch, rows);
-    batchRepository.activate(batch, rows);
+    batchRepository.replaceImportedRecords(batch, rows);
+    formalImportTableWriter.replace(batch, rows);
+    batchRepository.markSucceeded(batch, rows.size());
     auditRecalculationService.recalculate(batch.period(), batch.cityCode());
   }
 }

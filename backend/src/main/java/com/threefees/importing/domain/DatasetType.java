@@ -6,7 +6,7 @@ public enum DatasetType {
   BILLING_POINT("catalog-billing-point.tsv", 73, List.of()),
   PAYMENT("catalog-payment.tsv", 198, List.of(BILLING_POINT)),
   METER_READING("catalog-meter-reading.tsv", 42, List.of(BILLING_POINT, PAYMENT)),
-  BENCHMARK("catalog-benchmark.tsv", 39, List.of(BILLING_POINT, PAYMENT, METER_READING));
+  BENCHMARK("catalog-benchmark.tsv", 39, List.of(BILLING_POINT));
 
   private final String resourceName;
   private final int fieldCount;

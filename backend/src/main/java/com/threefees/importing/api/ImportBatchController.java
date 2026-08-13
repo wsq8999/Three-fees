@@ -75,19 +75,20 @@ public class ImportBatchController {
   }
 
   @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-  public ResponseEntity<ImportBatchResponse> create(
+  public ResponseEntity<CreateImportBatchResponse> create(
       @RequestParam String datasetType,
-      @RequestParam @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
       @RequestParam(required = false) String cityCode,
       @RequestParam MultipartFile file,
       @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
       @AuthenticationPrincipal CurrentUser actor) {
-    ImportBatch batch =
+    var batches =
         commandService.submit(
             parseDatasetType(datasetType), period, cityCode, file, idempotencyKey, actor);
+    ImportBatch first = batches.getFirst();
     return ResponseEntity.accepted()
-        .location(URI.create("/api/v1/tasks/" + batch.taskPublicId()))
-        .body(ImportBatchResponse.from(batch));
+        .location(URI.create("/api/v1/tasks/" + first.taskPublicId()))
+        .body(new CreateImportBatchResponse(batches.stream().map(ImportBatchResponse::from).toList()));
   }
 
   private DatasetType parseDatasetType(String value) {

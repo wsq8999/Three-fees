@@ -370,11 +370,7 @@ public class AuditReportService {
     StringBuilder where =
         new StringBuilder(
             """
-             WHERE a.audit_status = 'OVER_LIMIT' AND r.id IS NULL
-               AND s.data_period < (
-                 SELECT MAX(s2.data_period)
-                   FROM billing_point_snapshot s2
-                  WHERE s2.billing_point_code = s.billing_point_code)
+             WHERE r.id IS NULL
             """);
     if (scopedCity != null && !scopedCity.isBlank()) {
       where.append(" AND s.city_code = ?");
@@ -390,10 +386,9 @@ public class AuditReportService {
         """
         SELECT s.public_id, s.billing_point_code, s.billing_point_name, s.city_code,
                c.name AS city_name, s.data_period, a.over_limit_type, a.max_ratio
-          FROM billing_point_snapshot s
-          JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
-          JOIN city c ON c.code = s.city_code
-          JOIN audit_result a
+         FROM billing_point_snapshot s
+         JOIN city c ON c.code = s.city_code
+          LEFT JOIN audit_result a
             ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
           LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
         """

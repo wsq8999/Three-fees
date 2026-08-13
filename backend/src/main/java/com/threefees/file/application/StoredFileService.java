@@ -6,6 +6,7 @@ import com.threefees.identity.application.ResourceNotFoundException;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
@@ -38,21 +39,11 @@ public class StoredFileService {
 
   private final StoredFileRepository repository;
   private final String configuredRoot;
-  private final long maxUploadBytes;
-  private final long maxImageBytes;
-  private final long maxImagePixels;
 
   public StoredFileService(
-      StoredFileRepository repository,
-      @Value("${app.file.root:}") String configuredRoot,
-      @Value("${app.file.max-upload-bytes:104857600}") long maxUploadBytes,
-      @Value("${app.file.max-image-bytes:10485760}") long maxImageBytes,
-      @Value("${app.file.max-image-pixels:40000000}") long maxImagePixels) {
+      StoredFileRepository repository, @Value("${app.file.root:}") String configuredRoot) {
     this.repository = repository;
     this.configuredRoot = configuredRoot;
-    this.maxUploadBytes = maxUploadBytes;
-    this.maxImageBytes = maxImageBytes;
-    this.maxImagePixels = maxImagePixels;
   }
 
   public StoredFile storeUpload(
@@ -60,17 +51,10 @@ public class StoredFileService {
     if (multipartFile.isEmpty()) {
       throw new BusinessRuleException("FILE_EMPTY", "上传文件不能为空");
     }
-    if (multipartFile.getSize() > maxUploadBytes) {
-      throw new BusinessRuleException("FILE_TOO_LARGE", "上传文件超过允许大小");
-    }
     String originalName = safeOriginalName(multipartFile.getOriginalFilename());
     String extension = extension(originalName);
     if (!allowedExtensions.contains(extension)) {
       throw new BusinessRuleException("FILE_TYPE_NOT_ALLOWED", "不支持该文件类型");
-    }
-    if (Set.of("png", "jpg", "jpeg").contains(extension)
-        && multipartFile.getSize() > maxImageBytes) {
-      throw new BusinessRuleException("IMAGE_TOO_LARGE", "图片文件超过允许大小");
     }
     try (InputStream input = multipartFile.getInputStream()) {
       return storeStream(input, originalName, extension, purpose, actor, true);
@@ -92,9 +76,7 @@ public class StoredFileService {
   }
 
   public StoredFile find(String publicId) {
-    return repository
-        .findByPublicId(publicId)
-        .orElseThrow(() -> new ResourceNotFoundException("文件"));
+    return repository.findByPublicId(publicId).orElseThrow(() -> new ResourceNotFoundException("文件"));
   }
 
   public StoredFile find(long id) {
@@ -102,10 +84,7 @@ public class StoredFileService {
   }
 
   public InputStreamResource resource(StoredFile storedFile) {
-    Path path = root().resolve(storedFile.storageName()).normalize();
-    if (!path.startsWith(root())) {
-      throw new IllegalStateException("Stored file path escaped the configured root");
-    }
+    Path path = storedPath(storedFile);
     try {
       return new InputStreamResource(Files.newInputStream(path));
     } catch (IOException exception) {
@@ -114,10 +93,7 @@ public class StoredFileService {
   }
 
   public byte[] readBytes(StoredFile storedFile) {
-    Path path = root().resolve(storedFile.storageName()).normalize();
-    if (!path.startsWith(root())) {
-      throw new IllegalStateException("Stored file path escaped the configured root");
-    }
+    Path path = storedPath(storedFile);
     try {
       return Files.readAllBytes(path);
     } catch (IOException exception) {
@@ -126,12 +102,8 @@ public class StoredFileService {
   }
 
   public void deletePhysical(StoredFile storedFile) {
-    Path path = root().resolve(storedFile.storageName()).normalize();
-    if (!path.startsWith(root())) {
-      throw new IllegalStateException("Stored file path escaped the configured root");
-    }
     try {
-      Files.deleteIfExists(path);
+      Files.deleteIfExists(storedPath(storedFile));
     } catch (IOException exception) {
       throw new IllegalStateException("Rolled back file could not be removed", exception);
     }
@@ -153,8 +125,7 @@ public class StoredFileService {
       String actor,
       boolean validate)
       throws IOException {
-    return storeStream(
-        input, originalName, extension, purpose, actor, validate, mediaType(extension));
+    return storeStream(input, originalName, extension, purpose, actor, validate, mediaType(extension));
   }
 
   private StoredFile storeStream(
@@ -174,13 +145,13 @@ public class StoredFileService {
     Path destination = root.resolve(storageName).normalize();
     boolean moved = false;
     MessageDigest digest = sha256Digest();
-    long size;
     try {
+      long size;
       try (var digestInput = new DigestInputStream(input, digest)) {
         size = Files.copy(digestInput, temporary, StandardCopyOption.REPLACE_EXISTING);
       }
-      if (size == 0 || size > maxUploadBytes) {
-        throw new BusinessRuleException("FILE_SIZE_INVALID", "文件大小不符合限制");
+      if (size == 0) {
+        throw new BusinessRuleException("FILE_SIZE_INVALID", "文件不能为空");
       }
       if (validate) {
         validateSignature(temporary, extension);
@@ -240,12 +211,9 @@ public class StoredFileService {
         reader.setInput(imageInput, true, true);
         int width = reader.getWidth(0);
         int height = reader.getHeight(0);
-        long pixels = Math.multiplyExact((long) width, height);
-        if (width <= 0 || height <= 0 || pixels > maxImagePixels) {
-          throw new BusinessRuleException("IMAGE_DIMENSIONS_INVALID", "图片像素尺寸超过允许范围");
+        if (width <= 0 || height <= 0) {
+          throw new BusinessRuleException("IMAGE_DIMENSIONS_INVALID", "图片像素尺寸不正确");
         }
-      } catch (ArithmeticException exception) {
-        throw new BusinessRuleException("IMAGE_DIMENSIONS_INVALID", "图片像素尺寸超过允许范围");
       } finally {
         reader.dispose();
       }
@@ -272,21 +240,20 @@ public class StoredFileService {
     if (canDecode(path, StandardCharsets.UTF_8) || canDecode(path, Charset.forName("GB18030"))) {
       return;
     }
-    throw new BusinessRuleException("CSV_ENCODING_INVALID", "CSV 必须是 UTF-8 或 GB18030 文本");
+    throw new BusinessRuleException("CSV_ENCODING_INVALID", "CSV 文件编码必须是 UTF-8 或 GB18030");
   }
 
   private boolean canDecode(Path path, Charset charset) {
-    try {
-      var decoder =
-          charset
-              .newDecoder()
-              .onMalformedInput(CodingErrorAction.REPORT)
-              .onUnmappableCharacter(CodingErrorAction.REPORT);
-      try (var reader = new java.io.InputStreamReader(Files.newInputStream(path), decoder)) {
-        char[] buffer = new char[8192];
-        while (reader.read(buffer) >= 0) {
-          // Decode the complete stream to detect malformed input without retaining it.
-        }
+    try (var reader =
+        new InputStreamReader(
+            Files.newInputStream(path),
+            charset
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT))) {
+      char[] buffer = new char[8192];
+      while (reader.read(buffer) != -1) {
+        // Decode the full stream.
       }
       return true;
     } catch (CharacterCodingException exception) {
@@ -297,12 +264,12 @@ public class StoredFileService {
   }
 
   private void requirePrefix(Path path, byte[] expected, String message) throws IOException {
-    byte[] bytes;
+    byte[] bytes = new byte[expected.length];
     try (InputStream input = Files.newInputStream(path)) {
-      bytes = input.readNBytes(expected.length);
-    }
-    if (bytes.length != expected.length) {
-      throw new BusinessRuleException("FILE_SIGNATURE_INVALID", message);
+      int read = input.read(bytes);
+      if (read != expected.length) {
+        throw new BusinessRuleException("FILE_SIGNATURE_INVALID", message);
+      }
     }
     for (int index = 0; index < expected.length; index++) {
       if (bytes[index] != expected[index]) {
@@ -317,6 +284,14 @@ public class StoredFileService {
     } catch (AtomicMoveNotSupportedException exception) {
       Files.move(source, destination);
     }
+  }
+
+  private Path storedPath(StoredFile storedFile) {
+    Path path = root().resolve(storedFile.storageName()).normalize();
+    if (!path.startsWith(root())) {
+      throw new IllegalStateException("Stored file path escaped the configured root");
+    }
+    return path;
   }
 
   private Path root() {

@@ -90,7 +90,6 @@ public class ExportCommandService {
         jdbcTemplate.queryForObject(
             """
             SELECT COUNT(*) FROM billing_point_snapshot s
-              JOIN import_batch b ON b.id = s.source_batch_id AND b.status = 'ACTIVE'
              WHERE s.data_period = ? AND s.city_code = ? AND s.public_id IN (
             """
                 + placeholders

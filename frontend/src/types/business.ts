@@ -7,6 +7,7 @@ export type ImportStatus =
 export interface ImportErrorItem {
   row: number;
   column: string;
+  code?: string;
   message: string;
 }
 
@@ -14,6 +15,8 @@ export interface ImportBatch {
   id: string;
   datasetType: DatasetType;
   period: string;
+  cityCode?: string;
+  taskId?: string;
   fileName: string;
   status: ImportStatus;
   createdAt: string;
@@ -25,7 +28,7 @@ export interface ImportBatch {
 
 export interface CreateImportInput {
   datasetType: DatasetType;
-  period: string;
+  period?: string;
   fileName: string;
 }
 
@@ -289,6 +292,17 @@ export interface ReportSummary {
     occurredAt: string;
     summary: string;
   }>;
+}
+
+export interface HistoricalReportCandidate {
+  billingPointPeriodId: string;
+  billingPointCode: string;
+  billingPointName: string;
+  cityCode: string;
+  cityName: string;
+  period: string;
+  overLimitType?: string | null;
+  maxRatio?: string | null;
 }
 
 export interface ReportQuery {

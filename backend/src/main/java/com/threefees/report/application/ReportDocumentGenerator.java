@@ -11,6 +11,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import javax.imageio.ImageIO;
+import org.apache.poi.extractor.ExtractorFactory;
+import org.apache.poi.extractor.POITextExtractor;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
@@ -19,6 +21,7 @@ import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.extractor.Word6Extractor;
 import org.apache.poi.hwpf.extractor.WordExtractor;
 import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
@@ -60,23 +63,92 @@ public class ReportDocumentGenerator {
 
   public String extractWordText(byte[] bytes, String originalName) {
     String lower = originalName.toLowerCase(java.util.Locale.ROOT);
-    try {
-      if (lower.endsWith(".docx")) {
-        try (var document = new XWPFDocument(new ByteArrayInputStream(bytes));
-            var extractor = new XWPFWordExtractor(document)) {
-          return extractor.getText().trim();
-        }
-      }
-      if (lower.endsWith(".doc")) {
-        try (var document = new HWPFDocument(new ByteArrayInputStream(bytes));
-            var extractor = new WordExtractor(document)) {
-          return extractor.getText().trim();
-        }
-      }
-    } catch (IOException exception) {
-      throw new IllegalArgumentException("Word 文件无法读取", exception);
+    if (lower.endsWith(".docx")) {
+      return extractWordTextWithFallbacks(
+          List.of(() -> extractDocxText(bytes), () -> extractWithFactory(bytes)));
     }
-    throw new IllegalArgumentException("仅支持 .doc/.docx 历史报告");
+    if (lower.endsWith(".doc")) {
+      return extractWordTextWithFallbacks(
+          List.of(
+              () -> extractDocText(bytes),
+              () -> extractOldDocText(bytes),
+              () -> extractWithFactory(bytes)));
+    }
+    throw new IllegalArgumentException("Only .doc/.docx historical reports are supported");
+  }
+
+  private String extractDocxText(byte[] bytes) throws IOException {
+    try (var document = new XWPFDocument(new ByteArrayInputStream(bytes));
+        var extractor = new XWPFWordExtractor(document)) {
+      return cleanWordText(extractor.getText());
+    }
+  }
+
+  private String extractDocText(byte[] bytes) throws IOException {
+    try (var document = new HWPFDocument(new ByteArrayInputStream(bytes))) {
+      String rangeText = cleanWordText(document.getRange().text());
+      if (!rangeText.isBlank()) {
+        return rangeText;
+      }
+      try (var extractor = new WordExtractor(document)) {
+        return cleanWordText(extractor.getText());
+      }
+    }
+  }
+
+  private String extractOldDocText(byte[] bytes) throws IOException {
+    try (var extractor = new Word6Extractor(new ByteArrayInputStream(bytes))) {
+      return cleanWordText(extractor.getText());
+    }
+  }
+
+  private String extractWithFactory(byte[] bytes) throws Exception {
+    try (POITextExtractor extractor =
+        ExtractorFactory.createExtractor(new ByteArrayInputStream(bytes))) {
+      return cleanWordText(extractor.getText());
+    }
+  }
+
+  private String cleanWordText(String value) {
+    if (value == null) {
+      return "";
+    }
+    String normalized = value.replace('\u0007', '\n').replace('\u000b', '\n').replace('\r', '\n');
+    return stripUnsupportedControlCharacters(normalized).trim();
+  }
+
+  private String extractWordTextWithFallbacks(List<WordTextExtractor> extractors) {
+    List<Throwable> failures = new ArrayList<>();
+    boolean extractedAnyText = false;
+    for (WordTextExtractor extractor : extractors) {
+      try {
+        String text = extractor.extract();
+        extractedAnyText = true;
+        if (!text.isBlank()) {
+          return text;
+        }
+      } catch (Exception | LinkageError exception) {
+        failures.add(exception);
+      }
+    }
+    if (extractedAnyText) {
+      return "";
+    }
+    IllegalArgumentException exception = new IllegalArgumentException("Word file could not be read");
+    failures.forEach(exception::addSuppressed);
+    throw exception;
+  }
+
+  private static String stripUnsupportedControlCharacters(String value) {
+    StringBuilder cleaned = new StringBuilder(value.length());
+    for (int offset = 0; offset < value.length(); ) {
+      int codePoint = value.codePointAt(offset);
+      if (codePoint == '\n' || codePoint == '\t' || !Character.isISOControl(codePoint)) {
+        cleaned.appendCodePoint(codePoint);
+      }
+      offset += Character.charCount(codePoint);
+    }
+    return cleaned.toString();
   }
 
   public byte[] generateHistoricalPdf(String title, String extractedText) {
@@ -191,6 +263,11 @@ public class ReportDocumentGenerator {
 
   public record GeneratedDocuments(byte[] word, byte[] pdf) {}
 
+  @FunctionalInterface
+  private interface WordTextExtractor {
+    String extract() throws Exception;
+  }
+
   public record ReportImage(String name, String mediaType, byte[] bytes) {
     public ReportImage {
       bytes = bytes.clone();
@@ -231,7 +308,7 @@ public class ReportDocumentGenerator {
 
     private void paragraph(String text) throws IOException {
       float available = PDRectangle.A4.getWidth() - MARGIN * 2;
-      for (String sourceLine : text.split("\\R", -1)) {
+      for (String sourceLine : stripUnsupportedControlCharacters(text).split("\\R", -1)) {
         for (String line : wrap(sourceLine.isBlank() ? " " : sourceLine, available)) {
           ensureSpace(LINE_HEIGHT);
           writeLine(line, BODY_FONT_SIZE, MARGIN);

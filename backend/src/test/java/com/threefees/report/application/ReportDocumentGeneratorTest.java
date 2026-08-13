@@ -31,4 +31,27 @@ class ReportDocumentGeneratorTest {
       assertThat(new PDFTextStripper().getText(pdf)).contains("江苏省物业电费稽核报告");
     }
   }
+
+  @Test
+  void extractsHistoricalWordTextFromGeneratedDocx() {
+    var generator = new ReportDocumentGenerator("");
+    var sections = new ReportSections("历史报告", "情况正文", "排查正文", "整改正文");
+
+    var text = generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
+
+    assertThat(text).contains("历史报告", "情况正文", "排查正文", "整改正文");
+  }
+
+  @Test
+  void cleansWordControlCharactersBeforeHistoricalPdfPreview() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    var sections = new ReportSections("历史报告", "情况\u0001正文", "排查正文", "整改正文");
+
+    var text = generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
+    var pdf = generator.generateHistoricalPdf("历史报告", text);
+
+    try (var document = Loader.loadPDF(pdf)) {
+      assertThat(document.getNumberOfPages()).isGreaterThanOrEqualTo(1);
+    }
+  }
 }

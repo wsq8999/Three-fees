@@ -10,6 +10,7 @@ import type {
   DraftBlock,
   DraftVersion,
   ExportJob,
+  HistoricalReportCandidate,
   ImportBatch,
   ManagedUser,
   PageResult,
@@ -183,6 +184,14 @@ interface BackendTask {
   result: { reportId?: string } | null;
 }
 
+const TASK_ERROR_MESSAGES: Record<string, string> = {
+  HISTORICAL_WORD_INVALID:
+    "历史 Word 无法解析，请确认文件是真实的 .doc 或 .docx 文档，且不是 PDF/WPS 专有格式改名后的文件。",
+  HISTORICAL_REPORT_EMPTY: "历史 Word 不包含可预览正文，请上传包含正文内容的 Word 文件。",
+  HISTORICAL_CONVERSION_FAILED: "历史报告转换失败，请稍后重试或更换 Word 文件。",
+  TASK_PAYLOAD_INVALID: "历史报告导入任务数据异常，请重新提交。",
+};
+
 interface BackendReportSummary {
   id: string;
   reportNumber: string;
@@ -206,9 +215,23 @@ interface BackendReportSummary {
   correctedAt?: string | null;
 }
 
-function queryString(values: Record<string, string | number>): string {
+interface BackendHistoricalReportCandidate {
+  billingPointPeriodId: string;
+  billingPointCode: string;
+  billingPointName: string;
+  cityCode: string;
+  cityName: string;
+  period: string;
+  overLimitType?: string | null;
+  maxRatio?: string | null;
+}
+
+function queryString(
+  values: Record<string, string | number | null | undefined>,
+): string {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
+    if (value === null || value === undefined) continue;
     if (String(value).length > 0) params.set(key, String(value));
   }
   return params.toString();
@@ -222,8 +245,8 @@ function mapReportStatus(
   return "NONE";
 }
 
-function overLimitTypeLabel(value: string | null): string | null {
-  if (value === null || value.length === 0 || /^\?+$/.test(value)) {
+function overLimitTypeLabel(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value.length === 0 || /^\?+$/.test(value)) {
     return null;
   }
   const labels: Record<string, string> = {
@@ -427,7 +450,7 @@ function mapDraft(
           ? "FINALIZED"
           : "EDITING",
     blocks: sectionsToBlocks(item.sections),
-    messages: item.messages.flatMap((message) => [
+    messages: (item.messages ?? []).flatMap((message) => [
       {
         id: `${message.id}-user`,
         role: "USER" as const,
@@ -496,6 +519,21 @@ function mapReport(item: BackendReportSummary): ReportSummary {
   };
 }
 
+function mapHistoricalCandidate(
+  item: BackendHistoricalReportCandidate,
+): HistoricalReportCandidate {
+  return {
+    billingPointPeriodId: item.billingPointPeriodId,
+    billingPointCode: item.billingPointCode,
+    billingPointName: item.billingPointName,
+    cityCode: item.cityCode,
+    cityName: item.cityName,
+    period: item.period,
+    overLimitType: overLimitTypeLabel(item.overLimitType),
+    maxRatio: item.maxRatio ?? null,
+  };
+}
+
 async function waitForReport(taskId: string): Promise<string> {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
@@ -506,11 +544,16 @@ async function waitForReport(taskId: string): Promise<string> {
       return task.result.reportId;
     }
     if (task.status === "FAILED") {
-      throw new Error(task.errorCode ?? "正式报告生成失败");
+      throw new Error(taskErrorMessage(task.errorCode));
     }
     await new Promise((resolve) => globalThis.setTimeout(resolve, 1_000));
   }
   throw new Error("正式报告生成超时，请稍后在历史报告中查看任务结果");
+}
+
+function taskErrorMessage(errorCode: string | null): string {
+  if (errorCode === null) return "正式报告生成失败";
+  return TASK_ERROR_MESSAGES[errorCode] ?? errorCode;
 }
 
 async function fetchReportById(id: string): Promise<ReportSummary> {
@@ -558,14 +601,16 @@ export const businessApi = {
         ),
       );
     },
-    async create(input: CreateImportInput, file: File): Promise<ImportBatch> {
+    async create(input: CreateImportInput, file: File): Promise<ImportBatch[]> {
       const form = new FormData();
       form.set("datasetType", input.datasetType);
-      form.set("period", input.period);
+      if (input.period !== undefined && input.period.length > 0) {
+        form.set("period", input.period);
+      }
       form.set("file", file);
-      return asResult<ImportBatch>(
-        await httpClient.postForm("/api/v1/import-batches", form),
-      );
+      const response = await httpClient.postForm("/api/v1/import-batches", form);
+      const result = asResult<ImportBatch | { items: ImportBatch[] }>(response);
+      return "items" in result ? result.items : [result];
     },
     async retry(id: string): Promise<ImportBatch> {
       return asResult<ImportBatch>(
@@ -619,7 +664,7 @@ export const businessApi = {
         await httpClient.get(`/api/v1/billing-point-periods?${params}`),
       );
       return {
-        items: result.items.map(mapBillingSummary),
+        items: (result.items ?? []).map(mapBillingSummary),
         page: result.page + 1,
         size: result.size,
         totalElements: result.totalElements ?? result.total ?? 0,
@@ -754,7 +799,7 @@ export const businessApi = {
         await httpClient.get(`/api/v1/reports?${params}`),
       );
       return {
-        items: result.items.map(mapReport),
+        items: (result.items ?? []).map(mapReport),
         page: result.page + 1,
         size: result.size,
         totalElements: result.totalElements ?? result.total ?? 0,
@@ -764,19 +809,37 @@ export const businessApi = {
     async get(id: string): Promise<ReportSummary | undefined> {
       return fetchReportById(id);
     },
+    async listHistoricalCandidates(query: {
+      cityCode: string;
+      keyword: string;
+    }): Promise<HistoricalReportCandidate[]> {
+      const params = queryString({
+        cityCode: query.cityCode,
+        keyword: query.keyword,
+      });
+      return asResult<BackendHistoricalReportCandidate[]>(
+        await httpClient.get(
+          `/api/v1/historical-report-candidates${params ? `?${params}` : ""}`,
+        ),
+      ).map(mapHistoricalCandidate);
+    },
     async importHistorical(input: {
-      billingPointId: string;
-      period: string;
+      billingPointPeriodId: string;
       file: File;
     }): Promise<ReportSummary> {
       const form = new FormData();
-      form.set("billingPointPeriodId", input.billingPointId);
+      form.set("billingPointPeriodId", input.billingPointPeriodId);
       form.set("file", input.file);
-      const created = asResult<{ reportPublicId?: string; taskId?: string }>(
+      const created = asResult<{
+        reportId?: string;
+        reportPublicId?: string;
+        taskId?: string;
+      }>(
         await httpClient.postForm("/api/v1/historical-report-imports", form),
       );
-      if (created.reportPublicId !== undefined) {
-        return fetchReportById(created.reportPublicId);
+      const reportId = created.reportId ?? created.reportPublicId;
+      if (reportId !== undefined) {
+        return fetchReportById(reportId);
       }
       if (created.taskId !== undefined) {
         return fetchReportById(await waitForReport(created.taskId));
