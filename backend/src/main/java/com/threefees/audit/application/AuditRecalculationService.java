@@ -8,6 +8,8 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,6 +60,39 @@ public class AuditRecalculationService {
             period,
             cityCode);
     for (String billingPointCode : billingPointCodes) {
+      recalculateOne(YearMonth.parse(period), cityCode, billingPointCode);
+    }
+  }
+
+  @Transactional
+  public void recalculate(String period, String cityCode, Collection<String> billingPointCodes) {
+    var affectedCodes = new LinkedHashSet<String>();
+    for (String billingPointCode : billingPointCodes) {
+      if (billingPointCode != null && !billingPointCode.isBlank()) {
+        affectedCodes.add(billingPointCode);
+      }
+    }
+    if (affectedCodes.isEmpty()) {
+      return;
+    }
+    String placeholders =
+        String.join(",", java.util.Collections.nCopies(affectedCodes.size(), "?"));
+    var arguments = new java.util.ArrayList<Object>();
+    arguments.add(period);
+    arguments.add(cityCode);
+    arguments.addAll(affectedCodes);
+    List<String> existingCodes =
+        jdbcTemplate.queryForList(
+            """
+            SELECT s.billing_point_code
+              FROM billing_point_snapshot s
+             WHERE s.data_period = ? AND s.city_code = ? AND s.billing_point_code IN (
+            """
+                + placeholders
+                + ") ORDER BY s.billing_point_code",
+            String.class,
+            arguments.toArray());
+    for (String billingPointCode : existingCodes) {
       recalculateOne(YearMonth.parse(period), cityCode, billingPointCode);
     }
   }

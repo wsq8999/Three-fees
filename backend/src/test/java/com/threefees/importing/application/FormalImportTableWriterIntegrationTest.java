@@ -134,6 +134,12 @@ class FormalImportTableWriterIntegrationTest {
 
     assertThat(count("billing_point_snapshot", "2026-08", "320100")).isEqualTo(1);
     assertThat(count("billing_point_snapshot", "2026-08", "321200")).isEqualTo(1);
+    assertThat(
+            jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM billing_point_master WHERE billing_point_code=?",
+                Integer.class,
+                "BP-SAME"))
+        .isEqualTo(2);
   }
 
   private int count(String table, String period, String cityCode) {

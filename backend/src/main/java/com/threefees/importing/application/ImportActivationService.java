@@ -2,7 +2,9 @@ package com.threefees.importing.application;
 
 import com.threefees.audit.application.AuditRecalculationService;
 import com.threefees.importing.domain.ImportBatch;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,9 +33,17 @@ public class ImportActivationService {
     formalImportTableWriter.replace(batch, rows);
     batchRepository.markSucceeded(batch, rows.size());
     if (batchRepository.allDatasetsActive(batch.period(), batch.cityCode())) {
-      auditRecalculationService.recalculate(batch.period(), batch.cityCode());
+      auditRecalculationService.recalculate(batch.period(), batch.cityCode(), affectedCodes(rows));
     }
   }
+
+  private Set<String> affectedCodes(List<ImportRow> rows) {
+    var codes = new LinkedHashSet<String>();
+    for (ImportRow row : rows) {
+      if (row.billingPointCode() != null && !row.billingPointCode().isBlank()) {
+        codes.add(row.billingPointCode());
+      }
+    }
+    return codes;
+  }
 }
-
-

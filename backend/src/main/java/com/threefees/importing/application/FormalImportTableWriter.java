@@ -1,6 +1,5 @@
 package com.threefees.importing.application;
 
-import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import java.math.BigDecimal;
 import java.sql.Date;
@@ -134,9 +133,14 @@ public class FormalImportTableWriter {
       return;
     }
     String placeholders = placeholders(billingPointCodes.size());
+    var deleteArguments = new java.util.ArrayList<Object>();
+    deleteArguments.add(batch.cityCode());
+    deleteArguments.addAll(billingPointCodes);
     jdbcTemplate.update(
-        "DELETE FROM billing_point_master WHERE billing_point_code IN (" + placeholders + ")",
-        billingPointCodes.toArray());
+        "DELETE FROM billing_point_master WHERE city_code = ? AND billing_point_code IN ("
+            + placeholders
+            + ")",
+        deleteArguments.toArray());
     var arguments = new java.util.ArrayList<Object>();
     arguments.add(batch.cityCode());
     arguments.add(batch.period());
