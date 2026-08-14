@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { UploadFile } from "element-plus";
-import { ElMessageBox } from "element-plus";
+import type { UploadFile, UploadInstance } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
@@ -31,47 +30,54 @@ const datasetMeta: Record<
   },
   PAYMENT: {
     label: "缴费明细",
-    description: "缴费单及审核、金额信息",
+    description: "缴费单、审核与金额信息",
     fieldCount: 198,
   },
   METER_READING: {
     label: "电表读数",
-    description: "电表抄表、分摊读数数据",
+    description: "电表抄表与分摊读数",
     fieldCount: 42,
   },
   BENCHMARK: {
-    label: "标杆数据",
+    label: "标杆值",
     description: "额定功率标杆数据",
     fieldCount: 39,
   },
 };
 
-const period = ref(props.defaultPeriod ?? "2026-06");
+const period = ref(props.defaultPeriod ?? "");
 const selectedType = ref<DatasetType>("BILLING_POINT");
 const selectedFile = ref<File | null>(null);
 const batches = ref<ImportBatch[]>([]);
 const runningBatch = ref<ImportBatch | null>(null);
 const runningBatches = ref<ImportBatch[]>([]);
+const progressVisible = ref(false);
+const successVisible = ref(false);
+const pendingFocusBatch = ref<ImportBatch | null>(null);
 const isSubmitting = ref(false);
 const errorMessage = ref("");
-
-const activeByType = computed(
-  () =>
-    new Map(
-      batches.value
-        .filter(
-          (batch) => batch.period === period.value && batch.status === "ACTIVE",
-        )
-        .map((batch) => [batch.datasetType, batch]),
-    ),
-);
+const uploadRef = ref<UploadInstance>();
+const uploadKey = ref(0);
 
 const canSubmit = computed(
-  () =>
-    selectedFile.value !== null &&
-    !isSubmitting.value &&
-    runningBatch.value === null,
+  () => selectedFile.value !== null && !isSubmitting.value && !progressVisible.value,
 );
+
+function selectDataset(datasetType: DatasetType): void {
+  if (progressVisible.value) return;
+  selectedType.value = datasetType;
+}
+
+function statusLabel(status: ImportBatch["status"]): string {
+  const labels: Record<ImportBatch["status"], string> = {
+    QUEUED: "待处理",
+    ACTIVE: "已生效",
+    PROCESSING: "处理中",
+    FAILED: "失败",
+    SUPERSEDED: "已被替换",
+  };
+  return labels[status] ?? status;
+}
 
 async function loadBatches(): Promise<void> {
   batches.value = await businessApi.imports.list();
@@ -82,7 +88,10 @@ function resetForm(): void {
   selectedFile.value = null;
   runningBatch.value = null;
   runningBatches.value = [];
+  pendingFocusBatch.value = null;
   errorMessage.value = "";
+  uploadRef.value?.clearFiles();
+  uploadKey.value += 1;
 }
 
 function handleFileChange(file: UploadFile): void {
@@ -92,59 +101,63 @@ function handleFileChange(file: UploadFile): void {
   if (!/\.(?:xlsx|xls|csv)$/i.test(raw.name)) {
     errorMessage.value = "只支持 .xlsx、.xls 或 .csv 文件。";
     selectedFile.value = null;
+    uploadRef.value?.clearFiles();
     return;
   }
   if (raw.size === 0) {
     errorMessage.value = "不能导入空文件，请重新选择。";
     selectedFile.value = null;
+    uploadRef.value?.clearFiles();
     return;
   }
   selectedFile.value = raw;
 }
 
 async function pollBatches(ids: string[]): Promise<void> {
+  const validIds = ids.filter(Boolean);
+  if (validIds.length === 0) {
+    throw new Error("导入批次创建成功，但响应中缺少批次编号。");
+  }
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const latestList = (
-      await Promise.all(ids.map((id) => businessApi.imports.get(id)))
+      await Promise.all(validIds.map((id) => businessApi.imports.get(id)))
     ).filter((item): item is ImportBatch => item !== undefined);
     runningBatches.value = latestList;
     runningBatch.value = latestList[0] ?? null;
     if (
-      latestList.length === ids.length &&
-      latestList.every(
-        (batch) => batch.status === "ACTIVE" || batch.status === "FAILED",
-      )
+      latestList.length === validIds.length &&
+      latestList.every((batch) => batch.status === "ACTIVE" || batch.status === "FAILED")
     ) {
       await loadBatches();
-      latestList
-        .filter((batch) => batch.status === "ACTIVE")
-        .forEach((batch) => emit("imported", batch));
+      const succeeded = latestList.filter((batch) => batch.status === "ACTIVE");
+      if (succeeded.length === latestList.length) {
+        pendingFocusBatch.value =
+          succeeded.find((batch) => batch.datasetType === "BILLING_POINT") ?? succeeded[0] ?? null;
+        successVisible.value = true;
+      }
       return;
     }
     await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
   }
-  errorMessage.value = "导入任务仍在后台处理中，可关闭窗口后稍后刷新查看。";
+  errorMessage.value = "导入任务仍在后台处理中，请稍后刷新查看。";
+}
+
+async function confirmSuccess(): Promise<void> {
+  const focusBatch = pendingFocusBatch.value;
+  progressVisible.value = false;
+  successVisible.value = false;
+  emit("update:modelValue", false);
+  resetForm();
+  await loadBatches();
+  if (focusBatch) {
+    emit("imported", focusBatch);
+  }
 }
 
 async function submit(): Promise<void> {
   if (selectedFile.value === null) return;
   errorMessage.value = "";
-  const current = activeByType.value.get(selectedType.value);
-  if (current !== undefined) {
-    try {
-      await ElMessageBox.confirm(
-        `当前已存在激活的${datasetMeta[selectedType.value].label}批次。新批次校验成功后将整批替换。`,
-        "确认整批替换",
-        {
-          confirmButtonText: "继续导入",
-          cancelButtonText: "取消",
-          type: "warning",
-        },
-      );
-    } catch {
-      return;
-    }
-  }
+  progressVisible.value = true;
   isSubmitting.value = true;
   try {
     const created = await businessApi.imports.create(
@@ -158,12 +171,13 @@ async function submit(): Promise<void> {
     runningBatch.value = created[0] ?? null;
     await pollBatches(created.map((batch) => batch.id));
   } catch (error) {
+    progressVisible.value = false;
     errorMessage.value =
       error instanceof ApiProblem && error.fieldErrors.length > 0
-        ? `${error.message}：${error.fieldErrors
+        ? `${error.message}: ${error.fieldErrors
             .slice(0, 5)
             .map((item) => `${item.field} ${item.code} ${item.message}`)
-            .join("；")}`
+            .join("; ")}`
         : error instanceof Error
           ? error.message
           : "导入任务提交失败";
@@ -176,27 +190,34 @@ async function retry(): Promise<void> {
   const failed = runningBatches.value.filter((batch) => batch.status === "FAILED");
   if (failed.length === 0 && runningBatch.value === null) return;
   isSubmitting.value = true;
+  progressVisible.value = true;
   try {
     const retried = await Promise.all(
-      (failed.length > 0 ? failed : [runningBatch.value as ImportBatch]).map(
-        (batch) => businessApi.imports.retry(batch.id),
+      (failed.length > 0 ? failed : [runningBatch.value as ImportBatch]).map((batch) =>
+        businessApi.imports.retry(batch.id),
       ),
     );
     runningBatches.value = retried;
     runningBatch.value = retried[0] ?? null;
     await pollBatches(retried.map((batch) => batch.id));
   } catch (error) {
+    progressVisible.value = false;
     errorMessage.value = error instanceof Error ? error.message : "重试失败";
   } finally {
     isSubmitting.value = false;
   }
 }
 
+function closeMainDialog(): void {
+  emit("update:modelValue", false);
+  resetForm();
+}
+
 watch(
   () => props.modelValue,
   (visible) => {
     if (!visible) return;
-    period.value = props.defaultPeriod ?? "2026-06";
+    period.value = props.defaultPeriod ?? "";
     resetForm();
     void loadBatches();
   },
@@ -207,8 +228,10 @@ watch(
   <ElDialog
     :model-value="modelValue"
     title="导入数据"
-    width="min(1040px, 94vw)"
-    top="6vh"
+    width="min(1040px, calc(100vw - 32px))"
+    class="import-dialog"
+    append-to-body
+    align-center
     :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -222,14 +245,14 @@ watch(
             type="button"
             class="dataset-card"
             :class="{ selected: selectedType === datasetType }"
-            :disabled="runningBatch !== null"
-            @click="selectedType = datasetType"
+            :disabled="progressVisible"
+            @click="selectDataset(datasetType)"
           >
             <b>{{ String(index + 1).padStart(2, "0") }}</b>
             <span>
               <strong>{{ datasetMeta[datasetType].label }}</strong>
               <small>
-                {{ datasetMeta[datasetType].description }} ·
+                {{ datasetMeta[datasetType].description }} /
                 {{ datasetMeta[datasetType].fieldCount }} 列
               </small>
             </span>
@@ -241,12 +264,14 @@ watch(
       <div class="form-row upload-row">
         <strong><span>*</span> 上传文件</strong>
         <ElUpload
+          :key="uploadKey"
+          ref="uploadRef"
           class="file-upload"
           drag
           :auto-upload="false"
           :limit="1"
           accept=".xlsx,.xls,.csv"
-          :disabled="runningBatch !== null"
+          :disabled="progressVisible"
           :on-change="handleFileChange"
           :on-remove="() => (selectedFile = null)"
         >
@@ -254,9 +279,7 @@ watch(
             <b>{{ selectedFile.name.split(".").pop()?.toUpperCase() }}</b>
             <span>
               <strong>{{ selectedFile.name }}</strong>
-              <small>
-                {{ (selectedFile.size / 1024).toFixed(1) }} KB · 文件类型与表头将在服务端复核
-              </small>
+              <small>{{ (selectedFile.size / 1024).toFixed(1) }} KB</small>
             </span>
           </div>
           <template v-else>
@@ -265,63 +288,6 @@ watch(
           </template>
         </ElUpload>
       </div>
-
-      <ElAlert
-        title="系统将根据文件中的所属地市/地市自动识别城市，并根据文件日期自动拆分账期；电表读数将通过报账点或缴费单关联识别。"
-        type="warning"
-        :closable="false"
-        show-icon
-      />
-
-      <section v-if="runningBatches.length > 0 || runningBatch" class="task-panel">
-        <div>
-          <strong>导入任务</strong>
-          <span>{{ selectedFile?.name }}</span>
-        </div>
-        <div
-          v-for="batch in runningBatches.length > 0 ? runningBatches : runningBatch ? [runningBatch] : []"
-          :key="batch.id"
-          class="batch-result"
-        >
-          <div>
-            <strong>{{ batch.period }} / {{ batch.cityCode ?? "-" }}</strong>
-            <span>{{ batch.status }}</span>
-          </div>
-          <ElProgress
-            :percentage="
-              batch.status === 'ACTIVE' || batch.status === 'FAILED'
-                ? 100
-                : batch.status === 'PROCESSING'
-                  ? 66
-                  : 20
-            "
-            :status="
-              batch.status === 'FAILED'
-                ? 'exception'
-                : batch.status === 'ACTIVE'
-                  ? 'success'
-                  : undefined
-            "
-          />
-          <ElAlert
-            v-if="batch.status === 'FAILED'"
-            class="import-errors"
-            type="error"
-            :closable="false"
-            show-icon
-          >
-            <ul>
-              <li
-                v-for="item in batch.errors"
-                :key="`${batch.id}-${item.row}-${item.column}-${item.code ?? ''}`"
-              >
-                第 {{ item.row }} 行 {{ item.column }}
-                <template v-if="item.code">（{{ item.code }}）</template>：{{ item.message }}
-              </li>
-            </ul>
-          </ElAlert>
-        </div>
-      </section>
 
       <ElAlert
         v-if="errorMessage"
@@ -333,25 +299,7 @@ watch(
     </div>
 
     <template #footer>
-      <ElButton
-        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
-        :loading="isSubmitting"
-        @click="retry"
-      >
-        重新提交任务
-      </ElButton>
-      <ElButton
-        @click="
-          emit('update:modelValue', false);
-          resetForm();
-        "
-      >
-        {{
-          runningBatch && !['ACTIVE', 'FAILED'].includes(runningBatch.status)
-            ? '关闭观察窗口'
-            : '取消'
-        }}
-      </ElButton>
+      <ElButton @click="closeMainDialog">取消</ElButton>
       <ElButton
         type="primary"
         :loading="isSubmitting"
@@ -362,17 +310,105 @@ watch(
       </ElButton>
     </template>
   </ElDialog>
+
+  <ElDialog
+    v-model="progressVisible"
+    title="导入进度"
+    width="min(560px, calc(100vw - 32px))"
+    class="import-progress-dialog"
+    append-to-body
+    align-center
+    :close-on-click-modal="false"
+    :show-close="false"
+  >
+    <div class="progress-list">
+      <div
+        v-for="batch in runningBatches.length > 0 ? runningBatches : runningBatch ? [runningBatch] : []"
+        :key="batch.id"
+        class="batch-result"
+      >
+        <div>
+          <strong>{{ batch.period }} / {{ batch.cityCode ?? "-" }}</strong>
+          <span>{{ statusLabel(batch.status) }}</span>
+        </div>
+        <ElProgress
+          :percentage="
+            batch.status === 'ACTIVE' || batch.status === 'FAILED'
+              ? 100
+              : batch.status === 'PROCESSING'
+                ? 66
+                : 20
+          "
+          :status="
+            batch.status === 'FAILED'
+              ? 'exception'
+              : batch.status === 'ACTIVE'
+                ? 'success'
+                : undefined
+          "
+        />
+        <ElAlert
+          v-if="batch.status === 'FAILED'"
+          class="import-errors"
+          type="error"
+          :closable="false"
+          show-icon
+        >
+          <ul>
+            <li
+              v-for="item in batch.errors"
+              :key="`${batch.id}-${item.row}-${item.column}-${item.code ?? ''}`"
+            >
+              第 {{ item.row }} 行 {{ item.column }} {{ item.code ?? "" }} {{ item.message }}
+            </li>
+          </ul>
+        </ElAlert>
+      </div>
+    </div>
+    <template #footer>
+      <ElButton
+        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
+        :loading="isSubmitting"
+        @click="retry"
+      >
+        重新提交任务
+      </ElButton>
+      <ElButton
+        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
+        @click="progressVisible = false"
+      >
+        关闭
+      </ElButton>
+    </template>
+  </ElDialog>
+
+  <ElDialog
+    v-model="successVisible"
+    title="导入成功"
+    width="min(420px, calc(100vw - 32px))"
+    class="import-success-dialog"
+    append-to-body
+    align-center
+    :close-on-click-modal="false"
+    :show-close="false"
+  >
+    <p class="success-message">导入数据已成功生效。</p>
+    <template #footer>
+      <ElButton type="primary" @click="confirmSuccess">确定</ElButton>
+    </template>
+  </ElDialog>
 </template>
 
 <style scoped>
-.import-form {
+.import-form,
+.progress-list {
   display: grid;
   gap: 18px;
 }
 
 .form-row {
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: minmax(96px, 112px) minmax(0, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -404,17 +440,26 @@ watch(
   text-align: left;
   background: #fff;
   border: 1px solid #d7e0ee;
-  border-radius: 12px;
+  border-radius: 8px;
   cursor: pointer;
   transition:
     border-color 0.16s ease,
     background 0.16s ease;
 }
 
-.dataset-card:hover,
+.dataset-card:hover {
+  background: #f8fbff;
+  border-color: #9db6cf;
+}
+
 .dataset-card.selected {
   background: #fff5f7;
   border-color: #ff3152;
+}
+
+.dataset-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .dataset-card > b {
@@ -429,113 +474,91 @@ watch(
 
 .dataset-card > span {
   display: flex;
+  min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-.dataset-card small {
-  color: #52657a;
+.dataset-card small,
+.selected-file small {
+  color: #6b7a90;
 }
 
-.dataset-card i {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  width: 12px;
-  height: 12px;
-  background: #ff3152;
-  border-radius: 50%;
-}
-
-.file-upload :deep(.el-upload),
-.file-upload :deep(.el-upload-dragger) {
+.file-upload {
   width: 100%;
 }
 
-.file-upload :deep(.el-upload-dragger) {
-  display: flex;
-  min-height: 132px;
-  flex-direction: column;
-  gap: 10px;
-  justify-content: center;
-  background: #fff;
-  border: 1px dashed #d7e0ee;
-  border-radius: 10px;
-}
-
-.file-upload :deep(.el-upload-dragger:hover) {
-  border-color: #ff3152;
-}
-
-.selected-file {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  text-align: left;
-}
-
-.selected-file > b {
-  display: grid;
-  width: 54px;
-  height: 54px;
-  place-items: center;
-  color: #ff3152;
-  border: 1px solid #ff3152;
-  border-radius: 8px;
-}
-
-.selected-file span {
-  display: flex;
-  flex-direction: column;
-}
-
-.task-panel {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-  background: #f7f9fc;
-  border: 1px solid #e5ecf6;
-  border-radius: 10px;
-}
-
-.task-panel > div:first-child,
+.selected-file,
 .batch-result > div:first-child {
   display: flex;
+  gap: 12px;
+  align-items: center;
   justify-content: space-between;
+}
+
+.selected-file b {
+  display: grid;
+  min-width: 56px;
+  height: 42px;
+  place-items: center;
+  color: #ff3152;
+  background: #fff0f3;
+  border-radius: 8px;
 }
 
 .batch-result {
   display: grid;
-  gap: 8px;
-  padding: 12px;
-  background: #fff;
-  border: 1px solid #e5ecf6;
-  border-radius: 8px;
-}
-
-.task-panel span,
-.task-panel p {
-  color: #52657a;
-  font-size: 13px;
+  gap: 10px;
 }
 
 .import-errors ul {
-  max-height: 120px;
+  padding-left: 18px;
+  margin: 0;
+}
+
+.success-message {
+  margin: 0;
+  color: #1f2d3d;
+  line-height: 1.8;
+  text-align: center;
+}
+
+:deep(.import-dialog),
+:deep(.import-progress-dialog),
+:deep(.import-success-dialog) {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  margin: 0 auto;
+}
+
+:deep(.import-dialog .el-dialog__body),
+:deep(.import-progress-dialog .el-dialog__body),
+:deep(.import-success-dialog .el-dialog__body) {
   overflow: auto;
 }
 
-@media (width <= 720px) {
+@media (min-width: 1200px) {
+  .dataset-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
   .form-row {
     grid-template-columns: 1fr;
   }
 
-  .form-row > strong {
-    padding-top: 0;
-  }
-
   .dataset-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dataset-card,
+  .selected-file,
+  .batch-result > div:first-child {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

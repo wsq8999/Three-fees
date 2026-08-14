@@ -70,6 +70,8 @@ export interface BillingPointQuery {
   period: string;
   keyword: string;
   auditStatus: AuditStatus | "";
+  focusPeriod?: string;
+  focusCityCode?: string;
   page: number;
   size: number;
 }
@@ -86,8 +88,8 @@ export interface BillingPointSummary {
   electricityCategory: string;
   billingPointStatus?: string | null;
   paymentEligibility: "ELIGIBLE" | "INELIGIBLE" | "PENDING";
-  actualEnergy: string | null;
-  actualAmount?: string | null;
+  actualEnergy: string | number | null;
+  actualAmount?: string | number | null;
   benchmarkEnergy: string | null;
   deviationRate: string | null;
   overLimitType?: string | null;
@@ -153,7 +155,9 @@ export interface AuditComparison {
   key: "YEAR_ON_YEAR" | "MONTH_ON_MONTH" | "RATED_BENCHMARK";
   label: string;
   status: AuditStatus;
+  referencePeriod: string | null;
   baseline: string | null;
+  threshold: string | null;
   actual: string | null;
   difference: string | null;
   ratio: string | null;
@@ -193,6 +197,7 @@ export interface DashboardData {
   overLimitBillingPointCount: number;
   pendingReviewCount: number;
   draftReportCount: number;
+  pendingReportCount: number;
   finalReportCount: number;
   districtOverLimitCounts: Array<{ name: string; count: number }>;
   overLimitTypeCounts: Array<{ name: string; count: number }>;
@@ -277,13 +282,15 @@ export interface ReportSummary {
   generatedAt: string;
   correctedAt: string | null;
   correctionCount: number;
-  actualEnergy?: string | null;
-  actualAmount?: string | null;
+  actualEnergy?: string | number | null;
+  actualAmount?: string | number | null;
   overLimitType?: string | null;
   maxRatio?: string | null;
   wordFileName: string;
   pdfFileName: string;
+  pdfAvailable?: boolean;
   summary: string;
+  previewHtml?: string | null;
   archivedAudit: AuditComparison[];
   latestAudit: AuditComparison[];
   corrections: Array<{
@@ -292,6 +299,56 @@ export interface ReportSummary {
     occurredAt: string;
     summary: string;
   }>;
+}
+
+export interface ReportGenerationCandidate {
+  billingPointCode: string;
+  billingPointName: string;
+  cityCode: string;
+  cityName: string;
+  district?: string | null;
+  period: string;
+  overLimitType?: string | null;
+  maxExceedRatio?: string | null;
+}
+
+export interface ReportGenerationInitialContent {
+  candidate: ReportGenerationCandidate;
+  contentHtml: string;
+}
+
+export interface ReportGenerationImageInput {
+  fileName: string;
+  mediaType: "image/png" | "image/jpeg";
+  base64Data: string;
+}
+
+export interface ReportGenerationImageAnalysisInput {
+  billingPointCode: string;
+  period: string;
+  contentHtml: string;
+  instruction: string;
+  images: ReportGenerationImageInput[];
+}
+
+export interface ReportGenerationImageAnalysisResult {
+  answer: string;
+  analysisText: string;
+  updatedContentHtml: string;
+}
+
+export interface HistoricalReportBillingPoint {
+  billingPointCode: string;
+  billingPointName: string;
+  cityCode: string;
+  cityName: string;
+}
+
+export interface HistoricalReportPeriod {
+  billingPointPeriodId: string;
+  period: string;
+  overLimitType?: string | null;
+  maxRatio?: string | null;
 }
 
 export interface HistoricalReportCandidate {
@@ -324,6 +381,7 @@ export interface ManagedUser {
   enabled: boolean;
   mustChangePassword: boolean;
   updatedAt: string;
+  version: number;
 }
 
 export interface BenchmarkRule {

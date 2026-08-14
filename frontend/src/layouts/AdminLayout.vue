@@ -80,6 +80,7 @@ async function submitPassword(): Promise<void> {
       user.value.id,
       passwordForm.current,
       passwordForm.next,
+      passwordForm.confirmation,
     );
     passwordDialogVisible.value = false;
     ElMessage.success("密码已修改，请重新登录。");
@@ -189,6 +190,9 @@ function handleUserCommand(command: string): void {
       v-model="passwordDialogVisible"
       title="修改密码"
       width="480px"
+      class="centered-dialog"
+      append-to-body
+      align-center
       :close-on-click-modal="false"
     >
       <ElForm label-position="top" @submit.prevent="submitPassword">
@@ -350,6 +354,11 @@ function handleUserCommand(command: string): void {
 .user-menu {
   display: flex;
   align-items: center;
+  min-width: 0;
+}
+
+.topbar-leading {
+  gap: var(--space-2);
 }
 
 .user-menu {
@@ -379,7 +388,7 @@ function handleUserCommand(command: string): void {
   width: min(100%, var(--content-max-width));
   min-width: 0;
   min-height: calc(100vh - var(--topbar-height));
-  padding: var(--space-4);
+  padding: var(--page-padding);
   margin: 0 auto;
 }
 
@@ -412,7 +421,7 @@ function handleUserCommand(command: string): void {
   }
 
   .main-content {
-    padding: var(--space-3);
+    padding: 12px;
   }
 
   .topbar :deep(.el-breadcrumb),
@@ -421,3 +430,14 @@ function handleUserCommand(command: string): void {
   }
 }
 </style>
+
+:deep(.centered-dialog) {
+  max-height: calc(100vh - 48px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+:deep(.centered-dialog .el-dialog__body) {
+  overflow: auto;
+}

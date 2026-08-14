@@ -243,7 +243,7 @@ public class ReportDraftService {
     ensureEditable(draft);
     requireExpectedVersion(draft, expectedVersion);
     if (!draft.publicId().equals(versionPublicId)) {
-      throw new ResourceNotFoundException("?????");
+      throw new ResourceNotFoundException("草稿版本不存在");
     }
     return draft;
   }
@@ -365,7 +365,7 @@ public class ReportDraftService {
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               LEFT JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
             """,
             (resultSet, rowNumber) ->
@@ -406,7 +406,7 @@ public class ReportDraftService {
                    r.public_id AS report_id
               FROM billing_point_snapshot s
               LEFT JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
               LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
              WHERE s.public_id = ?
             """,

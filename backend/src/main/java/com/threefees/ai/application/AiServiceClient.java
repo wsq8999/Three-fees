@@ -40,6 +40,43 @@ public class AiServiceClient {
     this.httpClient = HttpClient.newBuilder().connectTimeout(timeout).build();
   }
 
+  public ReportImageAnalysisResult analyzeReportImages(
+      String billingPointCode,
+      String period,
+      String contentHtml,
+      String instruction,
+      List<Fact> facts,
+      List<AiImage> images,
+      String traceId) {
+    String taskId = billingPointCode + "-" + period + "-image-analysis";
+    Map<String, Object> request =
+        Map.of(
+            "metadata", metadata(taskId, (instruction == null ? "" : instruction) + contentHtml, traceId),
+            "billing_point_code", billingPointCode,
+            "period", period,
+            "content_html", contentHtml,
+            "instruction", instruction == null ? "" : instruction,
+            "facts",
+                facts.stream()
+                    .map(fact -> Map.of("field_name", fact.fieldName(), "value", fact.value()))
+                    .toList(),
+            "images",
+                images.stream()
+                    .map(
+                        image ->
+                            Map.of(
+                                "file_name", image.fileName(),
+                                "media_type", image.mediaType(),
+                                "base64_data",
+                                    Base64.getEncoder().encodeToString(image.bytes())))
+                    .toList());
+    JsonNode response = post("api/v1/report-image-analysis", request, traceId);
+    return new ReportImageAnalysisResult(
+        response.path("answer").asText(""),
+        response.path("updated_content_html").asText(""),
+        response.path("analysis_text").asText(""));
+  }
+
   public AssistanceResult assist(
       String taskId,
       String intent,
@@ -48,51 +85,15 @@ public class AiServiceClient {
       List<Fact> facts,
       List<AiImage> images,
       String traceId) {
-    Map<String, Object> request =
-        Map.of(
-            "metadata", metadata(taskId, instruction, traceId),
-            "intent", intent,
-            "instruction", instruction,
-            "currentSections", sections,
-            "facts", facts,
-            "images",
-                images.stream()
-                    .map(
-                        image ->
-                            Map.of(
-                                "fileName", image.fileName(),
-                                "mediaType", image.mediaType(),
-                                "base64Data", Base64.getEncoder().encodeToString(image.bytes())))
-                    .toList(),
-            "allowedEvidenceIds", List.of());
-    JsonNode response = post("internal/v1/report-assistances", request, traceId);
-    JsonNode updated = response.get("updatedSections");
-    ReportSections updatedSections =
-        updated == null || updated.isNull()
-            ? null
-            : objectMapper.convertValue(updated, ReportSections.class);
-    return new AssistanceResult(response.path("answer").asText(), updatedSections);
-  }
-
-  public ReportSections compose(
-      String taskId, List<Fact> facts, boolean overLimit, String reason, String traceId) {
-    Map<String, Object> request =
-        Map.of(
-            "metadata", metadata(taskId, reason, traceId),
-            "facts", facts,
-            "judgment",
-                Map.of(
-                    "overLimit", overLimit,
-                    "reasonSummary", reason,
-                    "citedEvidenceIds", List.of()),
-            "allowedEvidenceIds", List.of());
-    JsonNode response = post("internal/v1/report-compositions", request, traceId);
-    return objectMapper.convertValue(response.path("sections"), ReportSections.class);
+    throw new AiServiceException(
+        "AI_DRAFT_ASSIST_DISABLED",
+        "旧草稿 AI 辅助入口已停用，请在生成报告页面使用“分析图片”。",
+        false);
   }
 
   private JsonNode post(String path, Object requestBody, String traceId) {
     if (token == null || token.length() < 16) {
-      throw new AiServiceException("AI_SERVICE_NOT_CONFIGURED", "AI_SERVICE_TOKEN 未配置或长度不足", false);
+      throw new AiServiceException("AI_SERVICE_NOT_CONFIGURED", "AI 服务令牌未配置或长度不足", false);
     }
     try {
       String body = objectMapper.writeValueAsString(requestBody);
@@ -107,7 +108,7 @@ public class AiServiceClient {
       HttpResponse<String> response =
           httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
       if (response.statusCode() == 429) {
-        throw new AiServiceException("AI_RATE_LIMITED", "AI 服务限流", true);
+        throw new AiServiceException("AI_RATE_LIMITED", "AI 服务限流，请稍后再试", true);
       }
       if (response.statusCode() < 200 || response.statusCode() >= 300) {
         throw new AiServiceException(
@@ -116,7 +117,9 @@ public class AiServiceClient {
             response.statusCode() >= 500);
       }
       JsonNode json = objectMapper.readTree(response.body());
-      if (!json.path("metadata").path("jobId").asText().equals(extractJobId(requestBody))) {
+      String responseJobId =
+          json.path("metadata").path("jobId").asText(json.path("metadata").path("job_id").asText());
+      if (!responseJobId.isBlank() && !responseJobId.equals(extractJobId(requestBody))) {
         throw new AiServiceException("AI_RESPONSE_MISMATCH", "AI 响应任务标识不一致", false);
       }
       return json;
@@ -158,7 +161,8 @@ public class AiServiceClient {
     try {
       return HexFormat.of()
           .formatHex(
-              MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+              MessageDigest.getInstance("SHA-256")
+                  .digest((value == null ? "" : value).getBytes(StandardCharsets.UTF_8)));
     } catch (NoSuchAlgorithmException exception) {
       throw new IllegalStateException("SHA-256 is not available", exception);
     }
@@ -181,4 +185,7 @@ public class AiServiceClient {
       String title, String situation, String analysis, String rectification) {}
 
   public record AssistanceResult(String answer, ReportSections updatedSections) {}
+
+  public record ReportImageAnalysisResult(
+      String answer, String updatedContentHtml, String analysisText) {}
 }

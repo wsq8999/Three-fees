@@ -6,13 +6,26 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
+import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.poi.extractor.ExtractorFactory;
 import org.apache.poi.extractor.POITextExtractor;
+import org.apache.poi.hwpf.model.PicturesTable;
+import org.apache.poi.hwpf.usermodel.Picture;
+import org.apache.poi.hwpf.usermodel.CharacterRun;
+import org.apache.poi.hwpf.usermodel.Paragraph;
+import org.apache.poi.hwpf.usermodel.Range;
+import org.apache.poi.hwpf.usermodel.Table;
+import org.apache.poi.hwpf.usermodel.TableCell;
+import org.apache.poi.hwpf.usermodel.TableIterator;
+import org.apache.poi.hwpf.usermodel.TableRow;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
@@ -25,10 +38,21 @@ import org.apache.poi.hwpf.extractor.Word6Extractor;
 import org.apache.poi.hwpf.extractor.WordExtractor;
 import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.xwpf.usermodel.BodyElementType;
+import org.apache.poi.xwpf.usermodel.IBodyElement;
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFPicture;
+import org.apache.poi.xwpf.usermodel.XWPFPictureData;
+import org.apache.poi.xwpf.usermodel.XWPFRun;
+import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.apache.poi.xwpf.usermodel.XWPFTableCell;
+import org.apache.poi.xwpf.usermodel.XWPFTableRow;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 
 @Component
 public class ReportDocumentGenerator {
@@ -36,6 +60,14 @@ public class ReportDocumentGenerator {
   private static final float MARGIN = 55;
   private static final float BODY_FONT_SIZE = 12;
   private static final float LINE_HEIGHT = 20;
+  private static final Pattern WORD_FIELD_CODE =
+      Pattern.compile(
+          "(?is)\\b(?:INCLUDEPICTURE|HYPERLINK)\\b\\s+(?:\"[^\"]*\"|\\\\.|[^\\r\\n])*?(?:MERGEFORMATINET|MERGEFORMAT)?");
+  private static final Pattern WORD_FIELD_SWITCH_URL =
+      Pattern.compile("(?is)\\\\[a-z]+\\s+\"?https?://[^\\r\\n\"]+\"?\\s*(?:\\\\\\*\\s*)?");
+  private static final Pattern RAW_URL = Pattern.compile("(?is)https?://\\S+");
+  private static final Pattern WORD_FIELD_REMAINDER =
+      Pattern.compile("(?i)\\b(?:MERGEFORMATINET|MERGEFORMAT|INCLUDEPICTURE|HYPERLINK)\\b");
 
   private final String configuredFontPath;
 
@@ -61,6 +93,117 @@ public class ReportDocumentGenerator {
     return new GeneratedDocuments(generateWord(sections, images), generatePdf(sections, images));
   }
 
+  public byte[] generateWordFromHtml(String contentHtml) {
+    try (var document = new XWPFDocument();
+        var output = new ByteArrayOutputStream()) {
+      String wrapped = "<root>" + normalizeHtml(contentHtml) + "</root>";
+      var factory = DocumentBuilderFactory.newInstance();
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setExpandEntityReferences(false);
+      var dom =
+          factory
+              .newDocumentBuilder()
+              .parse(new ByteArrayInputStream(wrapped.getBytes(StandardCharsets.UTF_8)));
+      appendHtmlChildren(document, dom.getDocumentElement());
+      document.write(output);
+      return output.toByteArray();
+    } catch (Exception exception) {
+      throw new IllegalStateException("Word report could not be generated from HTML", exception);
+    }
+  }
+
+  private String normalizeHtml(String value) {
+    String html = value == null ? "" : value.trim();
+    html = html.replaceAll("(?i)<br\\s*/?>", "<br />");
+    html = html.replaceAll("(?i)<img\\b([^>]*?)(?<!/)>", "<img$1 />");
+    html = html.replace("&nbsp;", " ");
+    return html;
+  }
+
+  private void appendHtmlChildren(XWPFDocument document, Node parent) throws Exception {
+    for (Node child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
+      appendHtmlNode(document, child);
+    }
+  }
+
+  private void appendHtmlNode(XWPFDocument document, Node node) throws Exception {
+    if (node.getNodeType() == Node.TEXT_NODE) {
+      String text = cleanWordText(node.getTextContent());
+      if (!text.isBlank()) {
+        appendWordParagraph(document, text, false, 12);
+      }
+      return;
+    }
+    if (!(node instanceof Element element)) {
+      return;
+    }
+    String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
+    switch (tag) {
+      case "h1" -> appendWordParagraph(document, element.getTextContent(), true, 18);
+      case "h2", "h3" -> appendWordParagraph(document, element.getTextContent(), true, 14);
+      case "p", "div", "section", "article" -> appendHtmlChildren(document, element);
+      case "br" -> appendWordParagraph(document, " ", false, 12);
+      case "table" -> appendHtmlTable(document, element);
+      case "img" -> appendHtmlImage(document, element);
+      default -> appendHtmlChildren(document, element);
+    }
+  }
+
+  private void appendWordParagraph(XWPFDocument document, String text, boolean bold, int size) {
+    String cleaned = cleanWordText(text);
+    if (cleaned.isBlank()) {
+      return;
+    }
+    var paragraph = document.createParagraph();
+    var run = paragraph.createRun();
+    run.setText(cleaned);
+    run.setBold(bold);
+    run.setFontFamily(bold ? "SimHei" : "SimSun");
+    run.setFontSize(size);
+  }
+
+  private void appendHtmlTable(XWPFDocument document, Element tableElement) {
+    var rows = tableElement.getElementsByTagName("tr");
+    if (rows.getLength() == 0) {
+      return;
+    }
+    var table = document.createTable(rows.getLength(), 1);
+    for (int rowIndex = 0; rowIndex < rows.getLength(); rowIndex++) {
+      var rowElement = (Element) rows.item(rowIndex);
+      var cells = rowElement.getElementsByTagName("td");
+      if (cells.getLength() == 0) {
+        cells = rowElement.getElementsByTagName("th");
+      }
+      var row = table.getRow(rowIndex);
+      while (row.getTableCells().size() < Math.max(cells.getLength(), 1)) {
+        row.addNewTableCell();
+      }
+      for (int cellIndex = 0; cellIndex < Math.max(cells.getLength(), 1); cellIndex++) {
+        row.getCell(cellIndex).setText(cellIndex < cells.getLength() ? cells.item(cellIndex).getTextContent() : "");
+      }
+    }
+  }
+
+  private void appendHtmlImage(XWPFDocument document, Element image) throws Exception {
+    String src = image.getAttribute("src");
+    if (!src.startsWith("data:image/")) {
+      return;
+    }
+    int comma = src.indexOf(',');
+    int semicolon = src.indexOf(';');
+    if (comma < 0 || semicolon < 0 || semicolon > comma) {
+      return;
+    }
+    String mediaType = src.substring("data:".length(), semicolon);
+    byte[] bytes = Base64.getDecoder().decode(src.substring(comma + 1));
+    int type = "image/png".equals(mediaType) ? XWPFDocument.PICTURE_TYPE_PNG : XWPFDocument.PICTURE_TYPE_JPEG;
+    var paragraph = document.createParagraph();
+    paragraph.setAlignment(ParagraphAlignment.CENTER);
+    paragraph
+        .createRun()
+        .addPicture(new ByteArrayInputStream(bytes), type, "pasted-image", Units.toEMU(420), Units.toEMU(260));
+  }
+
   public String extractWordText(byte[] bytes, String originalName) {
     String lower = originalName.toLowerCase(java.util.Locale.ROOT);
     if (lower.endsWith(".docx")) {
@@ -75,6 +218,214 @@ public class ReportDocumentGenerator {
               () -> extractWithFactory(bytes)));
     }
     throw new IllegalArgumentException("Only .doc/.docx historical reports are supported");
+  }
+
+  public String extractWordPreviewHtml(byte[] bytes, String originalName) {
+    String lower = originalName.toLowerCase(java.util.Locale.ROOT);
+    try {
+      if (lower.endsWith(".docx")) {
+        return extractDocxHtml(bytes);
+      }
+      if (lower.endsWith(".doc")) {
+        return extractDocHtml(bytes);
+      }
+    } catch (IOException | RuntimeException exception) {
+      throw new IllegalArgumentException("Word file could not be read", exception);
+    }
+    throw new IllegalArgumentException("Only .doc/.docx historical reports are supported");
+  }
+
+  private String extractDocxHtml(byte[] bytes) throws IOException {
+    try (var document = new XWPFDocument(new ByteArrayInputStream(bytes))) {
+      StringBuilder html = new StringBuilder("<div class=\"word-preview\">");
+      appendDocxBodyElements(html, document.getBodyElements());
+      html.append("</div>");
+      return html.toString();
+    }
+  }
+
+  private String extractDocHtml(byte[] bytes) throws IOException {
+    try (var document = new HWPFDocument(new ByteArrayInputStream(bytes))) {
+      StringBuilder html = new StringBuilder("<div class=\"word-preview\">");
+      Range range = document.getRange();
+      boolean[] tableParagraph = new boolean[Math.max(range.numParagraphs(), 0)];
+      TableIterator iterator = new TableIterator(range);
+      while (iterator.hasNext()) {
+        Table table = iterator.next();
+        html.append("<table>");
+        for (int rowIndex = 0; rowIndex < table.numRows(); rowIndex++) {
+          TableRow row = table.getRow(rowIndex);
+          html.append("<tr>");
+          for (int cellIndex = 0; cellIndex < row.numCells(); cellIndex++) {
+            TableCell cell = row.getCell(cellIndex);
+            html.append("<td>");
+            appendDocRange(html, document.getPicturesTable(), cell);
+            html.append("</td>");
+            markTableParagraphs(range, cell, tableParagraph);
+          }
+          html.append("</tr>");
+        }
+        html.append("</table>");
+      }
+      for (int index = 0; index < range.numParagraphs(); index++) {
+        if (!tableParagraph[index]) {
+          appendDocParagraph(html, document.getPicturesTable(), range.getParagraph(index));
+        }
+      }
+      html.append("</div>");
+      return html.toString();
+    }
+  }
+
+  private void appendDocxBodyElements(StringBuilder html, List<IBodyElement> elements) {
+    for (IBodyElement element : elements) {
+      if (element.getElementType() == BodyElementType.PARAGRAPH) {
+        appendDocxParagraph(html, (XWPFParagraph) element);
+      } else if (element.getElementType() == BodyElementType.TABLE) {
+        appendDocxTable(html, (XWPFTable) element);
+      }
+    }
+  }
+
+  private void appendDocxTable(StringBuilder html, XWPFTable table) {
+    html.append("<table>");
+    for (XWPFTableRow row : table.getRows()) {
+      html.append("<tr>");
+      for (XWPFTableCell cell : row.getTableCells()) {
+        html.append("<td>");
+        appendDocxBodyElements(html, cell.getBodyElements());
+        html.append("</td>");
+      }
+      html.append("</tr>");
+    }
+    html.append("</table>");
+  }
+
+  private void appendDocxParagraph(StringBuilder html, XWPFParagraph paragraph) {
+    StringBuilder text = new StringBuilder();
+    boolean wroteContent = false;
+    for (XWPFRun run : paragraph.getRuns()) {
+      String runText = cleanWordText(run.text());
+      if (!runText.isBlank()) {
+        text.append(runText);
+      }
+      for (XWPFPicture picture : run.getEmbeddedPictures()) {
+        wroteContent |= appendBufferedParagraph(html, text);
+        XWPFPictureData data = picture.getPictureData();
+        if (data != null) {
+          appendImage(html, data.getData(), data.getFileName(), data.getPackagePart().getContentType());
+          wroteContent = true;
+        }
+      }
+    }
+    if (appendBufferedParagraph(html, text)) {
+      return;
+    }
+    if (!wroteContent) {
+      appendParagraph(html, paragraph.getText());
+    }
+  }
+
+  private void appendDocRange(StringBuilder html, PicturesTable picturesTable, Range range) {
+    for (int index = 0; index < range.numParagraphs(); index++) {
+      appendDocParagraph(html, picturesTable, range.getParagraph(index));
+    }
+  }
+
+  private void appendDocParagraph(StringBuilder html, PicturesTable picturesTable, Paragraph paragraph) {
+    StringBuilder text = new StringBuilder();
+    boolean wroteContent = false;
+    for (int runIndex = 0; runIndex < paragraph.numCharacterRuns(); runIndex++) {
+      CharacterRun run = paragraph.getCharacterRun(runIndex);
+      if (picturesTable.hasPicture(run)) {
+        wroteContent |= appendBufferedParagraph(html, text);
+        Picture picture = picturesTable.extractPicture(run, false);
+        if (picture != null) {
+          appendImage(html, picture.getContent(), picture.suggestFullFileName(), picture.getMimeType());
+          wroteContent = true;
+        }
+      } else {
+        String runText = cleanWordText(run.text());
+        if (!runText.isBlank()) {
+          text.append(runText);
+        }
+      }
+    }
+    if (!appendBufferedParagraph(html, text) && !wroteContent) {
+      appendParagraph(html, paragraph.text());
+    }
+  }
+
+  private void markTableParagraphs(Range range, TableCell cell, boolean[] tableParagraph) {
+    int start = cell.getStartOffset();
+    int end = cell.getEndOffset();
+    for (int index = 0; index < range.numParagraphs(); index++) {
+      var paragraph = range.getParagraph(index);
+      if (paragraph.getStartOffset() >= start && paragraph.getEndOffset() <= end) {
+        tableParagraph[index] = true;
+      }
+    }
+  }
+
+  private void appendImage(StringBuilder html, byte[] bytes, String name, String mediaType) {
+    if (bytes == null || bytes.length == 0) {
+      return;
+    }
+    String type = mediaType == null || mediaType.isBlank() ? "image/png" : mediaType;
+    html.append("<figure><img alt=\"")
+        .append(escapeHtml(name == null ? "Word image" : name))
+        .append("\" src=\"data:")
+        .append(escapeHtml(type))
+        .append(";base64,")
+        .append(Base64.getEncoder().encodeToString(bytes))
+        .append("\" /></figure>");
+  }
+
+  private boolean appendBufferedParagraph(StringBuilder html, StringBuilder text) {
+    String cleaned = cleanWordText(text.toString());
+    text.setLength(0);
+    if (cleaned.isBlank()) {
+      return false;
+    }
+    appendParagraph(html, cleaned);
+    return true;
+  }
+
+  private void appendParagraph(StringBuilder html, String text) {
+    String cleaned = cleanWordText(text);
+    if (cleaned.isBlank()) {
+      return;
+    }
+    html.append("<p>");
+    appendText(html, cleaned);
+    html.append("</p>");
+  }
+
+  private void appendText(StringBuilder html, String text) {
+    String[] lines = text.split("\\R", -1);
+    for (int index = 0; index < lines.length; index++) {
+      if (index > 0) {
+        html.append("<br />");
+      }
+      html.append(escapeHtml(lines[index]));
+    }
+  }
+
+  private String escapeHtml(String value) {
+    StringBuilder escaped = new StringBuilder(value.length());
+    for (int offset = 0; offset < value.length(); ) {
+      int codePoint = value.codePointAt(offset);
+      switch (codePoint) {
+        case '&' -> escaped.append("&amp;");
+        case '<' -> escaped.append("&lt;");
+        case '>' -> escaped.append("&gt;");
+        case '"' -> escaped.append("&quot;");
+        case '\'' -> escaped.append("&#39;");
+        default -> escaped.appendCodePoint(codePoint);
+      }
+      offset += Character.charCount(codePoint);
+    }
+    return escaped.toString();
   }
 
   private String extractDocxText(byte[] bytes) throws IOException {
@@ -113,7 +464,18 @@ public class ReportDocumentGenerator {
     if (value == null) {
       return "";
     }
-    String normalized = value.replace('\u0007', '\n').replace('\u000b', '\n').replace('\r', '\n');
+    String normalized =
+        value
+            .replace('\u0013', ' ')
+            .replace('\u0014', ' ')
+            .replace('\u0015', ' ')
+            .replace('\u0007', '\n')
+            .replace('\u000b', '\n')
+            .replace('\r', '\n');
+    normalized = WORD_FIELD_CODE.matcher(normalized).replaceAll(" ");
+    normalized = WORD_FIELD_SWITCH_URL.matcher(normalized).replaceAll(" ");
+    normalized = RAW_URL.matcher(normalized).replaceAll(" ");
+    normalized = WORD_FIELD_REMAINDER.matcher(normalized).replaceAll(" ");
     return stripUnsupportedControlCharacters(normalized).trim();
   }
 

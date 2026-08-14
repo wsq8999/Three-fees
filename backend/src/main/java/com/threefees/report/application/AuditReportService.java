@@ -56,7 +56,7 @@ public class AuditReportService {
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               LEFT JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
             """,
             (resultSet, rowNumber) ->
@@ -165,7 +165,7 @@ public class AuditReportService {
             (public_id, report_number, billing_point_snapshot_id, source_type, status,
              title, situation, analysis, rectification, word_file_id, pdf_file_id,
              business_snapshot_json, updated_by)
-          VALUES (?, ?, ?, 'SYSTEM', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, 'GENERATED', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           publicId,
           reportNumber,
@@ -266,12 +266,43 @@ public class AuditReportService {
             SELECT r.public_id, r.report_number, r.source_type, r.status, r.generated_at,
                    r.updated_at, r.version, s.billing_point_code, s.billing_point_name,
                    s.city_code, c.name AS city_name, s.data_period, s.data_json,
-                   a.actual_energy, a.actual_amount, a.over_limit_type, a.max_ratio
+                   COALESCE(
+                     (SELECT SUM(m.allocated_kwh)
+                        FROM meter_reading m
+                       WHERE m.billing_point_code = s.billing_point_code
+                         AND m.data_period = s.data_period
+                         AND m.city_code = s.city_code),
+                     a.actual_energy
+                   ) AS actual_energy,
+                   COALESCE(
+                     (SELECT SUM(p.actual_report_amount)
+                        FROM payment_detail p
+                       WHERE p.billing_point_code = s.billing_point_code
+                         AND p.data_period = s.data_period
+                         AND p.city_code = s.city_code
+                         AND p.id IN (
+                           SELECT MIN(p2.id)
+                             FROM payment_detail p2
+                            WHERE p2.billing_point_code = s.billing_point_code
+                              AND p2.data_period = s.data_period
+                              AND p2.city_code = s.city_code
+                            GROUP BY p2.payment_bill_code
+                         )),
+                     a.actual_amount
+                   ) AS actual_amount,
+                   a.over_limit_type, a.max_ratio,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.overLimitType')) AS snapshot_over_limit_type,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.overLimitType')) AS snapshot_result_over_limit_type,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.maxRatioPercent')) AS snapshot_max_ratio,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.maxRatioPercent')) AS snapshot_result_max_ratio,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualEnergy')) AS snapshot_actual_energy,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.actualEnergy')) AS snapshot_result_actual_energy,
+                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualAmount')) AS snapshot_actual_amount
               FROM audit_report r
               JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
               JOIN city c ON c.code = s.city_code
               LEFT JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
             """
                 + where
                 + " ORDER BY r.generated_at DESC, r.id DESC LIMIT ? OFFSET ?",
@@ -287,10 +318,24 @@ public class AuditReportService {
                     resultSet.getString("data_period"),
                     resultSet.getString("source_type"),
                     resultSet.getString("status"),
-                    resultSet.getBigDecimal("actual_energy"),
-                    resultSet.getBigDecimal("actual_amount"),
-                    resultSet.getString("over_limit_type"),
-                    resultSet.getBigDecimal("max_ratio"),
+                    decimalOr(
+                        decimalOr(
+                            resultSet.getBigDecimal("actual_energy"),
+                            resultSet.getString("snapshot_actual_energy")),
+                        resultSet.getString("snapshot_result_actual_energy")),
+                    decimalOr(
+                        resultSet.getBigDecimal("actual_amount"),
+                        resultSet.getString("snapshot_actual_amount")),
+                    valueOr(
+                        valueOr(
+                            resultSet.getString("over_limit_type"),
+                            resultSet.getString("snapshot_over_limit_type")),
+                        resultSet.getString("snapshot_result_over_limit_type")),
+                    decimalOr(
+                        decimalOr(
+                            resultSet.getBigDecimal("max_ratio"),
+                            resultSet.getString("snapshot_max_ratio")),
+                        resultSet.getString("snapshot_result_max_ratio")),
                     resultSet.getObject("generated_at", LocalDateTime.class),
                     resultSet.getObject("updated_at", LocalDateTime.class),
                     resultSet.getLong("version")),
@@ -312,12 +357,48 @@ public class AuditReportService {
                        wf.public_id AS word_file_public_id, pf.public_id AS pdf_file_public_id,
                        s.public_id AS snapshot_public_id, s.billing_point_code,
                        s.billing_point_name, s.city_code, c.name AS city_name, s.data_period,
-                       s.data_json
+                       s.data_json,
+                       COALESCE(
+                         (SELECT SUM(m.allocated_kwh)
+                            FROM meter_reading m
+                           WHERE m.billing_point_code = s.billing_point_code
+                             AND m.data_period = s.data_period
+                             AND m.city_code = s.city_code),
+                         a.actual_energy
+                       ) AS actual_energy,
+                       COALESCE(
+                         (SELECT SUM(p.actual_report_amount)
+                            FROM payment_detail p
+                           WHERE p.billing_point_code = s.billing_point_code
+                             AND p.data_period = s.data_period
+                             AND p.city_code = s.city_code
+                             AND p.id IN (
+                               SELECT MIN(p2.id)
+                                 FROM payment_detail p2
+                                WHERE p2.billing_point_code = s.billing_point_code
+                                  AND p2.data_period = s.data_period
+                                  AND p2.city_code = s.city_code
+                                GROUP BY p2.payment_bill_code
+                             )),
+                         a.actual_amount
+                       ) AS actual_amount,
+                       a.over_limit_type, a.max_ratio,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.overLimitType')) AS snapshot_over_limit_type,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.overLimitType')) AS snapshot_result_over_limit_type,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.maxRatioPercent')) AS snapshot_max_ratio,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.maxRatioPercent')) AS snapshot_result_max_ratio,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualEnergy')) AS snapshot_actual_energy,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.actualEnergy')) AS snapshot_result_actual_energy,
+                       JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualAmount')) AS snapshot_actual_amount
                   FROM audit_report r
                   JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
                   JOIN city c ON c.code = s.city_code
                   JOIN stored_file wf ON wf.id = r.word_file_id
-                  JOIN stored_file pf ON pf.id = r.pdf_file_id
+                  LEFT JOIN stored_file pf ON pf.id = r.pdf_file_id
+                  LEFT JOIN audit_result a
+                    ON a.billing_point_code = s.billing_point_code
+                   AND a.data_period = s.data_period
+                   AND a.city_code = s.city_code
                  WHERE r.public_id = ?
                 """,
                 (resultSet, rowNumber) ->
@@ -333,6 +414,24 @@ public class AuditReportService {
                         resultSet.getString("data_period"),
                         resultSet.getString("source_type"),
                         resultSet.getString("status"),
+                        decimalOr(
+                            decimalOr(
+                                resultSet.getBigDecimal("actual_energy"),
+                                resultSet.getString("snapshot_actual_energy")),
+                            resultSet.getString("snapshot_result_actual_energy")),
+                        decimalOr(
+                            resultSet.getBigDecimal("actual_amount"),
+                            resultSet.getString("snapshot_actual_amount")),
+                        valueOr(
+                            valueOr(
+                                resultSet.getString("over_limit_type"),
+                                resultSet.getString("snapshot_over_limit_type")),
+                            resultSet.getString("snapshot_result_over_limit_type")),
+                        decimalOr(
+                            decimalOr(
+                                resultSet.getBigDecimal("max_ratio"),
+                                resultSet.getString("snapshot_max_ratio")),
+                            resultSet.getString("snapshot_result_max_ratio")),
                         new ReportSections(
                             resultSet.getString("title"),
                             resultSet.getString("situation"),
@@ -358,6 +457,9 @@ public class AuditReportService {
 
   public FileAccess reportFile(String reportId, boolean pdf, CurrentUser actor) {
     ReportDetail report = find(reportId, actor);
+    if (pdf && report.pdfFileId() == null) {
+      throw new ResourceNotFoundException("PDF");
+    }
     var file = storedFileService.find(pdf ? report.pdfFileId() : report.wordFileId());
     return new FileAccess(file, storedFileService.resource(file));
   }
@@ -389,7 +491,7 @@ public class AuditReportService {
          FROM billing_point_snapshot s
          JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
-            ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+            ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
           LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
         """
             + where
@@ -407,14 +509,106 @@ public class AuditReportService {
         args.toArray());
   }
 
+  @Transactional(readOnly = true)
+  public List<HistoricalBillingPointOption> historicalBillingPoints(
+      String keyword, String cityCode, CurrentUser actor) {
+    String scopedCity = scopeCity(actor, cityCode);
+    var args = new java.util.ArrayList<Object>();
+    StringBuilder where = new StringBuilder(" WHERE 1=1");
+    if (scopedCity != null && !scopedCity.isBlank()) {
+      where.append(" AND s.city_code = ?");
+      args.add(scopedCity);
+    }
+    if (keyword != null && !keyword.isBlank()) {
+      where.append(" AND (s.billing_point_code LIKE ? OR s.billing_point_name LIKE ?)");
+      String pattern = "%" + keyword.trim() + "%";
+      args.add(pattern);
+      args.add(pattern);
+    }
+    where.append(
+        """
+         AND EXISTS (
+           SELECT 1
+             FROM billing_point_snapshot sp
+             JOIN audit_result ap
+               ON ap.billing_point_code = sp.billing_point_code
+              AND ap.data_period = sp.data_period
+              AND ap.city_code = sp.city_code
+             LEFT JOIN audit_report rp ON rp.billing_point_snapshot_id = sp.id
+            WHERE sp.billing_point_code = s.billing_point_code
+              AND sp.city_code = s.city_code
+              AND ap.audit_status = 'OVER_LIMIT'
+              AND ap.report_status = 'WAITING'
+              AND rp.id IS NULL
+         )
+        """);
+    return jdbcTemplate.query(
+        """
+        SELECT s.billing_point_code, MAX(s.billing_point_name) AS billing_point_name,
+               s.city_code, MAX(c.name) AS city_name
+          FROM billing_point_snapshot s
+          JOIN city c ON c.code = s.city_code
+        """
+            + where
+            + """
+         GROUP BY s.billing_point_code, s.city_code
+         ORDER BY s.billing_point_code, s.city_code
+         LIMIT 500
+        """,
+        (resultSet, rowNumber) ->
+            new HistoricalBillingPointOption(
+                resultSet.getString("billing_point_code"),
+                resultSet.getString("billing_point_name"),
+                resultSet.getString("city_code"),
+                resultSet.getString("city_name")),
+        args.toArray());
+  }
+
+  @Transactional(readOnly = true)
+  public List<HistoricalPeriodOption> historicalPeriods(
+      String billingPointCode, String cityCode, CurrentUser actor) {
+    String scopedCity = scopeCity(actor, cityCode);
+    var args = new java.util.ArrayList<Object>();
+    args.add(billingPointCode);
+    StringBuilder where =
+        new StringBuilder(
+            """
+             WHERE s.billing_point_code = ? AND r.id IS NULL
+               AND a.audit_status = 'OVER_LIMIT'
+               AND a.report_status = 'WAITING'
+            """);
+    if (scopedCity != null && !scopedCity.isBlank()) {
+      where.append(" AND s.city_code = ?");
+      args.add(scopedCity);
+    }
+    return jdbcTemplate.query(
+        """
+        SELECT s.public_id, s.data_period, a.over_limit_type, a.max_ratio
+          FROM billing_point_snapshot s
+          LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
+          JOIN audit_result a
+            ON a.billing_point_code = s.billing_point_code
+           AND a.data_period = s.data_period
+           AND a.city_code = s.city_code
+        """
+            + where
+            + " ORDER BY s.data_period DESC",
+        (resultSet, rowNumber) ->
+            new HistoricalPeriodOption(
+                resultSet.getString("public_id"),
+                resultSet.getString("data_period"),
+                resultSet.getString("over_limit_type"),
+                resultSet.getBigDecimal("max_ratio")),
+        args.toArray());
+  }
   @Transactional
   public FinalizationResult finalizeHistoricalReport(
       long historicalImportId,
       long snapshotId,
       String title,
-      String extractedText,
+      String previewHtml,
       long sourceWordFileId,
-      long pdfFileId,
+      Long previewPdfFileId,
       String actor) {
     jdbcTemplate.queryForObject(
         "SELECT version FROM historical_report_import WHERE id = ? FOR UPDATE",
@@ -437,9 +631,9 @@ public class AuditReportService {
     SnapshotForHistory snapshot = snapshotForHistory(snapshotId);
     String publicId = UUID.randomUUID().toString();
     String reportNumber = nextReportNumber(snapshot.period());
-    String situation = extractedText;
-    String analysis = "历史报告原文转换预览";
-    String rectification = "以当前保存的 Word 最终内容为准";
+    String situation = previewHtml;
+    String analysis = "";
+    String rectification = "";
     String businessSnapshot =
         writeJson(
             Map.of(
@@ -453,7 +647,7 @@ public class AuditReportService {
           (public_id, report_number, billing_point_snapshot_id, source_type, status,
            title, situation, analysis, rectification, word_file_id, pdf_file_id,
            business_snapshot_json, updated_by)
-        VALUES (?, ?, ?, 'HISTORICAL', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 'IMPORTED', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         publicId,
         reportNumber,
@@ -463,7 +657,7 @@ public class AuditReportService {
         analysis,
         rectification,
         sourceWordFileId,
-        pdfFileId,
+        previewPdfFileId,
         businessSnapshot,
         actor);
     jdbcTemplate.update(
@@ -476,6 +670,18 @@ public class AuditReportService {
         publicId,
         actor,
         historicalImportId);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result a
+          JOIN billing_point_snapshot s
+            ON s.billing_point_code = a.billing_point_code
+           AND s.data_period = a.data_period
+           AND s.city_code = a.city_code
+           SET a.report_status = 'GENERATED',
+               a.updated_at = CURRENT_TIMESTAMP(3)
+         WHERE s.id = ?
+        """,
+        snapshotId);
     return new FinalizationResult(publicId, true);
   }
 
@@ -486,7 +692,9 @@ public class AuditReportService {
             SELECT s.public_id, s.data_period, s.data_json, a.detail_json
               FROM billing_point_snapshot s
               LEFT JOIN audit_result a
-                ON a.billing_point_code=s.billing_point_code AND a.data_period=s.data_period
+                ON a.billing_point_code=s.billing_point_code
+               AND a.data_period=s.data_period
+               AND a.city_code=s.city_code
              WHERE s.id=?
             """,
             (rs, row) ->
@@ -577,6 +785,24 @@ public class AuditReportService {
     }
   }
 
+  private String valueOr(String value, String fallback) {
+    return value == null || value.isBlank() || "null".equalsIgnoreCase(value) ? fallback : value;
+  }
+
+  private BigDecimal decimalOr(BigDecimal value, String fallback) {
+    if (value != null) {
+      return value;
+    }
+    if (fallback == null || fallback.isBlank() || "null".equalsIgnoreCase(fallback)) {
+      return null;
+    }
+    try {
+      return new BigDecimal(fallback);
+    } catch (NumberFormatException exception) {
+      return null;
+    }
+  }
+
   private String district(JsonNode values) {
     for (String field : List.of("所属区县", "区县", "行政区", "所属区域")) {
       String value = values.path(field).asText("").trim();
@@ -643,6 +869,10 @@ public class AuditReportService {
       String period,
       String sourceType,
       String status,
+      BigDecimal actualEnergy,
+      BigDecimal actualAmount,
+      String overLimitType,
+      BigDecimal maxRatio,
       ReportSections sections,
       String wordFileId,
       String pdfFileId,
@@ -665,6 +895,11 @@ public class AuditReportService {
       String overLimitType,
       BigDecimal maxRatio) {}
 
+  public record HistoricalBillingPointOption(
+      String billingPointCode, String billingPointName, String cityCode, String cityName) {}
+
+  public record HistoricalPeriodOption(
+      String billingPointPeriodId, String period, String overLimitType, BigDecimal maxRatio) {}
   public record FileAccess(
       com.threefees.file.domain.StoredFile file,
       org.springframework.core.io.InputStreamResource resource) {}

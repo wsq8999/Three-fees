@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
 
-import { businessApi } from "@/api/business-api";
+import { businessApi, formatPercent } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type { DashboardData } from "@/types/business";
@@ -14,6 +14,7 @@ const dashboard = ref<DashboardData | null>(null);
 const loading = ref(true);
 const errorMessage = ref("");
 const selectedPeriod = ref("");
+const importGuideVisible = ref(false);
 
 const periodLabel = computed(() => {
   const period = selectedPeriod.value || dashboard.value?.currentDataPeriod;
@@ -24,59 +25,38 @@ const periodLabel = computed(() => {
 });
 
 const periodOptions = computed(() => dashboard.value?.availablePeriods ?? []);
+const importGuideStorageKey = computed(() => {
+  const userId = session.currentUser?.id ?? session.currentUser?.username ?? "anonymous";
+  return `three-fees-import-guide-dismissed:${userId}`;
+});
 
 const overRate = computed(() => {
-  if (!dashboard.value || dashboard.value.billingPointCount === 0) return "—";
+  if (!dashboard.value || dashboard.value.billingPointCount === 0) return "-";
   return `${((dashboard.value.overLimitBillingPointCount / dashboard.value.billingPointCount) * 100).toFixed(2)}%`;
 });
 
-const normalRate = computed(() => {
-  if (!dashboard.value || dashboard.value.billingPointCount === 0) return 0;
-  return Math.round(
-    (dashboard.value.normalBillingPointCount /
-      dashboard.value.billingPointCount) *
-      100,
-  );
-});
-
 const districtChartData = computed(() =>
-  [...(dashboard.value?.districtOverLimitCounts ?? [])].sort(
-    (left, right) => right.count - left.count,
-  ),
+  [...(dashboard.value?.districtOverLimitCounts ?? [])].sort((left, right) => right.count - left.count),
 );
 
-const overLimitTypeChartData = computed(() => {
-  const source = new Map(
-    (dashboard.value?.overLimitTypeCounts ?? []).map((item) => [item.name, item.count]),
-  );
+const overLimitTypeChartData = computed(() => dashboard.value?.overLimitTypeCounts ?? []);
+
+const statusChartData = computed(() => {
+  const data = dashboard.value;
+  if (!data) return [];
   return [
-    { name: "仅同比", count: source.get("仅同比") ?? source.get("同比超标") ?? 0 },
-    { name: "仅环比", count: source.get("仅环比") ?? source.get("环比超标") ?? 0 },
-    {
-      name: "仅额定功率",
-      count:
-        source.get("仅额定功率") ??
-        source.get("额定标杆超标") ??
-        source.get("额定功率超标") ??
-        0,
-    },
-    { name: "多项超标", count: source.get("多项超标") ?? 0 },
+    { name: "正常", count: data.normalBillingPointCount, color: "#19a873" },
+    { name: "超标", count: data.overLimitBillingPointCount, color: "#f02f44" },
+    { name: "待稽核/不适用", count: data.pendingReviewCount, color: "#d98b00" },
   ];
 });
 
-const hasDistrictChart = computed(() =>
-  districtChartData.value.some((item) => item.count > 0),
-);
-const hasOverLimitTypeChart = computed(() =>
-  overLimitTypeChartData.value.some((item) => item.count > 0),
-);
+const hasDistrictChart = computed(() => districtChartData.value.some((item) => item.count > 0));
+const hasOverLimitTypeChart = computed(() => overLimitTypeChartData.value.some((item) => item.count > 0));
 const hasStatusChart = computed(() => (dashboard.value?.billingPointCount ?? 0) > 0);
-const maxDistrictCount = computed(() =>
-  Math.max(1, ...districtChartData.value.map((item) => item.count)),
-);
-const maxTypeCount = computed(() =>
-  Math.max(1, ...overLimitTypeChartData.value.map((item) => item.count)),
-);
+const maxDistrictCount = computed(() => Math.max(1, ...districtChartData.value.map((item) => item.count)));
+const maxTypeCount = computed(() => Math.max(1, ...overLimitTypeChartData.value.map((item) => item.count)));
+const maxStatusCount = computed(() => Math.max(1, ...statusChartData.value.map((item) => item.count)));
 
 function asPendingTask(row: unknown): DashboardData["pendingTasks"][number] {
   return row as DashboardData["pendingTasks"][number];
@@ -86,17 +66,32 @@ async function load(period = selectedPeriod.value): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
   try {
-    dashboard.value = await businessApi.dashboard.get(
-      session.currentUser?.city?.code,
-      period || undefined,
-    );
+    dashboard.value = await businessApi.dashboard.get(session.currentUser?.city?.code, period || undefined);
     selectedPeriod.value = dashboard.value.currentDataPeriod ?? "";
+    maybeShowImportGuide();
   } catch (error) {
-    errorMessage.value =
-      error instanceof Error ? error.message : "工作台加载失败";
+    errorMessage.value = error instanceof Error ? error.message : "工作台加载失败";
   } finally {
     loading.value = false;
   }
+}
+
+function maybeShowImportGuide(): void {
+  const user = session.currentUser;
+  if (user === null || user.city === null || dashboard.value === null) return;
+  if (dashboard.value.billingPointCount > 0) return;
+  if (sessionStorage.getItem(importGuideStorageKey.value) === "true") return;
+  importGuideVisible.value = true;
+}
+
+function closeImportGuide(): void {
+  sessionStorage.setItem(importGuideStorageKey.value, "true");
+  importGuideVisible.value = false;
+}
+
+async function openImportGuideTarget(): Promise<void> {
+  closeImportGuide();
+  await router.push({ path: "/billing-points", query: { dialog: "import" } });
 }
 
 async function changePeriod(): Promise<void> {
@@ -126,6 +121,7 @@ onMounted(load);
     :description="errorMessage"
     @retry="load"
   />
+
   <template v-else-if="dashboard">
     <section class="stat-grid">
       <article class="stat-card">
@@ -140,11 +136,7 @@ onMounted(load);
         <span class="stat-icon blue"><Location /></span>
         <div>
           <h3>当前账期站址</h3>
-          <small
-            >清单更新时间：{{
-              dashboard.lastUpdatedAt?.replace("T", " ").slice(0, 16) ?? "—"
-            }}</small
-          >
+          <small>清单更新时间：{{ dashboard.lastUpdatedAt?.replace("T", " ").slice(0, 16) ?? "—" }}</small>
         </div>
         <strong>{{ dashboard.siteCount }}</strong>
       </article>
@@ -162,7 +154,7 @@ onMounted(load);
           <h3>待生成报告</h3>
           <small>已生成报告：{{ dashboard.finalReportCount }}份</small>
         </div>
-        <strong class="green">{{ dashboard.draftReportCount }}</strong>
+        <strong class="green">{{ dashboard.pendingReportCount }}</strong>
       </article>
     </section>
 
@@ -170,7 +162,7 @@ onMounted(load);
       <header>
         <div>
           <h2>待生成报告任务</h2>
-          <p>按最大超标比例排序 · 当前仅展示有权限的数据</p>
+          <p>数据来源：当前权限范围 + 当前账期 + 稽核超标 + 报告状态待生成</p>
         </div>
         <ElSelect
           v-model="selectedPeriod"
@@ -189,26 +181,24 @@ onMounted(load);
       <ElTable :data="dashboard.pendingTasks" height="310">
         <ElTableColumn prop="billingPointCode" label="报账点编码" min-width="190" />
         <ElTableColumn prop="billingPointName" label="报账点名称" min-width="210" />
-        <ElTableColumn prop="county" label="所属区县" width="110" />
-        <ElTableColumn prop="period" label="账期" width="190" />
+        <ElTableColumn prop="county" label="所属区县" width="120" />
+        <ElTableColumn prop="period" label="账期" width="110" />
         <ElTableColumn label="实际报账金额" width="135">
           <template #default="scope">¥{{ scope.row.actualAmount }}</template>
         </ElTableColumn>
-        <ElTableColumn label="超标类型" width="120">
+        <ElTableColumn label="超标类型" width="150">
           <template #default="scope">
             <ElTag type="danger" size="small">{{ scope.row.overLimitType }}</ElTag>
           </template>
         </ElTableColumn>
         <ElTableColumn label="最大超标比例" width="130">
           <template #default="scope">
-            <b class="number-emphasis">{{ scope.row.maximumRatio }}</b>
+            <b class="number-emphasis">{{ formatPercent(scope.row.maximumRatio) }}</b>
           </template>
         </ElTableColumn>
         <ElTableColumn label="操作" width="105">
           <template #default="scope">
-            <ElButton link type="danger" @click="openTask(asPendingTask(scope.row))">
-              生成报告
-            </ElButton>
+            <ElButton link type="danger" @click="openTask(asPendingTask(scope.row))">生成报告</ElButton>
           </template>
         </ElTableColumn>
         <template #empty>
@@ -230,64 +220,65 @@ onMounted(load);
           <i
             :style="{
               width: `${Math.max(8, (item.count / maxDistrictCount) * 100)}%`,
-              opacity: String(1 - index * 0.12),
+              opacity: String(Math.max(0.35, 1 - index * 0.1)),
             }"
           />
           <b>{{ item.count }}</b>
         </div>
-        <ElEmpty
-          v-if="!hasDistrictChart"
-          :image-size="50"
-          description="当前账期暂无图表数据"
-        />
+        <ElEmpty v-if="!hasDistrictChart" :image-size="50" description="当前账期暂无图表数据" />
       </article>
+
       <article class="chart-card">
         <h3>超标类型分布</h3>
         <div v-if="hasOverLimitTypeChart" class="columns">
-          <span
-            v-for="item in overLimitTypeChartData"
-            :key="item.name"
-            :title="`${item.name}：${item.count}`"
-          >
+          <span v-for="item in overLimitTypeChartData" :key="item.name" :title="`${item.name}：${item.count}`">
             <b>{{ item.count }}</b>
             <i :style="{ height: `${Math.max(8, (item.count / maxTypeCount) * 92)}px` }" />
             <small>{{ item.name }}</small>
           </span>
         </div>
-        <ElEmpty
-          v-else
-          :image-size="50"
-          description="当前账期暂无图表数据"
-        />
+        <ElEmpty v-else :image-size="50" description="当前账期暂无图表数据" />
       </article>
+
       <article class="chart-card">
         <h3>当前账期状态分布</h3>
-        <div v-if="hasStatusChart" class="donut-wrap">
-          <div class="donut" :style="{ '--normal-rate': `${normalRate * 3.6}deg` }">
-            <strong>{{ dashboard.billingPointCount }}</strong>
-            <small>报账点</small>
+        <div v-if="hasStatusChart" class="status-bars">
+          <div v-for="item in statusChartData" :key="item.name" class="status-row">
+            <span>{{ item.name }}</span>
+            <i :style="{ width: `${Math.max(4, (item.count / maxStatusCount) * 100)}%`, background: item.color }" />
+            <b>{{ item.count }}</b>
           </div>
-          <dl>
-            <div><dt class="green-dot" />正常</div>
-            <dd>{{ dashboard.normalBillingPointCount }}</dd>
-            <div><dt class="red-dot" />超标</div>
-            <dd>{{ dashboard.overLimitBillingPointCount }}</dd>
-          </dl>
+          <p>合计：{{ dashboard.billingPointCount }} 个报账点</p>
         </div>
-        <ElEmpty
-          v-else
-          :image-size="50"
-          description="当前账期暂无图表数据"
-        />
+        <ElEmpty v-else :image-size="50" description="当前账期暂无图表数据" />
       </article>
     </section>
+
+    <ElDialog
+      v-model="importGuideVisible"
+      title="请先导入报账点数据"
+      width="min(520px, calc(100vw - 32px))"
+      class="import-guide-dialog"
+      append-to-body
+      align-center
+      :close-on-click-modal="false"
+      @close="closeImportGuide"
+    >
+      <p class="import-guide-copy">
+        当前城市还没有报账点数据。首次使用请先进入“报账点管理”，从“导入数据”开始导入报账点清单，之后再导入缴费明细、电表读数和标杆值。
+      </p>
+      <template #footer>
+        <ElButton @click="closeImportGuide">稍后再说</ElButton>
+        <ElButton type="primary" @click="openImportGuideTarget">去导入数据</ElButton>
+      </template>
+    </ElDialog>
   </template>
 </template>
 
 <style scoped>
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -304,7 +295,7 @@ onMounted(load);
 .stat-card {
   display: grid;
   min-height: 82px;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 14px;
   align-items: center;
   padding: 18px 20px;
@@ -356,6 +347,7 @@ onMounted(load);
 .stat-card small {
   color: #66758a;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .stat-card strong {
@@ -375,14 +367,15 @@ onMounted(load);
 
 .task-card {
   overflow: hidden;
-  margin-bottom: 14px;
   min-height: 388px;
+  margin-bottom: 14px;
 }
 
 .task-card > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 14px 16px;
   border-bottom: 1px solid #e4eaf2;
 }
@@ -406,15 +399,20 @@ onMounted(load);
   width: 252px;
 }
 
+.number-emphasis {
+  color: #f02f44;
+}
+
 .chart-grid {
   display: grid;
-  grid-template-columns: 1.05fr 0.95fr 1fr;
+  grid-template-columns: minmax(320px, 1fr) minmax(300px, 0.9fr) minmax(320px, 1fr);
   gap: 14px;
 }
 
 .chart-card {
-  min-height: 170px;
+  min-height: 180px;
   padding: 14px 16px;
+  overflow: hidden;
 }
 
 .chart-card h3 {
@@ -423,33 +421,47 @@ onMounted(load);
   font-size: 15px;
 }
 
-.bar-row {
+.bar-row,
+.status-row {
   display: grid;
-  grid-template-columns: 60px 1fr 24px;
-  gap: 12px;
+  grid-template-columns: minmax(72px, 96px) minmax(0, 1fr) 32px;
+  gap: 10px;
   align-items: center;
   margin: 9px 0;
   color: #23324a;
   font-size: 13px;
 }
 
-.bar-row i {
+.bar-row span,
+.status-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-row i,
+.status-row i {
   height: 7px;
-  background: linear-gradient(90deg, #ee3145, #f79aa5);
   border-radius: 99px;
 }
 
+.bar-row i {
+  background: linear-gradient(90deg, #ee3145, #f79aa5);
+}
+
 .columns {
-  display: flex;
-  height: 112px;
-  gap: 24px;
+  display: grid;
+  min-height: 132px;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: 12px;
   align-items: end;
-  justify-content: center;
+  overflow: hidden;
 }
 
 .columns span {
   display: flex;
-  flex: 1;
+  min-width: 0;
   flex-direction: column;
   align-items: center;
   color: #23324a;
@@ -464,81 +476,23 @@ onMounted(load);
 .columns small {
   margin-top: 8px;
   color: #66758a;
-}
-
-.donut-wrap {
-  display: flex;
-  gap: 28px;
-  align-items: center;
-  justify-content: center;
-  min-height: 112px;
-}
-
-.donut {
-  position: relative;
-  display: grid;
-  width: 108px;
-  height: 108px;
-  place-content: center;
+  line-height: 1.3;
   text-align: center;
-  background: conic-gradient(#19a873 0 var(--normal-rate), #f02f44 var(--normal-rate) 360deg);
-  border-radius: 50%;
+  white-space: normal;
+  word-break: break-word;
 }
 
-.donut::after {
-  position: absolute;
-  inset: 17px;
-  content: "";
-  background: white;
-  border-radius: 50%;
-}
-
-.donut strong,
-.donut small {
-  position: relative;
-  z-index: 1;
-}
-
-.donut strong {
-  color: #20304a;
-  font-size: 22px;
-}
-
-.donut small {
+.status-bars p {
+  margin: 14px 0 0;
   color: #66758a;
+  font-size: 12px;
 }
 
-.donut-wrap dl {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px 14px;
+.import-guide-copy {
   margin: 0;
-}
-
-.donut-wrap dl > div {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.donut-wrap dd {
-  margin: 0;
-  font-weight: 700;
-}
-
-.green-dot,
-.red-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.green-dot {
-  background: #19a873;
-}
-
-.red-dot {
-  background: #f02f44;
+  color: #2f3f55;
+  font-size: 14px;
+  line-height: 1.8;
 }
 
 @media (width <= 1100px) {
@@ -548,6 +502,21 @@ onMounted(load);
 
   .chart-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (width <= 760px) {
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-card > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .task-card :deep(.el-select) {
+    width: 100%;
   }
 }
 </style>

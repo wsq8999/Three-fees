@@ -74,11 +74,11 @@ public class MyBatisUserRepository implements UserRepository {
 
   @Override
   public long createCityUser(
-      String username, String displayName, String passwordHash, String cityCode) {
+      String username, String displayName, String passwordHash, String cityCode, boolean enabled) {
     var holder = new GeneratedId();
     int inserted =
         userMapper.insertManagedCityUser(
-            username, displayName, passwordHash, cityCode, "SYSTEM_ADMIN", holder);
+            username, displayName, passwordHash, cityCode, enabled, "SYSTEM_ADMIN", holder);
     if (inserted != 1) {
       throw new IllegalArgumentException("Unknown city");
     }

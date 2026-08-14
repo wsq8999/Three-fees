@@ -11,10 +11,14 @@ const selectedKey = ref<BenchmarkRule["key"]>("RATED_BENCHMARK");
 const loading = ref(true);
 const errorMessage = ref("");
 
+const ruleHints: Record<BenchmarkRule["key"], string> = {
+  YEAR_ON_YEAR: "固定对比去年同月",
+  MONTH_ON_MONTH: "固定对比上一个自然月",
+  RATED_BENCHMARK: "对比当月日标杆合计",
+};
+
 const selected = computed(
-  () =>
-    rules.value.find((rule) => rule.key === selectedKey.value) ??
-    rules.value[0],
+  () => rules.value.find((rule) => rule.key === selectedKey.value) ?? rules.value[0],
 );
 
 const selectedIndex = computed(() =>
@@ -30,8 +34,7 @@ async function load(): Promise<void> {
       selectedKey.value = "RATED_BENCHMARK";
     }
   } catch (error) {
-    errorMessage.value =
-      error instanceof Error ? error.message : "标杆规则加载失败";
+    errorMessage.value = error instanceof Error ? error.message : "标杆规则加载失败";
   } finally {
     loading.value = false;
   }
@@ -50,10 +53,10 @@ onMounted(load);
     @retry="load"
   />
   <template v-else-if="selected">
-    <section class="rules-summary">
+    <section class="rules-header">
       <div>
-        <h1>江苏省电费稽核规则</h1>
-        <p>统一维护三类只读标杆，额定标杆取自每月导入数据</p>
+        <h1>标杆规则管理</h1>
+        <p>统一查看同比、环比、额定标杆三类稽核规则，规则只读，计算以系统后台为准。</p>
       </div>
       <dl>
         <div>
@@ -61,7 +64,7 @@ onMounted(load);
           <dd>{{ rules.length }}条</dd>
         </div>
         <div>
-          <dt>同比/环比上浮</dt>
+          <dt>同比/环比容忍</dt>
           <dd>20%</dd>
         </div>
         <div>
@@ -70,14 +73,17 @@ onMounted(load);
         </div>
         <div>
           <dt>运行状态</dt>
-          <dd><ElTag type="success">使用中</ElTag></dd>
+          <dd><ElTag type="success" effect="light">使用中</ElTag></dd>
         </div>
       </dl>
     </section>
 
-    <div class="rules-workspace">
-      <aside class="rule-directory">
-        <h2>规则目录</h2>
+    <div class="rules-layout">
+      <aside class="rule-list">
+        <div class="section-title">
+          <h2>规则目录</h2>
+          <span>只读</span>
+        </div>
         <button
           v-for="(rule, index) in rules"
           :key="rule.key"
@@ -88,56 +94,61 @@ onMounted(load);
           <b>{{ String(index + 1).padStart(2, "0") }}</b>
           <span>
             <strong>{{ rule.name }}</strong>
-            <small>{{
-              rule.key === "YEAR_ON_YEAR"
-                ? "去年相同自然月"
-                : rule.key === "MONTH_ON_MONTH"
-                  ? "最近一笔审核通过记录"
-                  : "按月汇总每日标杆值"
-            }}</small>
+            <small>{{ ruleHints[rule.key] }}</small>
           </span>
         </button>
 
-        <section class="final-decision">
+        <section class="decision-note">
           <strong>最终判定</strong>
-          <p>任一适用标杆超标，最终结果为超标；最大超标比例取有效结果最大值。</p>
+          <p>任一适用规则超标，则本期稽核结果为超标；最大超标比例取三类有效结果中的最大值。</p>
         </section>
       </aside>
 
-      <main class="rule-detail">
+      <main class="rule-panel">
         <header>
           <div>
             <small>规则 {{ String(selectedIndex + 1).padStart(2, "0") }}</small>
             <h2>{{ selected.name }}</h2>
             <p>{{ selected.description }}</p>
           </div>
-          <ElTag type="info">固定规则 · 只读</ElTag>
+          <ElTag effect="plain">固定规则 · 只读</ElTag>
         </header>
 
-        <div class="calculation-chain">
-          <template v-for="(step, index) in selected.chain" :key="step">
-            <section>
-              <small>{{ String(index + 1).padStart(2, "0") }} 计算步骤</small>
-              <strong>{{ step }}</strong>
-            </section>
-            <ElIcon v-if="index < selected.chain.length - 1"><ArrowRight /></ElIcon>
-          </template>
-        </div>
+        <section class="rule-section">
+          <div class="section-title">
+            <h3>计算步骤</h3>
+          </div>
+          <div class="calculation-chain">
+            <template v-for="(step, index) in selected.chain" :key="step">
+              <div class="step-card">
+                <small>{{ String(index + 1).padStart(2, "0") }}</small>
+                <strong>{{ step }}</strong>
+              </div>
+              <ElIcon v-if="index < selected.chain.length - 1"><ArrowRight /></ElIcon>
+            </template>
+          </div>
+        </section>
 
-        <div class="info-grid">
-          <section class="blue-note">
-            <h3>计算补充</h3>
+        <div class="rule-grid">
+          <section class="rule-section">
+            <div class="section-title">
+              <h3>计算公式</h3>
+            </div>
             <p>{{ selected.formula }}</p>
           </section>
-          <section>
-            <h3>边界与例外</h3>
+          <section class="rule-section">
+            <div class="section-title">
+              <h3>边界与例外</h3>
+            </div>
             <p>{{ selected.boundaries.join("；") }}</p>
           </section>
         </div>
 
-        <section class="example-card">
-          <h3>示例演算</h3>
-          <div>
+        <section class="rule-section">
+          <div class="section-title">
+            <h3>示例演算</h3>
+          </div>
+          <div class="example-grid">
             <span v-for="item in selected.example" :key="item.label">
               <small>{{ item.label }}</small>
               <strong>{{ item.value }}</strong>
@@ -145,17 +156,21 @@ onMounted(load);
           </div>
         </section>
 
-        <div class="bottom-grid">
-          <section>
-            <h3>标杆值Excel校验规则</h3>
-            <div class="validation-items">
-              <span><b>自然月完整</b><small>1日至月末均有值</small></span>
-              <span><b>越界日为空</b><small>如6月31日必须为空</small></span>
-              <span><b>月平均一致</b><small>允许导入差≤0.01</small></span>
+        <div class="rule-grid">
+          <section class="rule-section">
+            <div class="section-title">
+              <h3>标杆值 Excel 校验</h3>
+            </div>
+            <div class="validation-list">
+              <span><b>自然月完整</b><small>1日至月末均有有效日值</small></span>
+              <span><b>越界日期为空</b><small>如2月31日必须为空</small></span>
+              <span><b>月平均一致</b><small>允许导入误差小于0.01</small></span>
             </div>
           </section>
-          <section>
-            <h3>版本与快照</h3>
+          <section class="rule-section">
+            <div class="section-title">
+              <h3>版本与快照</h3>
+            </div>
             <p>{{ selected.snapshotNote }}</p>
           </section>
         </div>
@@ -165,257 +180,273 @@ onMounted(load);
 </template>
 
 <style scoped>
-.rules-summary,
-.rule-directory,
-.rule-detail {
+.rules-header,
+.rule-list,
+.rule-panel,
+.rule-section {
   background: #fff;
-  border: 1px solid #dde5ef;
-  border-radius: 12px;
-  box-shadow: 0 6px 18px rgb(25 42 70 / 6%);
+  border: 1px solid #e3e8f0;
+  border-radius: 8px;
 }
 
-.rules-summary {
+.rules-header {
   display: flex;
-  gap: 24px;
+  gap: 20px;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 22px;
+  padding: 18px 20px;
   margin-bottom: 14px;
 }
 
-.rules-summary h1,
-.rules-summary p,
-.rules-summary dl,
-.rules-summary dd {
+.rules-header h1,
+.rules-header p,
+.rules-header dl,
+.rules-header dd,
+.section-title h2,
+.section-title h3 {
   margin: 0;
 }
 
-.rules-summary h1 {
-  color: #152137;
-  font-size: 22px;
+.rules-header h1 {
+  color: #10203a;
+  font-size: 20px;
   font-weight: 800;
 }
 
-.rules-summary p {
-  margin-top: 4px;
-  color: #64748a;
+.rules-header p {
+  margin-top: 6px;
+  color: #66758a;
   font-size: 13px;
 }
 
-.rules-summary dl {
+.rules-header dl {
   display: grid;
-  grid-template-columns: repeat(4, auto);
+  min-width: min(100%, 520px);
+  grid-template-columns: repeat(4, minmax(96px, 1fr));
 }
 
-.rules-summary dl > div {
-  min-width: 110px;
-  padding: 0 16px;
-  border-left: 1px solid #e1e7ef;
+.rules-header dl > div {
+  padding-left: 16px;
+  border-left: 1px solid #e7edf5;
 }
 
-.rules-summary dt {
-  color: #64748a;
+.rules-header dt {
+  color: #7b8798;
   font-size: 12px;
 }
 
-.rules-summary dd {
-  margin-top: 4px;
-  color: #14213a;
+.rules-header dd {
+  margin-top: 5px;
+  color: #10203a;
   font-weight: 800;
 }
 
-.rules-workspace {
+.rules-layout {
   display: grid;
-  min-height: calc(100vh - 168px);
-  grid-template-columns: 290px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   gap: 14px;
 }
 
-.rule-directory,
-.rule-detail {
-  padding: 20px;
+.rule-list,
+.rule-panel {
+  min-width: 0;
+  padding: 16px;
 }
 
-.rule-directory h2,
-.rule-detail h2,
-.rule-detail h3 {
-  margin: 0;
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.rule-directory button {
+.section-title h2,
+.section-title h3 {
+  color: #10203a;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.section-title span {
+  color: #8a96a8;
+  font-size: 12px;
+}
+
+.rule-list button {
   display: flex;
   width: 100%;
-  min-height: 86px;
-  gap: 16px;
+  gap: 12px;
   align-items: center;
-  padding: 16px;
-  margin-top: 14px;
-  color: #23324a;
+  padding: 13px 12px;
+  margin-top: 10px;
+  color: #26364f;
   text-align: left;
   background: #fff;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  border: 1px solid #e5ebf3;
+  border-radius: 8px;
   cursor: pointer;
 }
 
-.rule-directory button.selected {
+.rule-list button.selected {
+  color: #ef233c;
   background: #fff4f5;
-  border-color: #f03349;
+  border-color: #ffc6cf;
 }
 
-.rule-directory button b {
-  color: #f03349;
-  font-size: 18px;
+.rule-list button b {
+  color: inherit;
+  font-size: 16px;
 }
 
-.rule-directory button span {
+.rule-list button span {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 
-.rule-directory button small {
-  color: #66758a;
+.rule-list button small {
+  color: #7b8798;
 }
 
-.final-decision {
-  padding: 16px;
-  margin-top: 18px;
-  background: #fff7e6;
-  border-radius: 10px;
+.decision-note {
+  padding: 14px;
+  margin-top: 14px;
+  background: #fff8e8;
+  border: 1px solid #f7dfac;
+  border-radius: 8px;
 }
 
-.final-decision p {
+.decision-note p {
   margin: 6px 0 0;
-  color: #7d5b16;
+  color: #76531a;
   font-size: 13px;
+  line-height: 1.7;
 }
 
-.rule-detail > header {
+.rule-panel > header {
   display: flex;
+  gap: 14px;
+  align-items: flex-start;
   justify-content: space-between;
   padding-bottom: 14px;
-  border-bottom: 1px solid #e1e7ef;
+  border-bottom: 1px solid #e5ebf3;
 }
 
-.rule-detail > header small {
-  color: #66758a;
+.rule-panel > header small {
+  color: #7b8798;
 }
 
-.rule-detail > header h2 {
-  margin-top: 4px;
-  color: #14213a;
-  font-size: 22px;
+.rule-panel > header h2 {
+  margin: 4px 0;
+  color: #10203a;
+  font-size: 20px;
+  font-weight: 800;
 }
 
-.rule-detail > header p {
-  margin: 4px 0 0;
-  color: #64748a;
+.rule-panel > header p,
+.rule-section p {
+  margin: 0;
+  color: #4e5f78;
+  line-height: 1.75;
+}
+
+.rule-panel > header p {
+  max-width: 760px;
+}
+
+.rule-section {
+  padding: 14px;
+  margin-top: 14px;
+}
+
+.rule-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 14px;
 }
 
 .calculation-chain {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
-  align-items: center;
-  margin: 16px 0;
-}
-
-.calculation-chain section {
-  display: flex;
-  min-height: 90px;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-  justify-content: center;
-  padding: 14px;
-  border: 1px solid #dfe6ef;
-  border-radius: 10px;
-}
-
-.calculation-chain small {
-  color: #66758a;
-}
-
-.info-grid,
-.bottom-grid {
-  display: grid;
-  grid-template-columns: 1.3fr 1fr;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.info-grid section,
-.bottom-grid section,
-.example-card {
-  padding: 14px;
-  border: 1px solid #dfe6ef;
-  border-radius: 10px;
-}
-
-.blue-note {
-  background: #eef5ff;
-  border-color: #d7e7ff !important;
-}
-
-.info-grid p,
-.bottom-grid p {
-  margin: 8px 0 0;
-  color: #40506a;
-}
-
-.example-card {
-  margin-bottom: 12px;
-}
-
-.example-card > div {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  align-items: stretch;
   margin-top: 12px;
 }
 
-.example-card span,
-.validation-items span {
+.calculation-chain .el-icon {
+  align-self: center;
+  color: #a5afbf;
+}
+
+.step-card {
   display: flex;
+  min-width: min(100%, 180px);
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+}
+
+.step-card small,
+.example-grid small,
+.validation-list small {
+  color: #7b8798;
+}
+
+.step-card strong {
+  color: #10203a;
+}
+
+.example-grid,
+.validation-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.example-grid span,
+.validation-list span {
+  display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 5px;
   padding: 12px;
   background: #f8fafc;
+  border: 1px solid #edf1f6;
   border-radius: 8px;
 }
 
-.example-card small,
-.validation-items small {
-  color: #66758a;
-}
-
-.example-card strong {
-  color: #f03349;
-}
-
-.validation-items {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-top: 12px;
+.example-grid strong {
+  color: #ef233c;
 }
 
 @media (width <= 1100px) {
-  .rules-summary,
-  .rules-workspace {
-    grid-template-columns: 1fr;
-  }
-
-  .rules-summary {
-    align-items: flex-start;
+  .rules-header {
+    align-items: stretch;
     flex-direction: column;
   }
 
-  .rules-summary dl,
-  .info-grid,
-  .bottom-grid,
-  .example-card > div {
+  .rules-header dl,
+  .rules-layout,
+  .rule-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (width <= 640px) {
+  .rules-header dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 12px;
+  }
+
+  .rules-header dl > div {
+    padding-left: 10px;
   }
 }
 </style>

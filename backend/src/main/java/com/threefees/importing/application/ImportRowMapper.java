@@ -1,6 +1,5 @@
 package com.threefees.importing.application;
 
-import com.threefees.importing.application.ImportBatchRepository.ImportedRow;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.FieldDefinition;
 import com.threefees.importing.domain.ImportError;
@@ -60,7 +59,7 @@ public class ImportRowMapper {
     this.objectMapper = objectMapper;
   }
 
-  public List<ImportedRow> map(
+  public List<ImportRow> map(
       DatasetType datasetType, String period, String expectedCityCode, TabularData data) {
     return mapAuto(datasetType, expectedCityCode, period, data).stream()
         .filter(group -> group.cityCode().equals(expectedCityCode) && group.period().equals(period))
@@ -88,7 +87,7 @@ public class ImportRowMapper {
 
     Map<String, String> cityCodes = cityCodes();
     var keys = new HashSet<String>();
-    var groupedRows = new LinkedHashMap<GroupKey, List<ImportedRow>>();
+    var groupedRows = new LinkedHashMap<GroupKey, List<ImportRow>>();
     for (int index = 0; index < data.rows().size(); index++) {
       int sourceRow = index + 2;
       List<String> raw = data.rows().get(index);
@@ -246,7 +245,7 @@ public class ImportRowMapper {
     }
     return new GroupedImportedRow(
         new GroupKey(rowCity, period),
-        new ImportedRow(
+        new ImportRow(
             sourceRow,
             rowCity,
             billingPointCode,
@@ -495,5 +494,7 @@ public class ImportRowMapper {
 
   private record GroupKey(String cityCode, String period) {}
 
-  private record GroupedImportedRow(GroupKey groupKey, ImportedRow row) {}
+  private record GroupedImportedRow(GroupKey groupKey, ImportRow row) {}
 }
+
+

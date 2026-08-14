@@ -2,11 +2,9 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Download } from "@element-plus/icons-vue";
-import type { UploadFile } from "element-plus";
 import { ElMessage } from "element-plus";
 
-import { businessApi, saveBlob } from "@/api/business-api";
-import StatusTag from "@/components/business/StatusTag.vue";
+import { businessApi, formatPercent, saveBlob } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import type { ReportSummary } from "@/types/business";
 
@@ -20,36 +18,80 @@ const router = useRouter();
 const report = ref<ReportSummary | null>(null);
 const loading = ref(true);
 const downloading = ref(false);
-const correcting = ref(false);
 const errorMessage = ref("");
 const correctionVisible = ref(false);
-const editorVisible = ref(false);
 const correctionError = ref("");
 const correctionForm = reactive({
   reason: "",
-  file: null as File | null,
-  summary: "",
 });
 
-const isHistorical = computed(
-  () => report.value?.source === "HISTORICAL_IMPORT",
-);
+const isHistorical = computed(() => report.value?.source === "HISTORICAL_IMPORT");
+const sourceLabel = computed(() => (isHistorical.value ? "历史导入" : "系统生成"));
+const billingPointLabel = computed(() => {
+  if (report.value === null) return "—";
+  return `${report.value.billingPointCode} ｜ ${report.value.billingPointName} ｜ ${report.value.city.name}`;
+});
+const overLimitLabel = computed(() => {
+  if (report.value === null) return "—";
+  return `${overLimitTypeLabel(report.value.overLimitType)} ｜ ${formatPercent(report.value.maxRatio)}`;
+});
 
+const rawContent = computed(() => report.value?.previewHtml || report.value?.summary || "");
+const normalizedContent = computed(() => normalizePreviewContent(rawContent.value));
+const contentHtml = computed(() =>
+  looksLikeHtml(normalizedContent.value) ? normalizedContent.value : "",
+);
 const reportSections = computed(() => {
-  const summary = report.value?.summary?.trim() ?? "";
+  if (contentHtml.value) return [];
+  const summary = normalizedContent.value.trim();
   if (!summary) return [];
   const parts = summary
-    .split(/\n{2,}|\r?\n(?=[一二三四五六七八九十]、)/)
+    .split(/\n{2,}|\r?\n(?=[一二三四五六七八九十]+[、.．])/)
     .map((item) => item.trim())
     .filter(Boolean);
   if (parts.length <= 1) {
     return [{ title: "报告正文", content: summary }];
   }
   return parts.map((content, index) => ({
-    title: `第${index + 1}部分`,
+    title: `第 ${index + 1} 部分`,
     content,
   }));
 });
+
+function normalizePreviewContent(value: string): string {
+  const decoded = decodeHtmlEntities(value.trim());
+  return decoded
+    .replace(/Historical Word preview/gi, "")
+    .replace(/Original Word file is the source of truth\./gi, "")
+    .replace(/\bINCLUDEPICTURE\b[\s\S]*?\bMERGEFORMAT(?:INET)?\b/gi, "")
+    .replace(/\b(?:MERGEFORMATINET|MERGEFORMAT|INCLUDEPICTURE|HYPERLINK)\b/gi, "")
+    .trim();
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function looksLikeHtml(value: string): boolean {
+  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(value);
+}
+
+function overLimitTypeLabel(value: string | null | undefined): string {
+  if (!value) return "—";
+  const labels: Record<string, string> = {
+    ONLY_YOY: "仅同比超标",
+    ONLY_MOM: "仅环比超标",
+    ONLY_RATED: "仅额定标杆超标",
+    MULTIPLE: "多项超标",
+    NONE: "未超标",
+  };
+  return labels[value] ?? value;
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -58,11 +100,9 @@ async function load(): Promise<void> {
     const loaded = await businessApi.reports.get(String(route.params.reportId));
     if (loaded === undefined) throw new Error("报告不存在或当前账号无权访问");
     report.value = loaded;
-    correctionForm.summary = loaded.summary;
     if (props.correction) correctionVisible.value = true;
   } catch (error) {
-    errorMessage.value =
-      error instanceof Error ? error.message : "报告加载失败";
+    errorMessage.value = error instanceof Error ? error.message : "报告加载失败";
   } finally {
     loading.value = false;
   }
@@ -72,10 +112,7 @@ async function downloadWord(): Promise<void> {
   if (report.value === null) return;
   downloading.value = true;
   try {
-    saveBlob(
-      await businessApi.reports.downloadWord(report.value.id),
-      report.value.wordFileName,
-    );
+    saveBlob(await businessApi.reports.downloadWord(report.value.id), report.value.wordFileName);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "Word 下载失败");
   } finally {
@@ -85,8 +122,6 @@ async function downloadWord(): Promise<void> {
 
 function openCorrection(): void {
   correctionForm.reason = "";
-  correctionForm.file = null;
-  correctionForm.summary = report.value?.summary ?? "";
   correctionError.value = "";
   correctionVisible.value = true;
   void router.replace({
@@ -98,7 +133,6 @@ function openCorrection(): void {
 
 async function closeCorrection(): Promise<void> {
   correctionVisible.value = false;
-  editorVisible.value = false;
   if (route.name === "report-correction") {
     await router.replace({
       name: "report-detail",
@@ -108,79 +142,33 @@ async function closeCorrection(): Promise<void> {
   }
 }
 
-function correctionFileChanged(file: UploadFile): void {
-  const raw = file.raw;
-  if (raw === undefined) return;
-  if (!/\.docx?$/i.test(raw.name)) {
-    correctionError.value = "更正版报告只支持 .doc 或 .docx 文件。";
-    correctionForm.file = null;
-    return;
-  }
-  correctionError.value = "";
-  correctionForm.file = raw;
-}
-
 async function beginCorrection(): Promise<void> {
   correctionError.value = "";
   if (!correctionForm.reason.trim()) {
     correctionError.value = "请填写更正原因。";
     return;
   }
-  if (isHistorical.value && correctionForm.file === null) {
-    correctionError.value = "人工导入报告必须上传更正版 Word 文件。";
-    return;
-  }
-  if (!isHistorical.value) {
-    correctionVisible.value = false;
-    editorVisible.value = true;
-    return;
-  }
-  await submitCorrection();
-}
-
-async function submitCorrection(): Promise<void> {
   if (report.value === null) return;
-  correcting.value = true;
-  correctionError.value = "";
-  try {
-    const beforeNumber = report.value.reportNumber;
-    report.value = await businessApi.reports.correct(
-      report.value.id,
-      isHistorical.value
-        ? {
-            reason: correctionForm.reason,
-            file: correctionForm.file as File,
-          }
-        : {
-            reason: correctionForm.reason,
-            correctedSummary: correctionForm.summary,
-          },
-    );
-    if (report.value.reportNumber !== beforeNumber) {
-      throw new Error("报告编号发生变化，已阻止错误结果展示");
-    }
-    await closeCorrection();
-    ElMessage.success("报告已更正，编号保持不变。");
-  } catch (error) {
-    correctionError.value =
-      error instanceof Error ? error.message : "报告更正失败";
-  } finally {
-    correcting.value = false;
-  }
+  correctionVisible.value = false;
+  await router.push({
+    name: "reports-generate",
+    query: {
+      reportId: report.value.id,
+      correction: "1",
+      reason: correctionForm.reason.trim(),
+      billingPointCode: report.value.billingPointCode,
+      period: report.value.period,
+      from: route.fullPath,
+    },
+  });
 }
 
 function correctionDialogChanged(visible: boolean): void {
   if (!visible) void closeCorrection();
 }
 
-function editorDialogChanged(visible: boolean): void {
-  if (!visible) void closeCorrection();
-}
-
 async function goBack(): Promise<void> {
-  await router.push(
-    typeof route.query.from === "string" ? route.query.from : "/reports/history",
-  );
+  await router.push(typeof route.query.from === "string" ? route.query.from : "/reports/history");
 }
 
 onMounted(load);
@@ -199,46 +187,36 @@ onMounted(load);
   <template v-else-if="report">
     <section class="report-metadata business-card">
       <div>
-        <small>报告编号</small>
-        <strong>{{ report.reportNumber }}</strong>
+        <small>报账点：</small>
+        <strong>{{ billingPointLabel }}</strong>
       </div>
       <div>
-        <small>报账点编码</small>
-        <strong>{{ report.billingPointCode }}</strong>
+        <small>超标类型/超标率：</small>
+        <strong class="over-limit-value">{{ overLimitLabel }}</strong>
       </div>
       <div>
-        <small>报账点名称</small>
-        <strong>{{ report.billingPointName }}</strong>
-      </div>
-      <div>
-        <small>所属区域</small>
-        <strong>{{ report.city.name }} / {{ report.district ?? "—" }}</strong>
-      </div>
-      <div>
-        <small>账期</small>
-        <strong>{{ report.period }}</strong>
-      </div>
-      <div>
-        <small>报告状态</small>
-        <StatusTag :value="report.status" />
+        <small>报告来源：</small>
+        <strong>{{ sourceLabel }}</strong>
       </div>
     </section>
 
     <section class="report-preview business-card" aria-label="报告预览">
       <article class="report-sheet">
-        <h1>{{ report.billingPointName }}电费稽核报告</h1>
-        <section v-for="section in reportSections" :key="section.title">
-          <h2>{{ section.title }}</h2>
-          <p>{{ section.content }}</p>
-        </section>
+        <article v-if="contentHtml" class="word-preview-content" v-html="contentHtml" />
+        <template v-else>
+          <section v-for="section in reportSections" :key="section.title">
+            <h2>{{ section.title }}</h2>
+            <p>{{ section.content }}</p>
+          </section>
+        </template>
         <ElEmpty
-          v-if="reportSections.length === 0"
-          description="当前报告暂无正文内容"
+          v-if="!contentHtml && reportSections.length === 0"
+          description="当前报告暂无法完整在线预览，请下载原始 Word 查看。"
         />
         <aside v-if="report.corrections.length" class="correction-note">
           <strong>更正记录</strong>
           <p v-for="item in report.corrections" :key="item.occurredAt">
-            {{ item.occurredAt }} · {{ item.reason }} · {{ item.summary }}
+            {{ item.occurredAt }} ｜ {{ item.reason }} ｜ {{ item.summary }}
           </p>
         </aside>
       </article>
@@ -254,89 +232,35 @@ onMounted(load);
 
     <ElDialog
       :model-value="correctionVisible"
-      title="发起报告更正"
-      width="min(520px, 92vw)"
-      :close-on-click-modal="false"
+      title="更正报告"
+      width="min(520px, calc(100vw - 32px))"
+      append-to-body
+      align-center
+      destroy-on-close
       @update:model-value="correctionDialogChanged"
     >
-      <ElForm label-position="left" label-width="120px">
-        <ElFormItem label="当前报告编号">
-          <ElInput :model-value="report.reportNumber" disabled />
-        </ElFormItem>
-        <ElFormItem label="报账点名称">
-          <ElInput :model-value="report.billingPointName" disabled />
-        </ElFormItem>
-        <ElFormItem label="账期">
-          <ElInput :model-value="report.period" disabled />
-        </ElFormItem>
+      <ElAlert
+        title="点击下一步后将进入生成报告页面，原报告内容会自动回显。重新生成后，报告详情只展示最新内容。"
+        type="info"
+        show-icon
+        :closable="false"
+      />
+      <ElForm class="correction-form" label-position="top">
         <ElFormItem label="更正原因" required>
           <ElInput
             v-model="correctionForm.reason"
             type="textarea"
-            :rows="5"
-            maxlength="500"
+            :rows="4"
+            maxlength="1000"
             show-word-limit
-            placeholder="请输入需要更正的原因"
+            placeholder="请填写本次更正原因"
           />
         </ElFormItem>
       </ElForm>
-
-      <template v-if="isHistorical">
-        <h4>上传更正版 Word</h4>
-        <ElUpload
-          drag
-          :auto-upload="false"
-          :limit="1"
-          accept=".doc,.docx"
-          :on-change="correctionFileChanged"
-          :on-remove="() => (correctionForm.file = null)"
-        >
-          <strong>点击或拖拽上传更正版报告</strong>
-          <small>仅支持 .doc / .docx</small>
-        </ElUpload>
-      </template>
-
-      <ElAlert
-        v-if="correctionError"
-        :title="correctionError"
-        type="error"
-        show-icon
-        :closable="false"
-      />
+      <ElAlert v-if="correctionError" :title="correctionError" type="error" show-icon />
       <template #footer>
         <ElButton @click="closeCorrection">取消</ElButton>
-        <ElButton type="primary" :loading="correcting" @click="beginCorrection">
-          下一步
-        </ElButton>
-      </template>
-    </ElDialog>
-
-    <ElDialog
-      :model-value="editorVisible"
-      title="调整系统生成报告"
-      width="min(760px, 94vw)"
-      :close-on-click-modal="false"
-      @update:model-value="editorDialogChanged"
-    >
-      <ElInput
-        v-model="correctionForm.summary"
-        type="textarea"
-        :rows="14"
-        maxlength="5000"
-        show-word-limit
-      />
-      <ElAlert
-        v-if="correctionError"
-        :title="correctionError"
-        type="error"
-        show-icon
-        :closable="false"
-      />
-      <template #footer>
-        <ElButton @click="closeCorrection">取消</ElButton>
-        <ElButton type="primary" :loading="correcting" @click="submitCorrection">
-          保存更正
-        </ElButton>
+        <ElButton type="primary" @click="beginCorrection">下一步</ElButton>
       </template>
     </ElDialog>
   </template>
@@ -345,87 +269,115 @@ onMounted(load);
 <style scoped>
 .report-metadata {
   display: grid;
-  grid-template-columns: 1fr 1fr 1.5fr 1.3fr 0.9fr 0.8fr;
+  grid-template-columns: minmax(420px, 1.6fr) minmax(260px, 0.8fr) minmax(180px, 0.5fr);
   gap: 16px;
-  padding: 16px 24px;
+  align-items: center;
+  padding: 16px 20px;
   margin-bottom: 16px;
+  overflow-x: auto;
 }
 
 .report-metadata div {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
+  display: flex;
+  gap: 0;
+  align-items: center;
+  min-width: max-content;
+  white-space: nowrap;
 }
 
 .report-metadata small {
   color: #7d8ca1;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .report-metadata strong {
-  overflow: hidden;
-  color: #1f2d3d;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: #001733;
+}
+
+.over-limit-value {
+  color: #f5223d !important;
 }
 
 .report-preview {
-  min-height: calc(100vh - 210px);
-  padding: 28px 36px 88px;
+  padding: 0;
+  overflow: auto;
 }
 
 .report-sheet {
-  max-width: 980px;
+  width: min(960px, 100%);
+  min-height: 620px;
+  padding: 48px 56px;
   margin: 0 auto;
-  color: #1f2d3d;
+  color: #001733;
+  line-height: 1.9;
+  background: #fff;
 }
 
-.report-sheet h1 {
+.report-sheet :deep(h1) {
   margin: 0 0 28px;
-  color: #101827;
-  font-size: 24px;
   text-align: center;
+  font-size: 24px;
 }
 
-.report-sheet h2 {
-  margin: 24px 0 12px;
-  color: #101827;
+.report-sheet h2,
+.report-sheet :deep(h2) {
+  margin: 24px 0 10px;
   font-size: 18px;
 }
 
-.report-sheet p {
-  margin: 0;
-  line-height: 2;
+.report-sheet p,
+.report-sheet :deep(p) {
+  margin: 8px 0;
   white-space: pre-wrap;
 }
 
+.word-preview-content :deep(table) {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+}
+
+.word-preview-content :deep(td),
+.word-preview-content :deep(th) {
+  padding: 6px 8px;
+  border: 1px solid #d8e0eb;
+}
+
+.word-preview-content :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+
 .correction-note {
-  padding: 16px;
+  padding: 12px 14px;
   margin-top: 24px;
-  background: #fff8e8;
-  border: 1px solid #f5d898;
-  border-radius: 10px;
+  color: #52627a;
+  background: #f6f8fb;
+  border: 1px solid #e7edf5;
+  border-radius: 6px;
 }
 
 .report-actions {
-  position: fixed;
-  right: 16px;
+  position: sticky;
   bottom: 0;
-  left: calc(var(--sidebar-width) + 16px);
-  z-index: 50;
   display: flex;
-  min-height: 58px;
-  gap: 12px;
-  align-items: center;
   justify-content: flex-end;
-  padding: 10px 18px;
-  background: rgb(255 255 255 / 96%);
-  border-top: 1px solid #dfe5ec;
+  gap: 10px;
+  padding: 12px 0 0;
+  background: #f6f8fb;
 }
 
-@media (width <= 1100px) {
+.correction-form {
+  margin-top: 14px;
+}
+
+@media (max-width: 960px) {
   .report-metadata {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
+  }
+
+  .report-sheet {
+    padding: 28px 20px;
   }
 }
 </style>

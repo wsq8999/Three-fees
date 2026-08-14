@@ -28,26 +28,18 @@ public interface ImportBatchRepository {
 
   boolean prerequisitesActive(ImportBatch batch);
 
+  boolean allDatasetsActive(String period, String cityCode);
+
   Optional<String> findActiveCityForPayment(
       String period, String billingPointCode, String paymentCode);
 
   Optional<String> findActiveCityForBillingPoint(String period, String billingPointCode);
-
-  void replaceImportedRecords(ImportBatch batch, List<ImportedRow> rows);
 
   void markProcessing(long id);
 
   void markSucceeded(ImportBatch batch, int rowCount);
 
   void markFailed(long id, List<ImportError> errors);
-
-  record ImportedRow(
-      int sourceRow,
-      String cityCode,
-      String billingPointCode,
-      String billingPointName,
-      String paymentCode,
-      String meterCode,
-      String businessKey,
-      String valuesJson) {}
 }
+
+

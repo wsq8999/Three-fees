@@ -15,6 +15,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -51,20 +52,53 @@ public class HistoricalReportService {
   @Transactional
   public HistoricalImport submit(
       String billingPointPeriodId, MultipartFile file, String idempotencyKey, CurrentUser actor) {
+    if (billingPointPeriodId == null || billingPointPeriodId.isBlank()) {
+      throw new BusinessRuleException("HISTORICAL_REPORT_INPUT_INVALID", "billingPointPeriodId is required");
+    }
     Candidate candidate = candidate(billingPointPeriodId);
+    return submit(candidate, billingPointPeriodId, file, idempotencyKey, actor);
+  }
+
+  @Transactional
+  public HistoricalImport submitByBillingPointPeriod(
+      String billingPointCode,
+      String cityCode,
+      String period,
+      MultipartFile file,
+      String idempotencyKey,
+      CurrentUser actor) {
+    if (billingPointCode == null || billingPointCode.isBlank() || period == null || period.isBlank()) {
+      throw new BusinessRuleException("HISTORICAL_REPORT_INPUT_INVALID", "billingPointCode and period are required");
+    }
+    Candidate candidate = candidate(billingPointCode.trim(), cityCode, period.trim(), actor);
+    String referenceCity = candidate.cityCode() == null ? "" : candidate.cityCode();
+    return submit(
+        candidate,
+        billingPointCode.trim() + ":" + period.trim() + ":" + referenceCity,
+        file,
+        idempotencyKey,
+        actor);
+  }
+
+  private HistoricalImport submit(
+      Candidate candidate,
+      String businessReference,
+      MultipartFile file,
+      String idempotencyKey,
+      CurrentUser actor) {
     requireScope(actor, candidate.cityCode());
     HistoricalImport prior = findBySnapshot(candidate.snapshotId());
     if (prior != null) {
       if ("FAILED".equals(prior.status())) {
-        return retryFailedImport(billingPointPeriodId, prior.id(), file, idempotencyKey, actor);
+        return retryFailedImport(businessReference, prior.id(), file, idempotencyKey, actor);
       }
       return prior;
     }
     if (!candidate.eligible()) {
-      throw new BusinessRuleException("HISTORICAL_REPORT_NOT_ELIGIBLE", "该报账点账期不符合历史报告导入条件");
+      throw new BusinessRuleException("HISTORICAL_REPORT_NOT_ELIGIBLE", "Historical report already exists or period is not eligible");
     }
     String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
-    String businessKey = "HISTORY:" + billingPointPeriodId + ":" + digest(normalizedKey);
+    String businessKey = "HISTORY:" + businessReference + ":" + digest(normalizedKey);
     var existingTask =
         taskRepository.findByTypeAndBusinessKey(TaskType.HISTORICAL_REPORT_IMPORT, businessKey);
     if (existingTask.isPresent()) {
@@ -105,7 +139,6 @@ public class HistoricalReportService {
     }
     return find(importId, actor);
   }
-
   private HistoricalImport retryFailedImport(
       String billingPointPeriodId,
       String importId,
@@ -251,6 +284,58 @@ public class HistoricalReportService {
         .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
   }
 
+
+  private Candidate candidate(String billingPointCode, String cityCode, String period, CurrentUser actor) {
+    StringBuilder sql =
+        new StringBuilder(
+            """
+            SELECT s.id, s.city_code,
+                   CASE WHEN r.id IS NULL THEN TRUE ELSE FALSE END AS eligible
+              FROM billing_point_snapshot s
+              LEFT JOIN audit_report r ON r.billing_point_snapshot_id=s.id
+             WHERE s.billing_point_code=? AND s.data_period=?
+            """);
+    var args = new java.util.ArrayList<Object>();
+    args.add(billingPointCode);
+    args.add(period);
+    String scopedCity = scopeCity(actor, cityCode);
+    if (scopedCity != null && !scopedCity.isBlank()) {
+      sql.append(" AND s.city_code=?");
+      args.add(scopedCity);
+    }
+    List<Candidate> candidates =
+        jdbcTemplate.query(
+            sql + " ORDER BY s.id DESC LIMIT 2",
+            (rs, row) ->
+                new Candidate(
+                    rs.getLong("id"), rs.getString("city_code"), rs.getBoolean("eligible")),
+            args.toArray());
+    if (candidates.isEmpty()) {
+      throw new ResourceNotFoundException("报账点账期不存在");
+    }
+    if (candidates.size() > 1) {
+      throw new ResourceConflictException(
+          "HISTORICAL_REPORT_PERIOD_AMBIGUOUS",
+          "Billing point code and period matched multiple snapshots");
+    }
+    return candidates.getFirst();
+  }
+
+  private String scopeCity(CurrentUser actor, String requestedCityCode) {
+    if (actor == null || actor.roles().contains(Role.SUPER_ADMIN)) {
+      return requestedCityCode;
+    }
+    String actorCity = actor.cityCode();
+    if (actorCity == null || actorCity.isBlank()) {
+      throw new ResourceNotFoundException("当前用户未绑定城市");
+    }
+    if (requestedCityCode != null
+        && !requestedCityCode.isBlank()
+        && !actorCity.equals(requestedCityCode)) {
+      throw new ResourceNotFoundException("报账点账期不存在");
+    }
+    return actorCity;
+  }
   private HistoricalImport findBySnapshot(long snapshotId) {
     return jdbcTemplate
         .query(

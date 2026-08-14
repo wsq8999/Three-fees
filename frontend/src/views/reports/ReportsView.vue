@@ -5,22 +5,17 @@ import { Download, Refresh, Search, Upload } from "@element-plus/icons-vue";
 import type { TableInstance, UploadFile } from "element-plus";
 import { ElMessage } from "element-plus";
 
-import { businessApi, saveBlob } from "@/api/business-api";
+import { businessApi, formatPercent, saveBlob, triggerBrowserDownload } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type {
   BusinessCity,
-  HistoricalReportCandidate,
+  HistoricalReportBillingPoint,
+  HistoricalReportPeriod,
   PageResult,
   ReportSummary,
 } from "@/types/business";
 
-interface ImportPointOption {
-  key: string;
-  code: string;
-  name: string;
-  cityName: string;
-}
 
 const route = useRoute();
 const router = useRouter();
@@ -31,16 +26,22 @@ const downloadingId = ref("");
 const errorMessage = ref("");
 const pageData = ref<PageResult<ReportSummary> | null>(null);
 const optionReports = ref<ReportSummary[]>([]);
-const historicalCandidates = ref<HistoricalReportCandidate[]>([]);
+const historicalPoints = ref<HistoricalReportBillingPoint[]>([]);
+const historicalPeriods = ref<HistoricalReportPeriod[]>([]);
 const importOptionsLoading = ref(false);
+const periodLoadFinished = ref(false);
 const importVisible = ref(false);
+const importSuccessVisible = ref(false);
 const importError = ref("");
 const selectedRows = ref<ReportSummary[]>([]);
 const tableRef = ref<TableInstance>();
+const focusedReport = ref<ReportSummary | null>(null);
 
 const importForm = reactive({
-  billingPointKey: "",
-  billingPointPeriodId: "",
+  pointKey: "",
+  billingPointCode: "",
+  cityCode: "",
+  period: "",
   file: null as File | null,
 });
 
@@ -77,29 +78,6 @@ const districtOptions = computed(() =>
       .map((item) => item.district ?? ""),
   ),
 );
-const importPointOptions = computed<ImportPointOption[]>(() => {
-  const map = new Map<string, ImportPointOption>();
-  for (const item of historicalCandidates.value) {
-    const key = importPointKey(item);
-    if (!map.has(key)) {
-      map.set(key, {
-        key,
-        code: item.billingPointCode,
-        name: item.billingPointName,
-        cityName: item.cityName,
-      });
-    }
-  }
-  return Array.from(map.values()).sort((left, right) =>
-    left.code.localeCompare(right.code),
-  );
-});
-const importPeriodOptions = computed(() =>
-  historicalCandidates.value
-    .filter((item) => importPointKey(item) === importForm.billingPointKey)
-    .slice()
-    .sort((left, right) => right.period.localeCompare(left.period)),
-);
 const range = computed(() => {
   const total = pageData.value?.totalElements ?? 0;
   if (total === 0) return "已显示 0-0 条，共 0 条";
@@ -116,13 +94,6 @@ function hasText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function importPointKey(candidate: HistoricalReportCandidate): string {
-  return [
-    candidate.cityCode,
-    candidate.billingPointCode,
-    candidate.billingPointName,
-  ].join("|");
-}
 
 function reportQuery(page = filters.page, size = filters.size) {
   return {
@@ -144,7 +115,7 @@ async function loadOptions(): Promise<void> {
     keyword: "",
     source: "",
     page: 1,
-    size: 1000,
+    size: 100,
   });
   optionReports.value = result.items;
 }
@@ -153,7 +124,14 @@ async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
   try {
-    pageData.value = await businessApi.reports.list(reportQuery());
+    const result = await businessApi.reports.list(reportQuery());
+    if (focusedReport.value !== null) {
+      result.items = [
+        focusedReport.value,
+        ...result.items.filter((item) => item.id !== focusedReport.value?.id),
+      ];
+    }
+    pageData.value = result;
     selectedRows.value = [];
     await nextTick();
     restoreHorizontalScroll();
@@ -197,78 +175,122 @@ async function openImport(): Promise<void> {
   if (!canImport.value) return;
   importError.value = "";
   Object.assign(importForm, {
-    billingPointKey: "",
-    billingPointPeriodId: "",
+    pointKey: "",
+    billingPointCode: "",
+    cityCode: "",
+    period: "",
     file: null,
   });
-  historicalCandidates.value = [];
+  historicalPoints.value = [];
+  historicalPeriods.value = [];
+  periodLoadFinished.value = false;
   importVisible.value = true;
   importOptionsLoading.value = true;
   try {
-    historicalCandidates.value = await businessApi.reports.listHistoricalCandidates({
+    historicalPoints.value = await businessApi.reports.listHistoricalBillingPoints({
       cityCode: session.currentUser?.city?.code ?? "",
       keyword: "",
     });
   } catch (error) {
-    importError.value =
-      error instanceof Error ? error.message : "历史报告候选账期加载失败";
+    importError.value = error instanceof Error ? error.message : "报账点加载失败";
   } finally {
     importOptionsLoading.value = false;
   }
 }
 
-function importPointChanged(): void {
-  importForm.billingPointPeriodId = "";
+async function importPointChanged(value?: string): Promise<void> {
+  const selectedKey = value ?? importForm.pointKey;
+  importForm.pointKey = selectedKey;
+  const parts = selectedKey.split("::");
+  if (parts.length === 2) {
+    importForm.cityCode = parts[0] ?? "";
+    importForm.billingPointCode = parts[1] ?? "";
+  }
+  if (!hasText(importForm.billingPointCode)) {
+    const selectedByLabel = historicalPoints.value.find(
+      (item) => pointOptionLabel(item) === selectedKey || item.billingPointCode === selectedKey,
+    );
+    if (selectedByLabel) {
+      importForm.pointKey = pointKey(selectedByLabel);
+      importForm.cityCode = selectedByLabel.cityCode;
+      importForm.billingPointCode = selectedByLabel.billingPointCode;
+    }
+  }
+  importForm.period = "";
+  historicalPeriods.value = [];
+  periodLoadFinished.value = false;
   importError.value = "";
+  if (!hasText(importForm.billingPointCode)) return;
+  const selected = historicalPoints.value.find(
+    (item) =>
+      item.billingPointCode === importForm.billingPointCode &&
+      (!importForm.cityCode || item.cityCode === importForm.cityCode),
+  );
+  importForm.cityCode = selected?.cityCode ?? importForm.cityCode;
+  importOptionsLoading.value = true;
+  try {
+    const periods = await businessApi.reports.listHistoricalPeriods({
+      billingPointCode: importForm.billingPointCode,
+      cityCode: importForm.cityCode || session.currentUser?.city?.code || "",
+    });
+    historicalPeriods.value = periods;
+    if (periods.length > 0) {
+      importForm.period = periods[0]?.period ?? "";
+    }
+    periodLoadFinished.value = true;
+  } catch (error) {
+    importError.value = error instanceof Error ? error.message : "账期加载失败";
+    periodLoadFinished.value = true;
+  } finally {
+    importOptionsLoading.value = false;
+  }
 }
 
 function importPeriodChanged(): void {
   importError.value = "";
 }
 
-async function searchImportCandidates(keyword: string): Promise<void> {
+async function searchImportPoints(keyword: string): Promise<void> {
   importOptionsLoading.value = true;
   try {
-    historicalCandidates.value = await businessApi.reports.listHistoricalCandidates({
+    historicalPoints.value = await businessApi.reports.listHistoricalBillingPoints({
       cityCode: session.currentUser?.city?.code ?? "",
       keyword,
     });
-    if (
-      hasText(importForm.billingPointKey) &&
-      !importPointOptions.value.some((item) => item.key === importForm.billingPointKey)
-    ) {
-      importPointChanged();
-      importForm.billingPointKey = "";
-    }
   } catch (error) {
-    importError.value =
-      error instanceof Error ? error.message : "历史报告候选账期加载失败";
+    importError.value = error instanceof Error ? error.message : "报账点加载失败";
   } finally {
     importOptionsLoading.value = false;
   }
 }
 
-function pointOptionLabel(point: ImportPointOption): string {
-  return `${point.code}｜${point.name}｜${point.cityName}`;
+function pointOptionLabel(point: HistoricalReportBillingPoint): string {
+  return `${point.billingPointCode} ｜ ${point.billingPointName} ｜ ${point.cityName}`;
 }
 
-function periodOptionLabel(candidate: HistoricalReportCandidate): string {
+function periodOptionLabel(candidate: HistoricalReportPeriod): string {
   return candidate.period;
 }
 
-function noPeriodPlaceholder(): string {
-  if (!hasText(importForm.billingPointKey)) return "请先选择报账点";
-  return importOptionsLoading.value ? "正在加载账期" : "该报账点暂无缺失报告账期";
+function pointKey(point: HistoricalReportBillingPoint): string {
+  return `${point.cityCode}::${point.billingPointCode}`;
 }
 
+function noPeriodPlaceholder(): string {
+  if (!hasText(importForm.billingPointCode)) return "请先选择报账点";
+  if (importOptionsLoading.value && !periodLoadFinished.value) return "正在加载账期";
+  if (hasText(importError.value)) return "账期加载失败";
+  if (!periodLoadFinished.value) return "请选择账期";
+  return "该报账点暂无缺失报告账期";
+}
 function removeFile(): void {
   importForm.file = null;
 }
 
 function canSubmitImport(): boolean {
   return (
-    hasText(importForm.billingPointKey) &&
-    hasText(importForm.billingPointPeriodId) &&
+    hasText(importForm.billingPointCode) &&
+    hasText(importForm.period) &&
     importForm.file !== null
   );
 }
@@ -296,36 +318,39 @@ async function importHistorical(): Promise<void> {
   importing.value = true;
   try {
     const imported = await businessApi.reports.importHistorical({
-      billingPointPeriodId: importForm.billingPointPeriodId,
+      billingPointCode: importForm.billingPointCode,
+      cityCode: importForm.cityCode,
+      period: importForm.period,
       file,
     });
-    importVisible.value = false;
+    focusedReport.value = imported;
     await loadOptions();
     Object.assign(filters, {
       keyword: "",
-      period: imported.period,
-      cityCode: cityLocked.value
-        ? (session.currentUser?.city?.code ?? "")
-        : imported.city.code,
+      period: "",
+      cityCode: cityLocked.value ? (session.currentUser?.city?.code ?? "") : "",
       district: "",
       source: "",
       page: 1,
     });
     await syncRouteAndLoad();
-    ElMessage.success("历史报告已导入");
+    importSuccessVisible.value = true;
   } catch (error) {
-    importError.value =
-      error instanceof Error ? error.message : "历史报告导入失败";
+    importError.value = error instanceof Error ? error.message : "历史报告导入失败";
   } finally {
     importing.value = false;
   }
 }
 
+function closeImportSuccess(): void {
+  importSuccessVisible.value = false;
+  importVisible.value = false;
+}
 async function downloadWord(report: ReportSummary): Promise<void> {
   downloadingId.value = report.id;
   try {
-    saveBlob(
-      await businessApi.reports.downloadWord(report.id),
+    await triggerBrowserDownload(
+      `/api/v1/reports/${encodeURIComponent(report.id)}/word`,
       report.wordFileName,
     );
   } catch (error) {
@@ -378,8 +403,8 @@ function exportList(): void {
   );
 }
 
-function csvCell(value: string): string {
-  return `"${value.replaceAll("\"", "\"\"")}"`;
+function csvCell(value: string | number): string {
+  return `"${String(value).replaceAll("\"", "\"\"")}"`;
 }
 
 function selectRows(rows: ReportSummary[]): void {
@@ -411,15 +436,37 @@ function asReport(row: unknown): ReportSummary {
   return row as ReportSummary;
 }
 
-function emptyText(value: string | null | undefined): string {
-  return value && value.length > 0 ? value : "-";
+function emptyText(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return "-";
+  const text = String(value);
+  return text.length > 0 ? text : "-";
+}
+
+function formatAmount(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || String(value).length === 0) return "-";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return emptyText(value);
+  return `¥${numeric.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatEnergy(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || String(value).length === 0) return "-";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return emptyText(value);
+  return numeric.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function overLimitClass(value: string | null | undefined): string {
   if (value === "多项超标") return "overlimit-multiple";
-  if (value === "同比超标") return "overlimit-yoy";
-  if (value === "环比超标") return "overlimit-mom";
-  if (value === "额定标杆超标") return "overlimit-rated";
+  if (value === "仅同比超标" || value === "同比超标") return "overlimit-yoy";
+  if (value === "仅环比超标" || value === "环比超标") return "overlimit-mom";
+  if (value === "仅额定标杆超标" || value === "额定标杆超标") return "overlimit-rated";
   return "overlimit-none";
 }
 
@@ -445,7 +492,7 @@ onMounted(async () => {
 <template>
   <section class="report-filter business-card">
     <label>
-      <span>关键词</span>
+      <span>关键字</span>
       <ElInput
         v-model="filters.keyword"
         placeholder="报告编号、报账点编码或报账点名称"
@@ -490,18 +537,20 @@ onMounted(async () => {
         />
       </ElSelect>
     </label>
-    <ElButton
-      class="query-button"
-      type="primary"
-      :icon="Search"
-      :loading="loading"
-      @click="syncRouteAndLoad(true)"
-    >
-      查询
-    </ElButton>
-    <ElButton class="reset-button" :icon="Refresh" @click="reset">
-      重置
-    </ElButton>
+    <div class="query-actions">
+      <ElButton
+        class="query-button"
+        type="primary"
+        :icon="Search"
+        :loading="loading"
+        @click="syncRouteAndLoad(true)"
+      >
+        查询
+      </ElButton>
+      <ElButton class="reset-button" :icon="Refresh" @click="reset">
+        重置
+      </ElButton>
+    </div>
   </section>
 
   <div class="business-toolbar report-toolbar">
@@ -517,7 +566,7 @@ onMounted(async () => {
       <ElButton :icon="Download" @click="exportList">导出Excel</ElButton>
     </div>
     <span class="report-total">
-      共 <b class="number-emphasis">{{ pageData?.totalElements ?? 0 }}</b>
+      共<b class="number-emphasis">{{ pageData?.totalElements ?? 0 }}</b>
       份正式报告
     </span>
   </div>
@@ -569,12 +618,12 @@ onMounted(async () => {
       </ElTableColumn>
       <ElTableColumn label="实际总耗电量" width="150" align="right">
         <template #default="scope">
-          {{ emptyText(asReport(scope.row).actualEnergy) }}
+          {{ formatEnergy(asReport(scope.row).actualEnergy) }}
         </template>
       </ElTableColumn>
       <ElTableColumn label="实际报账金额" width="150" align="right">
         <template #default="scope">
-          {{ emptyText(asReport(scope.row).actualAmount) }}
+          {{ formatAmount(asReport(scope.row).actualAmount) }}
         </template>
       </ElTableColumn>
       <ElTableColumn label="超标类型" width="150">
@@ -590,7 +639,13 @@ onMounted(async () => {
       </ElTableColumn>
       <ElTableColumn label="最大超标比例" width="135" align="right">
         <template #default="scope">
-          {{ emptyText(asReport(scope.row).maxRatio) }}
+          <span
+            :class="{
+              'max-ratio-danger': hasText(String(asReport(scope.row).maxRatio ?? '')),
+            }"
+          >
+            {{ formatPercent(asReport(scope.row).maxRatio) }}
+          </span>
         </template>
       </ElTableColumn>
       <ElTableColumn label="操作" width="140" fixed="right" align="center">
@@ -631,69 +686,56 @@ onMounted(async () => {
   <ElDialog
     v-model="importVisible"
     title="导入历史报告"
-    width="560px"
+    width="min(720px, calc(100vw - 32px))"
     class="history-import-dialog"
+    append-to-body
+    align-center
     :close-on-click-modal="false"
   >
     <section class="dialog-section">
       <h3>基本信息</h3>
       <ElForm label-position="top">
-        <div class="import-fields">
-          <ElFormItem label="报账点编码 *">
-            <ElSelect
-              v-model="importForm.billingPointKey"
-              filterable
-              remote
-              :remote-method="searchImportCandidates"
-              :loading="importOptionsLoading"
-              placeholder="请选择报账点编码"
-              no-data-text="暂无缺失正式报告的报账点"
-              @change="importPointChanged"
-            >
-              <ElOption
-                v-for="point in importPointOptions"
-                :key="point.key"
-                :label="point.code"
-                :value="point.key"
-              />
-            </ElSelect>
-          </ElFormItem>
-          <ElFormItem label="报账点名称 *">
-            <ElSelect
-              v-model="importForm.billingPointKey"
-              filterable
-              remote
-              :remote-method="searchImportCandidates"
-              :loading="importOptionsLoading"
-              placeholder="请选择报账点名称"
-              no-data-text="暂无缺失正式报告的报账点"
-              @change="importPointChanged"
-            >
-              <ElOption
-                v-for="point in importPointOptions"
-                :key="point.key"
-                :label="pointOptionLabel(point)"
-                :value="point.key"
-              />
-            </ElSelect>
-          </ElFormItem>
-        </div>
-        <ElFormItem label="账期 *">
+        <ElFormItem label="报账点">
           <ElSelect
-            v-model="importForm.billingPointPeriodId"
-            :disabled="
-              !hasText(importForm.billingPointKey) ||
-              importPeriodOptions.length === 0
-            "
+            v-model="importForm.pointKey"
+            class="full-point-select"
+            filterable
+            remote
+            teleported
+            popper-class="historical-point-select-popper"
+            :remote-method="searchImportPoints"
+            :loading="importOptionsLoading"
+            placeholder="请选择报账点"
+            no-data-text="暂无报账点"
+            @change="importPointChanged"
+          >
+            <ElOption
+              v-for="point in historicalPoints"
+              :key="`${point.cityCode}-${point.billingPointCode}`"
+              :label="pointOptionLabel(point)"
+              :value="pointKey(point)"
+            >
+              <div class="historical-point-option">
+                <strong>{{ point.billingPointCode }}</strong>
+                <span>{{ point.billingPointName }}</span>
+                <em>{{ point.cityName }}</em>
+              </div>
+            </ElOption>
+          </ElSelect>
+        </ElFormItem>
+        <ElFormItem label="账期">
+          <ElSelect
+            v-model="importForm.period"
+            :disabled="!hasText(importForm.billingPointCode) || historicalPeriods.length === 0"
             :placeholder="noPeriodPlaceholder()"
             no-data-text="该报账点暂无缺失报告账期"
             @change="importPeriodChanged"
           >
             <ElOption
-              v-for="candidate in importPeriodOptions"
+              v-for="candidate in historicalPeriods"
               :key="candidate.billingPointPeriodId"
               :label="periodOptionLabel(candidate)"
-              :value="candidate.billingPointPeriodId"
+              :value="candidate.period"
             />
           </ElSelect>
         </ElFormItem>
@@ -713,7 +755,7 @@ onMounted(async () => {
         <div class="upload-box">
           <span class="file-icon">W</span>
           <div>
-            <strong>点击或将 Word 文件拖拽到此处上传</strong>
+            <strong>点击或将 Word 文件拖到此处上传</strong>
             <small>支持 .doc、.docx 格式文件，且只能上传 1 个文件</small>
           </div>
           <ElButton>选择文件</ElButton>
@@ -732,9 +774,22 @@ onMounted(async () => {
 
     <template #footer>
       <ElButton @click="importVisible = false">取消</ElButton>
-      <ElButton type="primary" :loading="importing" @click="importHistorical">
-        确认导入
-      </ElButton>
+      <ElButton type="primary" :loading="importing" @click="importHistorical">确认导入</ElButton>
+    </template>
+  </ElDialog>
+
+  <ElDialog
+    v-model="importSuccessVisible"
+    title="导入成功"
+    width="360px"
+    append-to-body
+    align-center
+    :show-close="false"
+    :close-on-click-modal="false"
+  >
+    <p class="success-message">历史报告已导入，列表已刷新。</p>
+    <template #footer>
+      <ElButton type="primary" @click="closeImportSuccess">确定</ElButton>
     </template>
   </ElDialog>
 </template>
@@ -743,8 +798,8 @@ onMounted(async () => {
 .report-filter {
   display: grid;
   grid-template-columns:
-    minmax(300px, 1.8fr) minmax(150px, 0.8fr) minmax(150px, 0.8fr)
-    minmax(150px, 0.8fr) max-content max-content;
+    minmax(min(100%, 280px), 1.8fr) minmax(150px, 0.8fr) minmax(150px, 0.8fr)
+    minmax(150px, 0.8fr);
   gap: 12px;
   align-items: end;
   padding: 14px 16px;
@@ -771,6 +826,13 @@ onMounted(async () => {
   min-width: 76px;
 }
 
+.query-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .report-toolbar {
   margin: 10px 0;
 }
@@ -787,11 +849,23 @@ onMounted(async () => {
 }
 
 .report-table {
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .report-table :deep(.el-table) {
   border-radius: 0;
+}
+
+.report-table :deep(.el-table .cell) {
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.max-ratio-danger {
+  color: #e5484d;
+  font-weight: 700;
 }
 
 .report-table :deep(.el-table__body-wrapper) {
@@ -878,6 +952,21 @@ onMounted(async () => {
   width: 100%;
 }
 
+.full-point-select {
+  width: 100%;
+}
+
+.full-point-select :deep(.el-select__wrapper) {
+  min-height: 42px;
+  height: auto;
+}
+
+.full-point-select :deep(.el-select__selected-item) {
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .upload-section :deep(.el-upload),
 .upload-section :deep(.el-upload-dragger) {
   width: 100%;
@@ -931,14 +1020,86 @@ onMounted(async () => {
   margin-top: 14px;
 }
 
+.success-message {
+  margin: 0;
+  color: #1f2d3d;
+  line-height: 1.8;
+  text-align: center;
+}
+
+:global(.historical-point-select-popper) {
+  max-width: min(760px, calc(100vw - 32px));
+}
+
+:global(.historical-point-select-popper .el-select-dropdown__item) {
+  height: auto;
+  min-height: 44px;
+  padding: 8px 12px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+:global(.historical-point-option) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  width: 100%;
+  white-space: normal;
+  word-break: break-word;
+}
+
+:global(.historical-point-option strong) {
+  color: #1f2d3d;
+  font-weight: 700;
+}
+
+:global(.historical-point-option span) {
+  color: #344054;
+}
+
+:global(.historical-point-option em) {
+  color: #667085;
+  font-style: normal;
+}
+
 @media (width <= 1280px) {
   .report-filter {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   }
 
   .query-button,
   .reset-button {
+    width: auto;
+  }
+}
+
+@media (width <= 720px) {
+  .report-filter,
+  .import-fields,
+  .upload-box {
+    grid-template-columns: 1fr;
+  }
+
+  .report-toolbar,
+  .report-table footer,
+  .toolbar-left {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .query-actions,
+  .query-button,
+  .reset-button,
+  .toolbar-left,
+  .toolbar-left .el-button {
     width: 100%;
+  }
+
+  .query-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>

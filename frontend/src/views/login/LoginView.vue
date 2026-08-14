@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onMounted, reactive, ref } from "vue";
+import { useRouter } from "vue-router";
 import {
   DataAnalysis,
   HomeFilled,
@@ -12,7 +12,6 @@ import {
 
 import { useSessionStore } from "@/stores/session";
 
-const route = useRoute();
 const router = useRouter();
 const session = useSessionStore();
 const isSubmitting = ref(false);
@@ -21,15 +20,6 @@ const rememberUsername = ref(false);
 const forgotVisible = ref(false);
 const fieldErrors = reactive({ username: "", password: "" });
 const form = reactive({ username: "", password: "" });
-
-const redirectPath = computed(() => {
-  const candidate = route.query.redirect;
-  return typeof candidate === "string" &&
-    candidate.startsWith("/") &&
-    !candidate.startsWith("//")
-    ? candidate
-    : "/dashboard";
-});
 
 function validate(): boolean {
   fieldErrors.username = form.username.trim() === "" ? "请输入用户名" : "";
@@ -57,7 +47,7 @@ async function handleSubmit(): Promise<void> {
       localStorage.removeItem("three-fees-remembered-username");
     }
     form.password = "";
-    await router.replace(redirectPath.value);
+    await router.replace("/dashboard");
     return;
   }
   form.password = "";
@@ -291,7 +281,7 @@ onMounted(() => {
 .security-illustration {
   position: relative;
   display: grid;
-  width: 330px;
+  width: min(100%, 330px);
   height: 220px;
   margin: 35px auto 20px;
   place-items: center;
@@ -322,14 +312,14 @@ onMounted(() => {
 }
 
 .orbit.two {
-  width: 360px;
+  width: min(100vw - 48px, 360px);
   height: 150px;
   opacity: 0.5;
 }
 
 .introduction-content ul {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: var(--space-3);
   padding: 0;
   margin: 24px 0 0;
@@ -367,7 +357,7 @@ onMounted(() => {
 .login-panel {
   display: grid;
   min-height: 100vh;
-  padding: 48px;
+  padding: clamp(20px, 4vw, 48px);
   background:
     radial-gradient(circle at 85% 12%, rgb(47 94 158 / 4%), transparent 24%),
     #fbfcff;
@@ -376,7 +366,7 @@ onMounted(() => {
 
 .login-card {
   width: min(100%, 510px);
-  padding: 54px 58px 46px;
+  padding: clamp(24px, 4vw, 54px) clamp(22px, 4vw, 58px) clamp(24px, 4vw, 46px);
   text-align: center;
   background: white;
   border: 1px solid #edf0f4;
@@ -466,6 +456,12 @@ onMounted(() => {
 }
 
 @media (width <= 480px) {
+  .login-options {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
   .login-card {
     padding: var(--space-6);
   }

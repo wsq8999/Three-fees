@@ -177,6 +177,9 @@ describe("complete-system mock scenario", () => {
       username: "test_city_user",
       displayName: "测试地市用户",
       cityCode: "320100",
+      enabled: true,
+      initialPassword: "123456",
+      confirmPassword: "123456",
     });
 
     expect(created.enabled).toBe(true);
@@ -185,7 +188,7 @@ describe("complete-system mock scenario", () => {
         .displayName,
     ).toBe("更新后的用户");
     expect(scenario.resetUserPassword(created.id).mustChangePassword).toBe(
-      true,
+      false,
     );
     expect(scenario.setUserEnabled(created.id, false).enabled).toBe(false);
     expect(scenario.setUserEnabled(created.id, true).enabled).toBe(true);

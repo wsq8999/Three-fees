@@ -15,6 +15,7 @@ export interface HttpClient {
   ): Promise<unknown>;
   put(path: string, body: unknown): Promise<unknown>;
   getBlob(path: string): Promise<Blob>;
+  getBlobResponse(path: string): Promise<{ blob: Blob; fileName?: string }>;
   delete(path: string): Promise<void>;
   setUnauthorizedHandler(handler: () => void): void;
 }
@@ -112,7 +113,13 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
         throw problem;
       }
       if (responseKind === "blob") {
-        return response.blob();
+        const blob = await response.blob();
+        return {
+          blob,
+          fileName: parseContentDispositionFileName(
+            response.headers.get("Content-Disposition"),
+          ),
+        };
       }
       return payload;
     } catch (error) {
@@ -131,7 +138,17 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
       request("PATCH", path, body, "json", options),
     put: (path, body) => request("PUT", path, body),
     getBlob: async (path) =>
-      request("GET", path, undefined, "blob") as Promise<Blob>,
+      (
+        (await request("GET", path, undefined, "blob")) as {
+          blob: Blob;
+          fileName?: string;
+        }
+      ).blob,
+    getBlobResponse: (path) =>
+      request("GET", path, undefined, "blob") as Promise<{
+        blob: Blob;
+        fileName?: string;
+      }>,
     delete: async (path) => {
       await request("DELETE", path);
     },
@@ -139,4 +156,18 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
       handleUnauthorized = handler;
     },
   };
+}
+
+function parseContentDispositionFileName(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(value)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(value)?.[1];
+  return plain;
 }

@@ -3,6 +3,7 @@ package com.threefees.audit.application;
 import com.threefees.audit.domain.AuditCalculationInput;
 import com.threefees.audit.domain.AuditCalculationResult;
 import com.threefees.audit.domain.AuditCalculator;
+import com.threefees.audit.domain.MetricResult;
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.time.LocalDate;
@@ -68,7 +69,7 @@ public class AuditRecalculationService {
     AuditCalculationInput.ReferencePeriod yoy =
         reference(period.minusYears(1), cityCode, billingPointCode);
     AuditCalculationInput.ReferencePeriod mom =
-        previousEligibleReference(period, cityCode, billingPointCode);
+        reference(period.minusMonths(1), cityCode, billingPointCode);
     AuditCalculationResult result =
         calculator.calculate(
             new AuditCalculationInput(
@@ -112,34 +113,6 @@ public class AuditRecalculationService {
         period.toString(),
         cityCode,
         billingPointCode);
-  }
-
-  private AuditCalculationInput.ReferencePeriod previousEligibleReference(
-      YearMonth current, String cityCode, String billingPointCode) {
-    List<String> candidates =
-        jdbcTemplate.queryForList(
-            """
-            SELECT DISTINCT s.data_period
-              FROM billing_point_snapshot s
-             WHERE s.city_code = ? AND s.billing_point_code = ? AND s.data_period < ?
-             ORDER BY s.data_period DESC
-            """,
-            String.class,
-            cityCode,
-            billingPointCode,
-            current.toString());
-    for (String candidate : candidates) {
-      YearMonth month = YearMonth.parse(candidate);
-      EnergyAndPayment actual = loadActual(month, cityCode, billingPointCode);
-      if (actual.paymentEligible()) {
-        return new AuditCalculationInput.ReferencePeriod(
-            month,
-            true,
-            actual.actualEnergy(),
-            loadBenchmarkTotal(month, cityCode, billingPointCode));
-      }
-    }
-    return null;
   }
 
   private AuditCalculationInput.ReferencePeriod reference(
@@ -234,7 +207,10 @@ public class AuditRecalculationService {
       EnergyAndPayment current,
       AuditEvidence evidence) {
     AuditCalculationResult result = evidence.result();
-    String reportStatus = result.status().name().equals("OVER_LIMIT") ? "WAITING" : "NA";
+    String reportStatus =
+        result.status().name().equals("OVER_LIMIT")
+            ? existingReport(snapshot.billingPointCode(), period, cityCode) ? "GENERATED" : "WAITING"
+            : "NA";
     String paymentEligibilityReason =
         current.hasPayments()
             ? current.paymentEligible() ? "全部缴费明细审核通过" : "存在未审核通过的缴费明细"
@@ -265,7 +241,7 @@ public class AuditRecalculationService {
                    rated_benchmark_energy = ?, yoy_ratio = ?, mom_ratio = ?, rated_ratio = ?,
                    max_ratio = ?, over_limit_type = ?, detail_json = ?,
                    calculated_at = CURRENT_TIMESTAMP(3), version = version + 1
-             WHERE billing_point_code = ? AND data_period = ?
+             WHERE billing_point_code = ? AND data_period = ? AND city_code = ?
             """,
             snapshot.billingPointName(),
             snapshot.districtCode(),
@@ -326,7 +302,8 @@ public class AuditRecalculationService {
             result.overLimitType().name(),
             writeJson(evidence),
             snapshot.billingPointCode(),
-            period.toString());
+            period.toString(),
+            cityCode);
     if (updated == 0) {
       jdbcTemplate.update(
           """
@@ -422,6 +399,22 @@ public class AuditRecalculationService {
     return reference == null ? null : reference.actualEnergy();
   }
 
+  private boolean existingReport(String billingPointCode, YearMonth period, String cityCode) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+              FROM audit_report r
+              JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
+             WHERE s.billing_point_code = ? AND s.data_period = ? AND s.city_code = ?
+            """,
+            Integer.class,
+            billingPointCode,
+            period.toString(),
+            cityCode);
+    return count != null && count > 0;
+  }
+
   private String referencePeriod(AuditCalculationInput.ReferencePeriod reference) {
     return reference == null ? null : reference.period().toString();
   }
@@ -463,17 +456,19 @@ public class AuditRecalculationService {
   }
 
   private BigDecimal divide(BigDecimal numerator, BigDecimal denominator) {
-    return numerator == null || denominator == null ? null : numerator.divide(denominator, MathContext.DECIMAL128);
+    return numerator == null || denominator == null
+        ? null
+        : numerator.divide(denominator, MathContext.DECIMAL128);
   }
 
-  private String metricStatus(com.threefees.audit.domain.MetricResult metric) {
+  private String metricStatus(MetricResult metric) {
     if (!metric.applicable()) {
       return "NA";
     }
     return metric.overLimit() ? "OVER_LIMIT" : "NORMAL";
   }
 
-  private String notApplicableReason(com.threefees.audit.domain.MetricResult metric) {
+  private String notApplicableReason(MetricResult metric) {
     return metric.applicable() ? null : metric.note();
   }
 
@@ -490,9 +485,9 @@ public class AuditRecalculationService {
       return false;
     }
     String normalized = status.trim();
-    return (normalized.contains("\u901a\u8fc7") || normalized.equalsIgnoreCase("APPROVED"))
-        && !normalized.contains("\u672a")
-        && !normalized.contains("\u4e0d\u901a\u8fc7");
+    return (normalized.contains("通过") || normalized.equalsIgnoreCase("APPROVED"))
+        && !normalized.contains("未")
+        && !normalized.contains("不通过");
   }
 
   private record EnergyAndPayment(

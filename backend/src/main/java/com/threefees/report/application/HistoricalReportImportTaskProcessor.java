@@ -48,70 +48,56 @@ public class HistoricalReportImportTaskProcessor implements TaskProcessor {
       return result(existing);
     }
     historicalService.markProcessing(input.id(), task.createdBy());
-    StoredFile pdf = null;
-    boolean finalized = false;
     try {
       StoredFile source = storedFileService.find(input.sourceFilePublicId());
-      String text = extractWordText(input, source, task.createdBy());
-      if (text.isBlank()) {
-        throw new TaskExecutionException("HISTORICAL_REPORT_EMPTY", "历史 Word 不包含可预览正文", false);
-      }
-      String title = input.billingPointName() + "物业电费稽核历史报告";
-      byte[] pdfBytes = documentGenerator.generateHistoricalPdf(title, text);
-      pdf =
-          storedFileService.storeGenerated(
-              pdfBytes,
-              input.billingPointCode() + "-" + input.period() + "-历史报告.pdf",
-              "application/pdf",
-              "HISTORICAL_REPORT_PDF",
-              task.createdBy());
+      byte[] sourceBytes = storedFileService.readBytes(source);
+      String previewHtml = extractWordPreviewHtml(input, sourceBytes, task.createdBy());
+      String title = input.billingPointName() + "电费稽核历史报告";
       var finalization =
           reportService.finalizeHistoricalReport(
               input.id(),
               input.snapshotId(),
               title,
-              text,
+              previewHtml,
               input.sourceWordFileId(),
-              pdf.id(),
+              null,
               task.createdBy());
-      finalized = finalization.created();
-      if (!finalization.created()) {
-        storedFileService.deleteGenerated(pdf);
-        pdf = null;
-      }
       return result(finalization.reportId());
     } catch (TaskExecutionException exception) {
-      compensate(pdf, finalized);
       historicalService.markFailed(input.id(), exception.code(), task.createdBy());
       throw exception;
     } catch (IllegalArgumentException exception) {
-      compensate(pdf, finalized);
       historicalService.markFailed(input.id(), "HISTORICAL_CONVERSION_FAILED", task.createdBy());
-      throw new TaskExecutionException(
-          "HISTORICAL_CONVERSION_FAILED", "Historical report conversion failed", true);
+      throw new TaskExecutionException("HISTORICAL_CONVERSION_FAILED", "历史报告导入失败，请重新上传 Word 文件", true);
     } catch (RuntimeException exception) {
-      compensate(pdf, finalized);
       historicalService.markFailed(input.id(), "HISTORICAL_CONVERSION_FAILED", task.createdBy());
-      throw new TaskExecutionException("HISTORICAL_CONVERSION_FAILED", "历史报告转换失败", true);
+      throw new TaskExecutionException("HISTORICAL_CONVERSION_FAILED", "历史报告导入失败，请重新上传 Word 文件", true);
     }
   }
 
-  private String extractWordText(
-      HistoricalReportService.HistoricalTaskInput input, StoredFile source, String actor) {
+  private String extractWordPreviewHtml(
+      HistoricalReportService.HistoricalTaskInput input, byte[] sourceBytes, String actor) {
     try {
-      return documentGenerator.extractWordText(storedFileService.readBytes(source), input.originalName());
-    } catch (IllegalArgumentException exception) {
-      historicalService.markFailed(input.id(), "HISTORICAL_WORD_INVALID", actor);
-      throw new TaskExecutionException(
-          "HISTORICAL_WORD_INVALID", "Historical Word could not be parsed", false);
+      String previewHtml = documentGenerator.extractWordPreviewHtml(sourceBytes, input.originalName());
+      if (!previewHtml.isBlank()) {
+        return previewHtml;
+      }
+    } catch (RuntimeException exception) {
+      // Keep historical imports reliable on machines without Office/WPS/LibreOffice.
+      // The uploaded Word remains the source file; online preview can degrade gracefully.
     }
+    return """
+        <div class="word-preview word-preview-empty">
+          <p>当前报告暂无法完整在线预览，请下载原始 Word 查看。</p>
+        </div>
+        """;
   }
 
   private Payload payload(BusinessTask task) {
     try {
       return objectMapper.readValue(task.payloadJson(), Payload.class);
     } catch (JacksonException exception) {
-      throw new TaskExecutionException("TASK_PAYLOAD_INVALID", "历史报告任务载荷不正确", false);
+      throw new TaskExecutionException("TASK_PAYLOAD_INVALID", "历史报告导入任务数据异常，请重新提交", false);
     }
   }
 
@@ -121,16 +107,6 @@ public class HistoricalReportImportTaskProcessor implements TaskProcessor {
     } catch (JacksonException exception) {
       throw new IllegalStateException(
           "Historical report result could not be serialized", exception);
-    }
-  }
-
-  private void compensate(StoredFile pdf, boolean finalized) {
-    if (pdf != null && !finalized) {
-      try {
-        storedFileService.deleteGenerated(pdf);
-      } catch (RuntimeException ignored) {
-        // Best-effort cleanup; no report row is committed on failure.
-      }
     }
   }
 

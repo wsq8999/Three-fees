@@ -40,18 +40,20 @@ public class DashboardQueryService {
       return emptySummary(visibleCityCount, periods);
     }
 
+    long pendingReportCount = countReportStatus(period, cityScope, "WAITING");
     return new DashboardSummary(
         period,
         periods,
         visibleCityCount,
         countSnapshots(period, cityScope),
         countAuditStatus(period, cityScope, "OVER_LIMIT"),
-        countDraftReports(period, cityScope),
+        pendingReportCount,
+        pendingReportCount,
         countDistinctSite(period, cityScope),
         lastUpdatedAt(period, cityScope),
         countAuditStatus(period, cityScope, "NORMAL"),
-        countAuditStatus(period, cityScope, "PENDING_REVIEW"),
-        countFinalReports(period, cityScope),
+        countPendingAudit(period, cityScope),
+        countReportStatus(period, cityScope, "GENERATED"),
         importSummaries(period, cityScope),
         districtOverLimitCounts(period, cityScope),
         overLimitTypeCounts(period, cityScope),
@@ -63,6 +65,7 @@ public class DashboardQueryService {
         null,
         periods,
         visibleCityCount,
+        0,
         0,
         0,
         0,
@@ -83,22 +86,6 @@ public class DashboardQueryService {
     return actor.roles().contains(Role.SUPER_ADMIN) ? null : actor.cityCode();
   }
 
-  private String latestPeriod(String cityScope) {
-    var sql =
-        new StringBuilder(
-            """
-            SELECT MAX(data_period)
-              FROM billing_point_snapshot
-             WHERE 1 = 1
-            """);
-    var args = new ArrayList<>();
-    if (cityScope != null) {
-      sql.append(" AND city_code = ?");
-      args.add(cityScope);
-    }
-    return jdbcTemplate.queryForObject(sql.toString(), String.class, args.toArray());
-  }
-
   private List<String> availablePeriods(String cityScope) {
     var sql =
         new StringBuilder(
@@ -108,24 +95,26 @@ public class DashboardQueryService {
              WHERE 1 = 1
             """);
     var args = new ArrayList<>();
-    if (cityScope != null) {
-      sql.append(" AND city_code = ?");
-      args.add(cityScope);
-    }
+    appendCityScope(sql, args, cityScope, null);
     sql.append(" ORDER BY data_period DESC");
     return jdbcTemplate.queryForList(sql.toString(), String.class, args.toArray());
   }
 
   private long countSnapshots(String period, String cityScope) {
-    return count(
-        """
-        SELECT COUNT(*)
-          FROM billing_point_snapshot s
-         WHERE s.data_period = ?
-        """,
-        period,
-        cityScope,
-        "s");
+    var sql =
+        new StringBuilder(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT DISTINCT s.billing_point_code, s.data_period, s.city_code
+                      FROM billing_point_snapshot s
+                     WHERE s.data_period = ?
+                   """);
+    var args = new ArrayList<>();
+    args.add(period);
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(") snapshots");
+    return number(sql.toString(), args);
   }
 
   private long countAuditStatus(String period, String cityScope, String auditStatus) {
@@ -133,50 +122,75 @@ public class DashboardQueryService {
         new StringBuilder(
             """
             SELECT COUNT(*)
-              FROM audit_result a
-             WHERE a.data_period = ? AND a.audit_status = ?
-            """);
+              FROM (
+                    SELECT DISTINCT s.billing_point_code, s.data_period, s.city_code
+                      FROM billing_point_snapshot s
+                      JOIN audit_result a
+                        ON a.billing_point_code = s.billing_point_code
+                       AND a.data_period = s.data_period
+                       AND a.city_code = s.city_code
+                     WHERE s.data_period = ?
+                       AND a.audit_status = ?
+                   """);
     var args = new ArrayList<>();
     args.add(period);
     args.add(auditStatus);
-    appendCityScope(sql, args, cityScope, "a");
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(") audit_points");
     return number(sql.toString(), args);
   }
 
-  private long countDraftReports(String period, String cityScope) {
-    return count(
-        """
-        SELECT COUNT(*)
-          FROM report_draft d
-          JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
-         WHERE s.data_period = ?
-        """,
-        period,
-        cityScope,
-        "s");
+  private long countPendingAudit(String period, String cityScope) {
+    var sql =
+        new StringBuilder(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT DISTINCT s.billing_point_code, s.data_period, s.city_code
+                      FROM billing_point_snapshot s
+                      LEFT JOIN audit_result a
+                        ON a.billing_point_code = s.billing_point_code
+                       AND a.data_period = s.data_period
+                       AND a.city_code = s.city_code
+                     WHERE s.data_period = ?
+                       AND (a.id IS NULL OR a.audit_status IN ('PENDING_REVIEW', 'NOT_APPLICABLE'))
+                   """);
+    var args = new ArrayList<>();
+    args.add(period);
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(") pending_points");
+    return number(sql.toString(), args);
   }
 
-  private long countFinalReports(String period, String cityScope) {
-    return count(
-        """
-        SELECT COUNT(*)
-          FROM audit_report r
-          JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
-         WHERE s.data_period = ? AND r.status IN ('FINAL', 'CORRECTED')
-        """,
-        period,
-        cityScope,
-        "s");
+  private long countReportStatus(String period, String cityScope, String reportStatus) {
+    var sql =
+        new StringBuilder(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT DISTINCT s.billing_point_code, s.data_period, s.city_code
+                      FROM billing_point_snapshot s
+                      JOIN audit_result a
+                        ON a.billing_point_code = s.billing_point_code
+                       AND a.data_period = s.data_period
+                       AND a.city_code = s.city_code
+                     WHERE s.data_period = ?
+                       AND a.audit_status = 'OVER_LIMIT'
+                       AND a.report_status = ?
+                   """);
+    var args = new ArrayList<>();
+    args.add(period);
+    args.add(reportStatus);
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(") report_points");
+    return number(sql.toString(), args);
   }
 
   private long countDistinctSite(String period, String cityScope) {
     var sql =
         new StringBuilder(
             """
-            SELECT COUNT(DISTINCT COALESCE(
-                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."关联资源名称"')), ''),
-                     s.billing_point_name
-                   ))
+            SELECT COUNT(DISTINCT NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."关联资源编码"')), ''))
               FROM billing_point_snapshot s
              WHERE s.data_period = ?
             """);
@@ -190,13 +204,15 @@ public class DashboardQueryService {
     var sql =
         new StringBuilder(
             """
-            SELECT MAX(s.updated_at)
-              FROM billing_point_snapshot s
-             WHERE s.data_period = ?
+            SELECT MAX(b.completed_at)
+              FROM import_job b
+             WHERE b.dataset_type = 'BILLING_POINT'
+               AND b.data_period = ?
+               AND b.status = 'ACTIVE'
             """);
     var args = new ArrayList<>();
     args.add(period);
-    appendCityScope(sql, args, cityScope, "s");
+    appendCityScope(sql, args, cityScope, "b");
     LocalDateTime value = jdbcTemplate.queryForObject(sql.toString(), LocalDateTime.class, args.toArray());
     return value == null ? null : value.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
   }
@@ -221,10 +237,7 @@ public class DashboardQueryService {
     var args = new ArrayList<>();
     args.add(datasetType);
     args.add(period);
-    if (cityScope != null) {
-      sql.append(" AND (b.city_code IS NULL OR b.city_code = ?)");
-      args.add(cityScope);
-    }
+    appendCityScope(sql, args, cityScope, "b");
     sql.append(" ORDER BY b.completed_at DESC, b.id DESC LIMIT 1");
     return jdbcTemplate
         .query(sql.toString(), this::mapImportBatch, args.toArray())
@@ -238,11 +251,14 @@ public class DashboardQueryService {
         new StringBuilder(
             """
             SELECT COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''), '未填写') AS name,
-                   COUNT(*) AS total
+                   COUNT(DISTINCT CONCAT(s.billing_point_code, '|', s.data_period, '|', s.city_code)) AS total
               FROM billing_point_snapshot s
               JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
-             WHERE s.data_period = ? AND a.audit_status = 'OVER_LIMIT'
+                ON a.billing_point_code = s.billing_point_code
+               AND a.data_period = s.data_period
+               AND a.city_code = s.city_code
+             WHERE s.data_period = ?
+               AND a.audit_status = 'OVER_LIMIT'
             """);
     var args = new ArrayList<>();
     args.add(period);
@@ -259,17 +275,22 @@ public class DashboardQueryService {
         new StringBuilder(
             """
             SELECT COALESCE(NULLIF(a.over_limit_type, ''), '未分类') AS name,
-                   COUNT(*) AS total
-              FROM audit_result a
-             WHERE a.data_period = ? AND a.audit_status = 'OVER_LIMIT'
+                   COUNT(DISTINCT CONCAT(s.billing_point_code, '|', s.data_period, '|', s.city_code)) AS total
+              FROM billing_point_snapshot s
+              JOIN audit_result a
+                ON a.billing_point_code = s.billing_point_code
+               AND a.data_period = s.data_period
+               AND a.city_code = s.city_code
+             WHERE s.data_period = ?
+               AND a.audit_status = 'OVER_LIMIT'
             """);
     var args = new ArrayList<>();
     args.add(period);
-    appendCityScope(sql, args, cityScope, "a");
+    appendCityScope(sql, args, cityScope, "s");
     sql.append(" GROUP BY name ORDER BY total DESC, name ASC LIMIT 8");
     return jdbcTemplate.query(
         sql.toString(),
-        (rs, row) -> new DashboardSummary.NameCount(rs.getString("name"), rs.getLong("total")),
+        (rs, row) -> new DashboardSummary.NameCount(overLimitTypeLabel(rs.getString("name")), rs.getLong("total")),
         args.toArray());
   }
 
@@ -282,9 +303,12 @@ public class DashboardQueryService {
                    a.actual_amount, a.over_limit_type, a.max_ratio
               FROM billing_point_snapshot s
               JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
-              LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
-             WHERE s.data_period = ? AND a.audit_status = 'OVER_LIMIT' AND r.id IS NULL
+                ON a.billing_point_code = s.billing_point_code
+               AND a.data_period = s.data_period
+               AND a.city_code = s.city_code
+             WHERE s.data_period = ?
+               AND a.audit_status = 'OVER_LIMIT'
+               AND a.report_status = 'WAITING'
             """);
     var args = new ArrayList<>();
     args.add(period);
@@ -310,7 +334,7 @@ public class DashboardQueryService {
         valueOr(rs.getString("county"), "—"),
         rs.getString("data_period"),
         decimalString(rs.getBigDecimal("actual_amount")),
-        valueOr(rs.getString("over_limit_type"), "未分类"),
+        overLimitTypeLabel(valueOr(rs.getString("over_limit_type"), "未分类")),
         ratioText);
   }
 
@@ -330,18 +354,14 @@ public class DashboardQueryService {
         List.of());
   }
 
-  private long count(String baseSql, String period, String cityScope, String alias) {
-    var sql = new StringBuilder(baseSql);
-    var args = new ArrayList<>();
-    args.add(period);
-    appendCityScope(sql, args, cityScope, alias);
-    return number(sql.toString(), args);
-  }
-
   private void appendCityScope(
       StringBuilder sql, List<Object> args, String cityScope, String alias) {
     if (cityScope != null) {
-      sql.append(" AND ").append(alias).append(".city_code = ?");
+      sql.append(" AND ");
+      if (alias != null && !alias.isBlank()) {
+        sql.append(alias).append(".");
+      }
+      sql.append("city_code = ?");
       args.add(cityScope);
     }
   }
@@ -357,6 +377,17 @@ public class DashboardQueryService {
 
   private String valueOr(String value, String fallback) {
     return value == null || value.isBlank() ? fallback : value;
+  }
+
+  private String overLimitTypeLabel(String value) {
+    return switch (value) {
+      case "ONLY_YOY", "仅同比超标", "同比超标" -> "仅同比超标";
+      case "ONLY_MOM", "仅环比超标", "环比超标" -> "仅环比超标";
+      case "ONLY_RATED", "仅额定标杆超标", "额定标杆超标", "额定功率超标" -> "仅额定标杆超标";
+      case "MULTIPLE", "多项超标" -> "多项超标";
+      case "NONE", "未超标" -> "未超标";
+      default -> valueOr(value, "未分类");
+    };
   }
 
   public record ImportBatchSummary(

@@ -16,6 +16,7 @@ import type {
   AuditStatus,
   BillingPointDetail,
   BusinessCity,
+  ImportBatch,
   PageResult,
 } from "@/types/business";
 
@@ -38,19 +39,34 @@ const filters = reactive({
   name: "",
   cityCode: "",
   district: "",
-  period: "2026-06",
+  period: "",
   siteKeyword: "",
   meterKeyword: "",
   reviewStatus: "",
   pointStatus: "",
   auditStatus: "" as AuditStatus | "",
   reportStatus: "",
+  focusPeriod: "",
+  focusCityCode: "",
   page: 1,
   size: 10,
 });
 
 const selectedCount = computed(() => selectedIds.value.size);
 const selectedIdList = computed(() => Array.from(selectedIds.value));
+const selectedRows = computed(() =>
+  (pageData.value?.items ?? []).filter((item) => selectedIds.value.has(item.id)),
+);
+const exportCityCode = computed(() => {
+  if (filters.cityCode) return filters.cityCode;
+  const cityCodes = new Set(selectedRows.value.map((item) => item.city.code));
+  return cityCodes.size === 1 ? (Array.from(cityCodes)[0] ?? "") : "";
+});
+const exportPeriod = computed(() => {
+  if (filters.period) return filters.period;
+  const periods = new Set(selectedRows.value.map((item) => item.period));
+  return periods.size === 1 ? (Array.from(periods)[0] ?? "") : "";
+});
 const isCityLocked = computed(() => session.currentUser?.city !== null);
 const visibleCities = computed(() =>
   session.currentUser?.city ? [session.currentUser.city] : cities.value,
@@ -87,13 +103,15 @@ function hydrateFromRoute(): void {
     name: queryText(route.query.name),
     cityCode: session.currentUser?.city?.code ?? base.cityCode,
     district: queryText(route.query.district),
-    period: base.period || "2026-06",
+    period: base.period,
     siteKeyword: queryText(route.query.site),
     meterKeyword: queryText(route.query.meter),
     reviewStatus: queryText(route.query.review),
     pointStatus: queryText(route.query.pointStatus),
     auditStatus: base.auditStatus,
     reportStatus: queryText(route.query.reportStatus),
+    focusPeriod: queryText(route.query.focusPeriod),
+    focusCityCode: queryText(route.query.focusCity),
     page: base.page,
     size: [10, 20, 50].includes(base.size) ? base.size : 10,
   });
@@ -113,6 +131,8 @@ function routeQuery(): Record<string, string> {
     ...(filters.pointStatus ? { pointStatus: filters.pointStatus } : {}),
     ...(filters.auditStatus ? { status: filters.auditStatus } : {}),
     ...(filters.reportStatus ? { reportStatus: filters.reportStatus } : {}),
+    ...(filters.focusPeriod ? { focusPeriod: filters.focusPeriod } : {}),
+    ...(filters.focusCityCode ? { focusCity: filters.focusCityCode } : {}),
     page: String(filters.page),
     size: String(filters.size),
   };
@@ -138,8 +158,7 @@ function paymentEligibilityText(row: Summary): "APPROVED" | "PENDING" {
 }
 
 function billingPointStatusText(row: Summary): string {
-  if (row.billingPointStatus === "DISABLED") return "停用";
-  return "启用";
+  return row.billingPointStatus === "DISABLED" ? "停用" : "启用";
 }
 
 async function load(): Promise<void> {
@@ -159,6 +178,8 @@ async function load(): Promise<void> {
       period: filters.period,
       keyword: keywords[0] ?? "",
       auditStatus: filters.auditStatus,
+      focusPeriod: filters.focusPeriod,
+      focusCityCode: filters.focusCityCode,
       page: filters.page,
       size: filters.size,
     });
@@ -198,13 +219,15 @@ async function reset(): Promise<void> {
     name: "",
     cityCode: session.currentUser?.city?.code ?? "",
     district: "",
-    period: "2026-06",
+    period: "",
     siteKeyword: "",
     meterKeyword: "",
     reviewStatus: "",
     pointStatus: "",
     auditStatus: "",
     reportStatus: "",
+    focusPeriod: "",
+    focusCityCode: "",
     page: 1,
   });
   await search();
@@ -239,17 +262,13 @@ async function openDetail(row: Summary): Promise<void> {
 }
 
 async function openDraft(row: Summary): Promise<void> {
-  const draft = row.draftId
-    ? await businessApi.drafts.get(row.draftId)
-    : await businessApi.drafts.createOrResume(row.id);
-  if (draft === undefined) {
-    ElMessage.error("工作稿不存在或当前账号无权访问。");
-    return;
-  }
   await router.push({
-    name: "report-draft",
-    params: { draftId: draft.id },
-    query: { from: route.fullPath },
+    name: "reports-generate",
+    query: {
+      from: route.fullPath,
+      billingPointCode: row.code,
+      period: row.period,
+    },
   });
 }
 
@@ -280,6 +299,29 @@ function closeImport(visible: boolean): void {
   if (!visible && route.query.dialog === "import") {
     void router.replace({ path: "/billing-points", query: routeQuery() });
   }
+}
+
+async function handleImported(batch: ImportBatch): Promise<void> {
+  selectedIds.value = new Set();
+  Object.assign(filters, {
+    code: "",
+    name: "",
+    cityCode: session.currentUser?.city?.code ?? "",
+    district: "",
+    period: "",
+    siteKeyword: "",
+    meterKeyword: "",
+    reviewStatus: "",
+    pointStatus: "",
+    auditStatus: "",
+    reportStatus: "",
+    focusPeriod: batch.period,
+    focusCityCode: batch.cityCode ?? "",
+    page: 1,
+  });
+  importVisible.value = false;
+  await router.replace({ path: "/billing-points", query: routeQuery() });
+  await load();
 }
 
 onMounted(async () => {
@@ -341,22 +383,23 @@ watch(
           type="month"
           value-format="YYYY-MM"
           format="YYYY年MM月"
-          :clearable="false"
-        />
-      </label>
-      <label>
-        <span>站址关键词</span>
-        <ElInput
-          v-model="filters.siteKeyword"
-          placeholder="请输入站址关键词"
+          placeholder="全部账期"
           clearable
         />
       </label>
       <label>
-        <span>电表关键词</span>
+        <span>站址关键字</span>
+        <ElInput
+          v-model="filters.siteKeyword"
+          placeholder="请输入站址关键字"
+          clearable
+        />
+      </label>
+      <label>
+        <span>电表关键字</span>
         <ElInput
           v-model="filters.meterKeyword"
-          placeholder="请输入电表关键词"
+          placeholder="请输入电表关键字"
           clearable
         />
       </label>
@@ -379,7 +422,7 @@ watch(
         <ElSelect v-model="filters.auditStatus" placeholder="全部" clearable>
           <ElOption label="正常" value="NORMAL" />
           <ElOption label="超标" value="OVER_LIMIT" />
-          <ElOption label="待审核" value="PENDING_REVIEW" />
+          <ElOption label="待稽核" value="PENDING_REVIEW" />
           <ElOption label="不适用" value="NOT_APPLICABLE" />
         </ElSelect>
       </label>
@@ -553,13 +596,13 @@ watch(
     :model-value="importVisible"
     :default-period="filters.period"
     @update:model-value="closeImport"
-    @imported="load"
+    @imported="handleImported"
   />
   <ExportDataDialog
     v-model="exportVisible"
     :scope-label="`当前已选择 ${selectedCount} 条记录`"
-    :period="filters.period"
-    :city-code="filters.cityCode"
+    :period="exportPeriod"
+    :city-code="exportCityCode"
     :billing-point-ids="selectedIdList"
     :selected-count="selectedCount"
   />
@@ -572,7 +615,7 @@ watch(
 
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
   gap: 12px 14px;
 }
 
@@ -593,10 +636,11 @@ watch(
 
 .filter-actions {
   display: flex;
+  grid-column: 1 / -1;
   gap: 10px;
   align-items: end;
   justify-content: flex-end;
-  padding-top: 22px;
+  padding-top: 4px;
 }
 
 .filter-actions .el-button {
@@ -604,7 +648,8 @@ watch(
 }
 
 .table-card {
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .table-card :deep(.el-table__empty-block) {
@@ -647,6 +692,12 @@ watch(
   .table-footer {
     align-items: flex-start;
     flex-direction: column;
+    width: 100%;
+  }
+
+  .filter-actions,
+  .filter-actions .el-button {
+    width: 100%;
   }
 }
 </style>

@@ -18,6 +18,8 @@ const metadata: Record<
   NOT_APPLICABLE: { label: "—", type: "info" },
   NONE: { label: "—", type: "info" },
   DRAFT: { label: "待生成", type: "warning" },
+  WAITING: { label: "待生成", type: "warning" },
+  GENERATED: { label: "已生成", type: "success" },
   FINAL: { label: "已生成", type: "success" },
   CORRECTED: { label: "已生成", type: "success" },
   HISTORICAL_IMPORTED: { label: "历史导入", type: "info" },

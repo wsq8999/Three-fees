@@ -2,12 +2,13 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Clock, Picture, Promotion } from "@element-plus/icons-vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 
-import { businessApi } from "@/api/business-api";
+import { businessApi, triggerBrowserDownload } from "@/api/business-api";
 import StatusTag from "@/components/business/StatusTag.vue";
 import PageState from "@/components/PageState.vue";
 import type { DraftBlock, DraftVersion, ReportDraft } from "@/types/business";
+import { standardConfirm } from "@/utils/message-box";
 
 const route = useRoute();
 const router = useRouter();
@@ -151,7 +152,7 @@ async function imageSelected(event: Event): Promise<void> {
 async function restore(version: DraftVersion): Promise<void> {
   if (draft.value === null) return;
   try {
-    await ElMessageBox.confirm(
+    await standardConfirm(
       `将以 V${version.version} 的内容创建新的当前版本，现有历史不会删除。`,
       "恢复历史版本",
       {
@@ -187,7 +188,7 @@ async function generate(): Promise<void> {
   if (draft.value === null) return;
   await saveDraft(false);
   try {
-    await ElMessageBox.confirm(
+    await standardConfirm(
       "确认后将生成正式报告并下载 Word。同一报账点和账期只保留一个当前正式报告；后续修改需走更正流程。",
       "生成正式报告",
       {
@@ -203,7 +204,7 @@ async function generate(): Promise<void> {
   generating.value = true;
   try {
     const report = await businessApi.drafts.generate(draft.value.id);
-    saveGeneratedWord(report.id, report.wordFileName);
+    await saveGeneratedWord(report.id, report.wordFileName);
     await router.replace({
       name: "report-detail",
       params: { reportId: report.id },
@@ -218,22 +219,15 @@ async function generate(): Promise<void> {
   }
 }
 
-function saveGeneratedWord(reportId: string, fileName: string): void {
-  businessApi.reports
-    .downloadWord(reportId)
-    .then((blob) => {
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = fileName;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    })
-    .catch(() => {
-      ElMessage.warning(
-        "正式报告已生成，Word 自动下载失败，可在报告详情页手动下载。",
-      );
-    });
+async function saveGeneratedWord(reportId: string, fileName: string): Promise<void> {
+  try {
+    await triggerBrowserDownload(
+      `/api/v1/reports/${encodeURIComponent(reportId)}/word`,
+      fileName,
+    );
+  } catch {
+    ElMessage.warning("正式报告已生成，Word 自动下载失败，可在报告详情页手动下载。");
+  }
 }
 
 async function goBack(): Promise<void> {
@@ -474,7 +468,7 @@ onMounted(load);
 <style scoped>
 .draft-summary {
   display: grid;
-  grid-template-columns: 180px minmax(280px, 1fr) 220px 170px 120px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: 18px;
   padding: 16px 24px;
   margin-bottom: 16px;
@@ -509,12 +503,12 @@ onMounted(load);
 }
 
 .draft-workspace.assistant-open {
-  grid-template-columns: minmax(0, 1fr) 430px;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 430px);
 }
 
 .report-paper {
   position: relative;
-  padding: 28px 36px 42px;
+  padding: clamp(18px, 3vw, 28px) clamp(16px, 4vw, 36px) 42px;
   background: #fff;
 }
 
@@ -695,6 +689,19 @@ onMounted(load);
   .draft-workspace,
   .draft-workspace.assistant-open {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (width <= 640px) {
+  .draft-actions {
+    right: 12px;
+    left: 12px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .draft-actions .el-button {
+    width: 100%;
   }
 }
 </style>

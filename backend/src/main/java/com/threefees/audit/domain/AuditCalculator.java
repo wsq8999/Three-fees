@@ -10,13 +10,11 @@ import java.util.List;
 public class AuditCalculator {
 
   private static final BigDecimal HISTORICAL_MARGIN = new BigDecimal("1.20");
-  private static final int DISPLAY_SCALE = 8;
   private static final MathContext INTERNAL_CONTEXT = MathContext.DECIMAL128;
 
   public AuditCalculationResult calculate(AuditCalculationInput input) {
     if (input.actualEnergy() == null) {
-      MetricResult notApplicable =
-          MetricResult.notApplicable("当前实际用电缺失");
+      MetricResult notApplicable = MetricResult.notApplicable("当前实际用电缺失");
       return new AuditCalculationResult(
           AuditStatus.NOT_APPLICABLE,
           OverLimitType.NONE,
@@ -94,7 +92,7 @@ public class AuditCalculator {
       AuditCalculationInput.ReferencePeriod reference,
       String label) {
     if (!currentPaymentEligible) {
-      return MetricResult.notApplicable(label + "需要当前账期存在审核通过的缴费单参考资格");
+      return MetricResult.notApplicable(label + "需要当前账期存在审核通过的缴费明细");
     }
     if (currentBenchmarkTotal == null
         || reference == null
@@ -107,7 +105,7 @@ public class AuditCalculator {
     BigDecimal b =
         divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
     if (b.signum() <= 0) {
-      return MetricResult.notApplicable(label + "参考月标杆均值 B≤0");
+      return MetricResult.notApplicable(label + "参考月标杆日均 B 小于等于 0");
     }
     BigDecimal c =
         divide(reference.actualEnergy(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
@@ -116,10 +114,10 @@ public class AuditCalculator {
         c.multiply(k, INTERNAL_CONTEXT).multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT);
     boolean overLimit = currentDaily.compareTo(threshold) > 0;
     BigDecimal ratio = overLimit ? ratio(currentDaily, threshold) : BigDecimal.ZERO;
-    String note = label + "阈值=C×max(1,A/B)×1.20";
+    String note = label + "阈值 = 参考日均 C × max(1, A/B) × 1.20";
     if (threshold.signum() == 0 && overLimit) {
       ratio = null;
-      note += "；阈值为0，比例不定义";
+      note += "；阈值为 0，比例不定义";
     }
     return new MetricResult(true, overLimit, currentDaily, threshold, ratio, note);
   }
@@ -136,7 +134,7 @@ public class AuditCalculator {
           actualEnergy,
           benchmarkTotal,
           overLimit ? null : BigDecimal.ZERO,
-          overLimit ? "额定标杆阈值为0，实际用电大于0" : "额定标杆与实际用电均为0");
+          overLimit ? "额定标杆阈值为 0，实际用电大于 0" : "额定标杆与实际用电均为 0");
     }
     return new MetricResult(
         true,

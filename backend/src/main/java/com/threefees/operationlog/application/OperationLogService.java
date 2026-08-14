@@ -40,6 +40,10 @@ public class OperationLogService {
         OperationResult.SUCCEEDED);
   }
 
+  public void userOperationSucceeded(Long userId, String username, OperationAction action) {
+    record("user-management", userId, username, action, OperationResult.SUCCEEDED);
+  }
+
   private void record(
       String traceId,
       Long userId,

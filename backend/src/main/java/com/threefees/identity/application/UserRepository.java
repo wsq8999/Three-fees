@@ -21,7 +21,8 @@ public interface UserRepository {
 
   void createInitialAccount(BootstrapAccount account, String passwordHash);
 
-  long createCityUser(String username, String displayName, String passwordHash, String cityCode);
+  long createCityUser(
+      String username, String displayName, String passwordHash, String cityCode, boolean enabled);
 
   boolean update(long id, String displayName, String cityCode, boolean enabled, long version);
 

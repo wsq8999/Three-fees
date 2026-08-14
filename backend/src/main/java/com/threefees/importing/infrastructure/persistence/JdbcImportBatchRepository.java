@@ -114,6 +114,22 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   }
 
   @Override
+  public boolean allDatasetsActive(String period, String cityCode) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(DISTINCT dataset_type)
+              FROM import_job
+             WHERE data_period = ? AND city_code = ? AND status = 'ACTIVE'
+               AND dataset_type IN ('BILLING_POINT', 'PAYMENT', 'METER_READING', 'BENCHMARK')
+            """,
+            Integer.class,
+            period,
+            cityCode);
+    return count != null && count == DatasetType.values().length;
+  }
+
+  @Override
   public Optional<String> findActiveCityForPayment(
       String period, String billingPointCode, String paymentCode) {
     if (period == null
@@ -186,33 +202,6 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
         .findFirst();
   }
 
-  @Override
-  public void replaceImportedRecords(ImportBatch batch, List<ImportedRow> rows) {
-    jdbcTemplate.update("DELETE FROM imported_record WHERE import_job_id = ?", batch.id());
-    jdbcTemplate.batchUpdate(
-        """
-        INSERT INTO imported_record
-          (import_job_id, dataset_type, data_period, city_code, source_row_no,
-           billing_point_code, billing_point_name, payment_bill_code, meter_code,
-           business_key, values_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-        500,
-        (statement, row) -> {
-          statement.setLong(1, batch.id());
-          statement.setString(2, batch.datasetType().name());
-          statement.setString(3, batch.period());
-          statement.setString(4, row.cityCode());
-          statement.setInt(5, row.sourceRow());
-          statement.setString(6, row.billingPointCode());
-          statement.setString(7, row.billingPointName());
-          statement.setString(8, row.paymentCode());
-          statement.setString(9, row.meterCode());
-          statement.setString(10, row.businessKey());
-          statement.setString(11, row.valuesJson());
-        });
-  }
 
   @Override
   public void markProcessing(long id) {
@@ -352,3 +341,4 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
     }
   }
 }
+

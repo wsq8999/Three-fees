@@ -10,7 +10,9 @@ import type {
   DraftBlock,
   DraftVersion,
   ExportJob,
+  HistoricalReportBillingPoint,
   HistoricalReportCandidate,
+  HistoricalReportPeriod,
   ImportBatch,
   ManagedUser,
   PageResult,
@@ -18,6 +20,9 @@ import type {
   MeterRecord,
   BenchmarkRecord,
   ReportDraft,
+  ReportGenerationImageAnalysisInput,
+  ReportGenerationImageAnalysisResult,
+  ReportGenerationInitialContent,
   ReportQuery,
   ReportSummary,
   ReportStatus,
@@ -38,6 +43,7 @@ interface BackendPage<T> {
 }
 
 function mapDashboard(value: Partial<DashboardData>): DashboardData {
+  const pendingReportCount = value.pendingReportCount ?? value.draftReportCount ?? 0;
   return {
     currentDataPeriod: value.currentDataPeriod ?? null,
     availablePeriods: value.availablePeriods ?? [],
@@ -54,7 +60,8 @@ function mapDashboard(value: Partial<DashboardData>): DashboardData {
     normalBillingPointCount: value.normalBillingPointCount ?? 0,
     overLimitBillingPointCount: value.overLimitBillingPointCount ?? 0,
     pendingReviewCount: value.pendingReviewCount ?? 0,
-    draftReportCount: value.draftReportCount ?? 0,
+    draftReportCount: pendingReportCount,
+    pendingReportCount,
     finalReportCount: value.finalReportCount ?? 0,
     districtOverLimitCounts: value.districtOverLimitCounts ?? [],
     overLimitTypeCounts: (value.overLimitTypeCounts ?? []).map((item) => ({
@@ -186,9 +193,9 @@ interface BackendTask {
 
 const TASK_ERROR_MESSAGES: Record<string, string> = {
   HISTORICAL_WORD_INVALID:
-    "历史 Word 无法解析，请确认文件是真实的 .doc 或 .docx 文档，且不是 PDF/WPS 专有格式改名后的文件。",
-  HISTORICAL_REPORT_EMPTY: "历史 Word 不包含可预览正文，请上传包含正文内容的 Word 文件。",
-  HISTORICAL_CONVERSION_FAILED: "历史报告转换失败，请稍后重试或更换 Word 文件。",
+    "历史 Word 无法识别，请确认文件是真实的 .doc 或 .docx 文档。",
+  HISTORICAL_REPORT_EMPTY: "历史 Word 暂无可在线预览内容，系统将保留原始 Word 供下载查看。",
+  HISTORICAL_CONVERSION_FAILED: "历史报告导入失败，请重新上传 Word 文件。",
   TASK_PAYLOAD_INVALID: "历史报告导入任务数据异常，请重新提交。",
 };
 
@@ -201,7 +208,7 @@ interface BackendReportSummary {
   cityName: string;
   district: string | null;
   period: string;
-  sourceType: "SYSTEM" | "HISTORICAL";
+  sourceType: "SYSTEM" | "HISTORICAL" | "GENERATED" | "IMPORTED";
   status: "GENERATED" | "CORRECTED";
   actualEnergy: string | null;
   actualAmount: string | null;
@@ -250,15 +257,14 @@ function overLimitTypeLabel(value: string | null | undefined): string | null {
     return null;
   }
   const labels: Record<string, string> = {
-    ONLY_YOY: "同比超标",
-    ONLY_MOM: "环比超标",
-    ONLY_RATED: "额定标杆超标",
+    ONLY_YOY: "仅同比超标",
+    ONLY_MOM: "仅环比超标",
+    ONLY_RATED: "仅额定标杆超标",
     MULTIPLE: "多项超标",
     NONE: "未超标",
   };
   return labels[value] ?? value;
 }
-
 function mapBillingSummary(
   item: BackendBillingPointSummary,
 ): BillingPointDetail["summary"] {
@@ -476,13 +482,20 @@ function mapDraft(
 }
 
 function mapReport(item: BackendReportSummary): ReportSummary {
-  const summary = item.sections
-    ? [
-        item.sections.situation,
-        item.sections.analysis,
-        item.sections.rectification,
-      ].join("\n")
-    : `${item.billingPointName} ${item.period} 电费稽核报告`;
+  const sectionParts = item.sections
+    ? [item.sections.situation, item.sections.analysis, item.sections.rectification]
+        .map((part) => cleanReportPart(part))
+        .filter(
+          (part) =>
+            part.length > 0 &&
+            part !== "Historical Word preview" &&
+            part !== "Original Word file is the source of truth.",
+        )
+    : [];
+  const summary =
+    sectionParts.length > 0
+      ? sectionParts.join("\n")
+      : `${item.billingPointName} ${item.period} 电费稽核报告`;
   return {
     id: item.id,
     reportNumber: item.reportNumber,
@@ -493,7 +506,10 @@ function mapReport(item: BackendReportSummary): ReportSummary {
     district: item.district,
     period: item.period,
     status: item.status === "CORRECTED" ? "CORRECTED" : "FINAL",
-    source: item.sourceType === "HISTORICAL" ? "HISTORICAL_IMPORT" : "SYSTEM",
+    source:
+      item.sourceType === "HISTORICAL" || item.sourceType === "IMPORTED"
+        ? "HISTORICAL_IMPORT"
+        : "SYSTEM",
     generatedAt: item.generatedAt,
     correctedAt: item.correctedAt ?? null,
     correctionCount: item.status === "CORRECTED" ? 1 : 0,
@@ -504,6 +520,7 @@ function mapReport(item: BackendReportSummary): ReportSummary {
     wordFileName: `${item.reportNumber}.docx`,
     pdfFileName: `${item.reportNumber}.pdf`,
     summary,
+    previewHtml: sectionParts.find(looksLikeHtml) ?? null,
     archivedAudit: [],
     latestAudit: [],
     corrections: item.correctionReason
@@ -517,6 +534,19 @@ function mapReport(item: BackendReportSummary): ReportSummary {
         ]
       : [],
   };
+}
+
+function cleanReportPart(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  return value
+    .trim()
+    .replace(/Historical Word preview/gi, "")
+    .replace(/Original Word file is the source of truth\./gi, "")
+    .trim();
+}
+
+function looksLikeHtml(value: string): boolean {
+  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(value);
 }
 
 function mapHistoricalCandidate(
@@ -609,8 +639,12 @@ export const businessApi = {
       }
       form.set("file", file);
       const response = await httpClient.postForm("/api/v1/import-batches", form);
-      const result = asResult<ImportBatch | { items: ImportBatch[] }>(response);
-      return "items" in result ? result.items : [result];
+      const result = asResult<
+        ImportBatch | { items?: ImportBatch[]; batches?: ImportBatch[] }
+      >(response);
+      if ("batches" in result && Array.isArray(result.batches)) return result.batches;
+      if ("items" in result && Array.isArray(result.items)) return result.items;
+      return [result as ImportBatch];
     },
     async retry(id: string): Promise<ImportBatch> {
       return asResult<ImportBatch>(
@@ -823,12 +857,47 @@ export const businessApi = {
         ),
       ).map(mapHistoricalCandidate);
     },
+    async listHistoricalBillingPoints(query: {
+      cityCode: string;
+      keyword: string;
+    }): Promise<HistoricalReportBillingPoint[]> {
+      const params = queryString({
+        cityCode: query.cityCode,
+        keyword: query.keyword,
+      });
+      return asResult<HistoricalReportBillingPoint[]>(
+        await httpClient.get(
+          `/api/v1/historical-report-billing-points${params ? `?${params}` : ""}`,
+        ),
+      );
+    },
+    async listHistoricalPeriods(query: {
+      billingPointCode: string;
+      cityCode: string;
+    }): Promise<HistoricalReportPeriod[]> {
+      const params = queryString({
+        cityCode: query.cityCode,
+      });
+      return asResult<HistoricalReportPeriod[]>(
+        await httpClient.get(
+          `/api/v1/historical-report-billing-points/${encodeURIComponent(query.billingPointCode)}/periods${
+            params ? `?${params}` : ""
+          }`,
+        ),
+      );
+    },
     async importHistorical(input: {
-      billingPointPeriodId: string;
+      billingPointPeriodId?: string;
+      billingPointCode?: string;
+      cityCode?: string;
+      period?: string;
       file: File;
     }): Promise<ReportSummary> {
       const form = new FormData();
-      form.set("billingPointPeriodId", input.billingPointPeriodId);
+      if (input.billingPointPeriodId) form.set("billingPointPeriodId", input.billingPointPeriodId);
+      if (input.billingPointCode) form.set("billingPointCode", input.billingPointCode);
+      if (input.cityCode) form.set("cityCode", input.cityCode);
+      if (input.period) form.set("period", input.period);
       form.set("file", input.file);
       const created = asResult<{
         reportId?: string;
@@ -878,6 +947,64 @@ export const businessApi = {
         `/api/v1/reports/${encodeURIComponent(id)}/word`,
       );
     },
+    async wordBlob(id: string): Promise<Blob> {
+      return httpClient.getBlob(`/api/v1/reports/${encodeURIComponent(id)}/word?inline=true`);
+    },
+  },
+  reportGeneration: {
+    async candidates(cityCode?: string): Promise<ReportGenerationInitialContent["candidate"][]> {
+      const params = queryString({ cityCode: cityCode ?? "" });
+      return asResult<ReportGenerationInitialContent["candidate"][]>(
+        await httpClient.get(`/api/v1/report-generation/candidates${params ? `?${params}` : ""}`),
+      );
+    },
+    async initialContent(billingPointCode: string, period: string): Promise<ReportGenerationInitialContent> {
+      const params = queryString({ billingPointCode, period });
+      return asResult<ReportGenerationInitialContent>(
+        await httpClient.get(`/api/v1/report-generation/initial-content?${params}`),
+      );
+    },
+    async correctionInitialContent(reportId: string): Promise<ReportGenerationInitialContent> {
+      return asResult<ReportGenerationInitialContent>(
+        await httpClient.get(
+          `/api/v1/report-generation/corrections/${encodeURIComponent(reportId)}/initial-content`,
+        ),
+      );
+    },
+    async analyzeImages(input: ReportGenerationImageAnalysisInput): Promise<ReportGenerationImageAnalysisResult> {
+      return asResult<ReportGenerationImageAnalysisResult>(
+        await httpClient.post("/api/v1/report-generation/image-analysis", input),
+      );
+    },
+    async generate(input: {
+      billingPointCode: string;
+      period: string;
+      contentHtml: string;
+    }): Promise<ReportSummary> {
+      const created = asResult<{ reportId: string; reportNumber: string }>(
+        await httpClient.post("/api/v1/report-generation/formal-reports", input, {
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+        }),
+      );
+      return fetchReportById(created.reportId);
+    },
+    async regenerate(
+      reportId: string,
+      input: {
+        billingPointCode: string;
+        period: string;
+        contentHtml: string;
+        reason: string;
+      },
+    ): Promise<ReportSummary> {
+      const updated = asResult<{ reportId: string; reportNumber: string }>(
+        await httpClient.put(
+          `/api/v1/report-generation/formal-reports/${encodeURIComponent(reportId)}`,
+          input,
+        ),
+      );
+      return fetchReportById(updated.reportId);
+    },
   },
   users: {
     async list(page: number, size: number): Promise<PageResult<ManagedUser>> {
@@ -892,23 +1019,31 @@ export const businessApi = {
       username: string;
       displayName: string;
       cityCode: string;
+      enabled?: boolean;
+      initialPassword?: string;
+      confirmPassword?: string;
     }): Promise<ManagedUser> {
       return asResult<ManagedUser>(
         await httpClient.post("/api/v1/users", input),
       );
     },
-    async update(id: string, displayName: string): Promise<ManagedUser> {
+    async update(
+      id: string,
+      input: string | { displayName: string; cityCode?: string; enabled?: boolean; version?: number },
+    ): Promise<ManagedUser> {
+      const body = typeof input === "string" ? { displayName: input } : input;
       return asResult<ManagedUser>(
-        await httpClient.patch(`/api/v1/users/${encodeURIComponent(id)}`, {
-          displayName,
-        }),
+        await httpClient.patch(`/api/v1/users/${encodeURIComponent(id)}`, body),
       );
     },
-    async resetPassword(id: string): Promise<ManagedUser> {
+    async resetPassword(id: string, newPassword?: string, confirmPassword?: string): Promise<ManagedUser> {
       return asResult<ManagedUser>(
         await httpClient.post(
           `/api/v1/users/${encodeURIComponent(id)}/password-resets`,
-          {},
+          {
+            ...(newPassword === undefined ? {} : { newPassword }),
+            ...(confirmPassword === undefined ? {} : { confirmPassword }),
+          },
         ),
       );
     },
@@ -923,10 +1058,12 @@ export const businessApi = {
       _id: string,
       currentPassword: string,
       newPassword: string,
+      confirmPassword?: string,
     ): Promise<void> {
       await httpClient.patch("/api/v1/users/current/password", {
         currentPassword,
         newPassword,
+        ...(confirmPassword === undefined ? {} : { confirmPassword }),
       });
     },
   },
@@ -946,4 +1083,19 @@ export function saveBlob(blob: Blob, fileName: string): void {
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+export async function triggerBrowserDownload(url: string, fileName = "download"): Promise<void> {
+  const response = await httpClient.getBlobResponse(url);
+  saveBlob(response.blob, response.fileName ?? fileName);
+}
+
+export function formatPercent(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "-";
+  const text = String(value).trim();
+  if (text === "" || text === "-") return "-";
+  const raw = text.endsWith("%") ? text.slice(0, -1) : text;
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return text;
+  return `${numeric.toFixed(2)}%`;
 }

@@ -80,7 +80,7 @@ h4 {
 
 .summary-fields {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: 0;
   padding: var(--space-3) 0;
   background: #f7f9fc;

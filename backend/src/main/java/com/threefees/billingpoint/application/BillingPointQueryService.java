@@ -49,19 +49,21 @@ public class BillingPointQueryService {
     String cityScope = cityScope(actor, filter.cityCode());
     String period =
         filter.period() == null || filter.period().isBlank()
-            ? latestPeriod(cityScope)
+            ? null
             : filter.period();
-    if (period == null) {
-      return new PageResult(List.of(), page, size, 0, 0, null);
-    }
-    List<BillingPointSummary> all = loadSummaries(period, cityScope);
+    List<BillingPointSummary> all = loadSummaries(period, cityScope, filter.focusPeriod(), filter.focusCityCode());
     Predicate<BillingPointSummary> predicate = filters(filter);
     List<BillingPointSummary> filtered = all.stream().filter(predicate).toList();
     int from = Math.min(Math.multiplyExact(page, size), filtered.size());
     int to = Math.min(from + size, filtered.size());
     int totalPages = filtered.isEmpty() ? 0 : (filtered.size() + size - 1) / size;
     return new PageResult(
-        filtered.subList(from, to), page, size, filtered.size(), totalPages, period);
+        filtered.subList(from, to),
+        page,
+        size,
+        filtered.size(),
+        totalPages,
+        period == null ? "" : period);
   }
 
   @Transactional(readOnly = true)
@@ -69,7 +71,7 @@ public class BillingPointQueryService {
     SnapshotRow snapshot = findSnapshot(publicId);
     requireCityScope(actor, snapshot.cityCode());
     BillingPointSummary summary =
-        loadSummaries(snapshot.period(), snapshot.cityCode()).stream()
+        loadSummaries(snapshot.period(), snapshot.cityCode(), null, null).stream()
             .filter(item -> item.id().equals(publicId))
             .findFirst()
             .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
@@ -129,7 +131,8 @@ public class BillingPointQueryService {
         List.copyOf(districts));
   }
 
-  private List<BillingPointSummary> loadSummaries(String period, String cityScope) {
+  private List<BillingPointSummary> loadSummaries(
+      String period, String cityScope, String focusPeriod, String focusCityCode) {
     var sql = new StringBuilder();
     sql.append(
         """
@@ -141,21 +144,37 @@ public class BillingPointQueryService {
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
-            ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period
+            ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
           LEFT JOIN report_draft d ON d.billing_point_snapshot_id = s.id
           LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
-         WHERE s.data_period = ?
+          LEFT JOIN import_job ij ON ij.id = s.source_import_job_id
+         WHERE 1 = 1
         """);
     var arguments = new ArrayList<>();
-    arguments.add(period);
+    if (period != null && !period.isBlank()) {
+      sql.append(" AND s.data_period = ?");
+      arguments.add(period);
+    }
     if (cityScope != null && !cityScope.isBlank()) {
       sql.append(" AND s.city_code = ?");
       arguments.add(cityScope);
     }
+    if (focusPeriod != null && !focusPeriod.isBlank()) {
+      sql.append(" ORDER BY CASE WHEN s.data_period = ?");
+      arguments.add(focusPeriod);
+      if (focusCityCode != null && !focusCityCode.isBlank()) {
+        sql.append(" AND s.city_code = ?");
+        arguments.add(focusCityCode);
+      }
+      sql.append(" THEN 0 ELSE 1 END,");
+    } else {
+      sql.append(" ORDER BY");
+    }
     sql.append(
         """
-         ORDER BY CASE WHEN a.audit_status = 'OVER_LIMIT' AND r.id IS NULL THEN 0 ELSE 1 END,
-                  a.max_ratio DESC, s.billing_point_code ASC, s.id ASC
+                  COALESCE(ij.completed_at, ij.updated_at, ij.created_at, s.updated_at) DESC,
+                  CASE WHEN a.audit_status = 'OVER_LIMIT' AND r.id IS NULL THEN 0 ELSE 1 END,
+                  s.data_period DESC, a.max_ratio DESC, s.billing_point_code ASC, s.id ASC
         """);
     return jdbcTemplate.query(sql.toString(), this::mapSummary, arguments.toArray());
   }
@@ -303,23 +322,199 @@ public class BillingPointQueryService {
   }
 
   private JsonNode loadAudit(SnapshotRow snapshot) {
-    List<String> details =
-        jdbcTemplate.queryForList(
+    List<JsonNode> audits =
+        jdbcTemplate.query(
             """
-            SELECT detail_json FROM audit_result
-             WHERE billing_point_code = ? AND data_period = ?
+            SELECT audit_status, over_limit_type, max_ratio, actual_energy, actual_amount,
+                   rated_benchmark_energy, calculated_at, payment_eligibility_reason,
+                   yoy_reference_period, yoy_reference_energy, yoy_threshold_daily_kwh,
+                   mom_reference_period, mom_reference_energy, mom_threshold_daily_kwh,
+                   rated_benchmark_energy,
+                   yoy_ratio, mom_ratio, rated_ratio, detail_json,
+                   yoy_result, mom_result, rated_result,
+                   yoy_na_reason, mom_na_reason, rated_na_reason
+              FROM audit_result
+             WHERE billing_point_code = ? AND data_period = ? AND city_code = ?
             """,
-            String.class,
+            (resultSet, rowNumber) -> normalizedAudit(resultSet),
             snapshot.billingPointCode(),
-            snapshot.period());
-    if (details.isEmpty()) {
-      return null;
+            snapshot.period(),
+            snapshot.cityCode());
+    return audits.isEmpty() ? pendingAudit() : audits.getFirst();
+  }
+
+  private JsonNode pendingAudit() {
+    var root = objectMapper.createObjectNode();
+    root.put("finalStatus", "PENDING_REVIEW");
+    root.put("finalReason", "当前报账点尚未完成稽核，请确认四类文件已导入成功");
+    root.put("ruleVersion", "CURRENT");
+    root.putNull("calculatedAt");
+    root.put("eligibilityReason", "当前报账点尚未完成稽核");
+    var comparisons = root.putArray("comparisons");
+    comparisons.add(
+        comparison(
+            "YEAR_ON_YEAR",
+            "同比",
+            "NA",
+            null,
+            null,
+            null,
+            null,
+            null,
+            "尚未生成同比稽核结果",
+            "本期实际用电与去年同月参考阈值比较"));
+    comparisons.add(
+        comparison(
+            "MONTH_ON_MONTH",
+            "环比",
+            "NA",
+            null,
+            null,
+            null,
+            null,
+            null,
+            "尚未生成环比稽核结果",
+            "本期实际用电与上一个自然月参考阈值比较"));
+    comparisons.add(
+        comparison(
+            "RATED_BENCHMARK",
+            "额定标杆",
+            "NA",
+            null,
+            null,
+            null,
+            null,
+            null,
+            "尚未生成额定标杆稽核结果",
+            "本期实际用电与当月日标杆合计比较"));
+    root.set("raw", objectMapper.createObjectNode());
+    return root;
+  }
+
+  private JsonNode normalizedAudit(ResultSet resultSet) throws SQLException {
+    var root = objectMapper.createObjectNode();
+    root.put("finalStatus", valueOr(resultSet.getString("audit_status"), "NOT_APPLICABLE"));
+    root.put("finalReason", auditReason(resultSet));
+    root.put("ruleVersion", "CURRENT");
+    var calculatedAt = resultSet.getTimestamp("calculated_at");
+    root.put("calculatedAt", calculatedAt == null ? null : calculatedAt.toInstant().toString());
+    root.put(
+        "eligibilityReason",
+        valueOr(resultSet.getString("payment_eligibility_reason"), "稽核已按当前正式数据计算"));
+    var comparisons = root.putArray("comparisons");
+    comparisons.add(
+        comparison(
+            "YEAR_ON_YEAR",
+            "同比",
+            resultSet.getString("yoy_result"),
+            resultSet.getString("yoy_reference_period"),
+            resultSet.getBigDecimal("yoy_reference_energy"),
+            resultSet.getBigDecimal("yoy_threshold_daily_kwh"),
+            resultSet.getBigDecimal("actual_energy"),
+            resultSet.getBigDecimal("yoy_ratio"),
+            resultSet.getString("yoy_na_reason"),
+            "本期实际用电与去年同月参考阈值比较"));
+    comparisons.add(
+        comparison(
+            "MONTH_ON_MONTH",
+            "环比",
+            resultSet.getString("mom_result"),
+            resultSet.getString("mom_reference_period"),
+            resultSet.getBigDecimal("mom_reference_energy"),
+            resultSet.getBigDecimal("mom_threshold_daily_kwh"),
+            resultSet.getBigDecimal("actual_energy"),
+            resultSet.getBigDecimal("mom_ratio"),
+            resultSet.getString("mom_na_reason"),
+            "本期实际用电与上一个自然月参考阈值比较"));
+    comparisons.add(
+        comparison(
+            "RATED_BENCHMARK",
+            "额定标杆",
+            resultSet.getString("rated_result"),
+            null,
+            resultSet.getBigDecimal("rated_benchmark_energy"),
+            resultSet.getBigDecimal("rated_benchmark_energy"),
+            resultSet.getBigDecimal("actual_energy"),
+            resultSet.getBigDecimal("rated_ratio"),
+            resultSet.getString("rated_na_reason"),
+            "本期实际用电与当月日标杆合计比较"));
+    root.set("raw", parseAuditDetail(resultSet.getString("detail_json")));
+    return root;
+  }
+
+  private JsonNode comparison(
+      String key,
+      String label,
+      String result,
+      String referencePeriod,
+      BigDecimal baseline,
+      BigDecimal threshold,
+      BigDecimal actual,
+      BigDecimal ratio,
+      String naReason,
+      String formula) {
+    var node = objectMapper.createObjectNode();
+    String status =
+        "OVER_LIMIT".equals(result) ? "OVER_LIMIT" : "NORMAL".equals(result) ? "NORMAL" : "NOT_APPLICABLE";
+    node.put("key", key);
+    node.put("label", label);
+    node.put("status", status);
+    node.put("referencePeriod", referencePeriod);
+    node.put("baseline", decimalString(baseline));
+    node.put("threshold", decimalString(threshold));
+    node.put("actual", decimalString(actual));
+    node.put("difference", difference(actual, threshold));
+    node.put("ratio", decimalString(ratio));
+    node.put(
+        "reason",
+        status.equals("NOT_APPLICABLE")
+            ? valueOr(naReason, "参考数据不足，暂不适用")
+            : status.equals("OVER_LIMIT") ? label + "超标" : label + "正常");
+    node.put("formula", formula);
+    return node;
+  }
+
+  private JsonNode parseAuditDetail(String value) {
+    if (value == null || value.isBlank()) {
+      return objectMapper.createObjectNode();
     }
     try {
-      return objectMapper.readTree(details.getFirst());
+      return objectMapper.readTree(value);
     } catch (JacksonException exception) {
-      throw new IllegalStateException("Persisted audit detail is invalid JSON", exception);
+      return objectMapper.createObjectNode();
     }
+  }
+
+  private String auditReason(ResultSet resultSet) throws SQLException {
+    String status = resultSet.getString("audit_status");
+    if ("OVER_LIMIT".equals(status)) {
+      return "稽核结果超标，超标类型：" + overLimitTypeLabel(resultSet.getString("over_limit_type"));
+    }
+    if ("NORMAL".equals(status)) {
+      return "稽核结果正常";
+    }
+    return "稽核结果暂不适用";
+  }
+
+  private String overLimitTypeLabel(String value) {
+    if (value == null || value.isBlank()) {
+      return "未分类";
+    }
+    return switch (value) {
+      case "ONLY_YOY" -> "仅同比超标";
+      case "ONLY_MOM" -> "仅环比超标";
+      case "ONLY_RATED" -> "仅额定标杆超标";
+      case "MULTIPLE" -> "多项超标";
+      case "NONE" -> "未超标";
+      default -> value;
+    };
+  }
+
+  private String difference(BigDecimal actual, BigDecimal baseline) {
+    if (actual == null || baseline == null) {
+      return null;
+    }
+    return decimalString(actual.subtract(baseline));
   }
 
   private SnapshotRow findSnapshot(String publicId) {
@@ -367,18 +562,6 @@ public class BillingPointQueryService {
     return filter == null || filter.isBlank() || Objects.equals(value, filter);
   }
 
-  private String latestPeriod(String cityScope) {
-    String sql =
-        """
-        SELECT MAX(s.data_period)
-          FROM billing_point_snapshot s
-        """
-            + (cityScope == null ? "" : " WHERE s.city_code = ?");
-    return cityScope == null
-        ? jdbcTemplate.queryForObject(sql, String.class)
-        : jdbcTemplate.queryForObject(sql, String.class, cityScope);
-  }
-
   private String cityScope(CurrentUser actor, String requestedCityCode) {
     if (!actor.roles().contains(Role.SUPER_ADMIN)) {
       if (requestedCityCode != null
@@ -424,7 +607,9 @@ public class BillingPointQueryService {
       Boolean paymentEligible,
       String billingPointStatus,
       String auditStatus,
-      String reportStatus) {}
+      String reportStatus,
+      String focusPeriod,
+      String focusCityCode) {}
 
   public record PageResult(
       List<BillingPointSummary> items,

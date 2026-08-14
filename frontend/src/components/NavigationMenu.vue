@@ -71,7 +71,8 @@ const activePath = computed(() => resolveNavigationActivePath(route.path));
 
 .navigation-menu :deep(.el-menu-item:hover),
 .navigation-menu :deep(.el-sub-menu__title:hover),
-.navigation-menu :deep(.el-menu-item.is-active) {
+.navigation-menu :deep(.el-menu-item.is-active),
+.navigation-menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
   color: var(--color-brand-600);
   background: var(--color-brand-50);
   border-left-color: var(--color-brand-600);

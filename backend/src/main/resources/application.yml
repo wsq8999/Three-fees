@@ -6,7 +6,7 @@ spring:
       max-file-size: -1
       max-request-size: -1
   datasource:
-    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&sslMode=DISABLED}
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&sslMode=DISABLED}
     username: ${DB_USERNAME:}
     password: ${DB_PASSWORD:}
     hikari:
@@ -59,7 +59,7 @@ app:
     font-path: ${REPORT_FONT_PATH:}
 
 three-fees:
-  process-role: ${THREE_FEES_PROCESS_ROLE:api}
+  process-role: ${THREE_FEES_PROCESS_ROLE:all}
 
 management:
   endpoints:

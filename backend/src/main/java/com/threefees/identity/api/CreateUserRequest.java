@@ -8,4 +8,6 @@ public record CreateUserRequest(
     @NotBlank @Size(max = 64) @Pattern(regexp = "[A-Za-z0-9_]+") String username,
     @NotBlank @Size(max = 64) String displayName,
     @NotBlank @Pattern(regexp = "32[0-9]{4}") String cityCode,
-    @Size(min = 6, max = 72) String initialPassword) {}
+    boolean enabled,
+    @NotBlank @Size(min = 6, max = 72) String initialPassword,
+    @NotBlank @Size(min = 6, max = 72) String confirmPassword) {}

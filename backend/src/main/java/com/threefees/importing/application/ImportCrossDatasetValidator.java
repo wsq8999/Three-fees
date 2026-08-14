@@ -1,6 +1,5 @@
 package com.threefees.importing.application;
 
-import com.threefees.importing.application.ImportBatchRepository.ImportedRow;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportError;
 import java.util.ArrayList;
@@ -21,7 +20,7 @@ public class ImportCrossDatasetValidator {
     this.jdbcTemplate = jdbcTemplate;
   }
 
-  public void validate(ImportBatch batch, List<ImportedRow> rows) {
+  public void validate(ImportBatch batch, List<ImportRow> rows) {
     var errors = new ArrayList<ImportError>();
     switch (batch.datasetType()) {
       case BILLING_POINT -> validateBillingPointReplacement(batch, rows, errors);
@@ -35,10 +34,10 @@ public class ImportCrossDatasetValidator {
   }
 
   private void validatePayments(
-      ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
+      ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
     validateBillingPointReferences(batch, rows, errors);
     Set<String> incomingPairs = new HashSet<>();
-    for (ImportedRow row : rows) {
+    for (ImportRow row : rows) {
       incomingPairs.add(pair(row.billingPointCode(), row.paymentCode()));
     }
     for (ReferenceRow meter : meterReferences(batch)) {
@@ -53,12 +52,12 @@ public class ImportCrossDatasetValidator {
     }
   }
 
-  private void validateMeters(ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
+  private void validateMeters(ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
     Set<String> activePayments = new HashSet<>();
     for (ReferenceRow payment : paymentReferences(batch)) {
       activePayments.add(pair(payment.billingPointCode(), payment.paymentCode()));
     }
-    for (ImportedRow row : rows) {
+    for (ImportRow row : rows) {
       if (!activePayments.contains(pair(row.billingPointCode(), row.paymentCode()))) {
         add(
             errors,
@@ -71,9 +70,9 @@ public class ImportCrossDatasetValidator {
   }
 
   private void validateBillingPointReferences(
-      ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
+      ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
     Set<String> knownPoints = knownBillingPointCodes(batch);
-    for (ImportedRow row : rows) {
+    for (ImportRow row : rows) {
       if (!knownPoints.contains(row.billingPointCode())) {
         add(
             errors,
@@ -86,7 +85,7 @@ public class ImportCrossDatasetValidator {
   }
 
   private void validateBillingPointReplacement(
-      ImportBatch batch, List<ImportedRow> rows, List<ImportError> errors) {
+      ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
     Set<String> incoming = new HashSet<>();
     rows.forEach(row -> incoming.add(row.billingPointCode()));
     for (ReferenceRow reference : paymentReferences(batch)) {
@@ -192,3 +191,5 @@ public class ImportCrossDatasetValidator {
 
   private record ReferenceRow(String billingPointCode, String paymentCode) {}
 }
+
+

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 
-import { businessApi, saveBlob } from "@/api/business-api";
+import { businessApi, triggerBrowserDownload } from "@/api/business-api";
 import { DATASET_META, DATASET_TYPES } from "@/constants/datasets";
 import type { DatasetType, ExportJob } from "@/types/business";
 
@@ -30,6 +30,7 @@ const canExport = computed(
   () =>
     props.selectedCount > 0 &&
     props.period.length > 0 &&
+    props.cityCode.length > 0 &&
     selectedTypes.value.length > 0 &&
     status.value !== "processing",
 );
@@ -70,13 +71,14 @@ async function startExport(): Promise<void> {
     currentJob.value = job;
     const completed = await pollJob(job.id);
     progress.value = 100;
-    saveBlob(
-      await businessApi.exportJobs.download(completed),
-      `${props.period}-报账点数据导出.zip`,
-    );
+    if (completed.downloadUrl === null) {
+      throw new Error("导出任务尚未生成下载文件");
+    }
+    await triggerBrowserDownload(completed.downloadUrl, "报账点导出.xlsx");
     status.value = "success";
     emit("exported");
     ElMessage.success("导出文件已生成并开始下载。");
+    emit("update:modelValue", false);
   } catch (error) {
     status.value = "failed";
     errorMessage.value = error instanceof Error ? error.message : "导出失败";
@@ -101,6 +103,8 @@ watch(
     :model-value="modelValue"
     title="导出报账点数据"
     width="min(640px, 92vw)"
+    append-to-body
+    align-center
     :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -122,8 +126,16 @@ watch(
 
     <ElAlert
       class="scope-alert"
-      :title="`导出范围：${scopeLabel}（${selectedCount} 个报账点/账期）`"
+      :title="`导出范围：${scopeLabel}`"
       type="info"
+      :closable="false"
+      show-icon
+    />
+    <ElAlert
+      v-if="selectedCount > 0 && (!period || !cityCode)"
+      class="scope-alert"
+      title="请选择同一城市、同一账期的数据后再导出"
+      type="warning"
       :closable="false"
       show-icon
     />
@@ -165,8 +177,14 @@ h4 {
 
 .export-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 12px;
+}
+
+@media (width <= 560px) {
+  .export-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .export-card {

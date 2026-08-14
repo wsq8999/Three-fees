@@ -2,7 +2,9 @@ package com.threefees.report.api;
 
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.report.application.AuditReportService;
+import com.threefees.report.application.AuditReportService.HistoricalBillingPointOption;
 import com.threefees.report.application.AuditReportService.HistoricalCandidate;
+import com.threefees.report.application.AuditReportService.HistoricalPeriodOption;
 import com.threefees.report.application.AuditReportService.ReportDetail;
 import com.threefees.report.application.AuditReportService.ReportPage;
 import com.threefees.report.application.HistoricalReportService;
@@ -62,8 +64,10 @@ public class AuditReportController {
 
   @GetMapping("/api/v1/reports/{publicId}/word")
   public ResponseEntity<InputStreamResource> word(
-      @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
-    return file(publicId, false, false, actor);
+      @PathVariable String publicId,
+      @RequestParam(defaultValue = "false") boolean inline,
+      @AuthenticationPrincipal CurrentUser actor) {
+    return file(publicId, false, inline, actor);
   }
 
   @GetMapping("/api/v1/reports/{publicId}/pdf")
@@ -82,16 +86,40 @@ public class AuditReportController {
     return reportService.historicalCandidates(keyword, cityCode, actor);
   }
 
+  @GetMapping("/api/v1/historical-report-billing-points")
+  public List<HistoricalBillingPointOption> historicalBillingPoints(
+      @RequestParam(required = false) String keyword,
+      @RequestParam(required = false) String cityCode,
+      @AuthenticationPrincipal CurrentUser actor) {
+    return reportService.historicalBillingPoints(keyword, cityCode, actor);
+  }
+
+  @GetMapping("/api/v1/historical-report-billing-points/{billingPointCode}/periods")
+  public List<HistoricalPeriodOption> historicalPeriods(
+      @PathVariable String billingPointCode,
+      @RequestParam(required = false) String cityCode,
+      @AuthenticationPrincipal CurrentUser actor) {
+    return reportService.historicalPeriods(billingPointCode, cityCode, actor);
+  }
+
   @PostMapping(
       value = "/api/v1/historical-report-imports",
       consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
   public ResponseEntity<HistoricalImport> importHistorical(
-      @RequestParam String billingPointPeriodId,
+      @RequestParam(required = false) String billingPointPeriodId,
+      @RequestParam(required = false) String billingPointCode,
+      @RequestParam(required = false) String cityCode,
+      @RequestParam(required = false)
+          @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])")
+          String period,
       @RequestParam MultipartFile file,
       @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
       @AuthenticationPrincipal CurrentUser actor) {
     HistoricalImport created =
-        historicalService.submit(billingPointPeriodId, file, idempotencyKey, actor);
+        billingPointCode != null && !billingPointCode.isBlank() && period != null
+            ? historicalService.submitByBillingPointPeriod(
+                billingPointCode, cityCode, period, file, idempotencyKey, actor)
+            : historicalService.submit(billingPointPeriodId, file, idempotencyKey, actor);
     return ResponseEntity.accepted()
         .location(URI.create("/api/v1/tasks/" + created.taskId()))
         .body(created);

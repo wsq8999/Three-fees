@@ -218,9 +218,15 @@ function comparisons(
         : year.overLimit
           ? "OVER_LIMIT"
           : "NORMAL",
+      referencePeriod: "2025-06",
       baseline: formatNumber(year.referenceDaily),
+      threshold: formatNumber(year.threshold),
       actual: formatNumber(year.currentDaily),
-      difference: formatNumber(year.threshold),
+      difference: formatNumber(
+        year.currentDaily !== null && year.threshold !== null
+          ? year.currentDaily - year.threshold
+          : null,
+      ),
       ratio: year.overLimit ? formatRatio(year.ratio) : null,
       reason: !year.applicable
         ? "A/B/C 缺失、参考月不合格或 B≤0，同比不适用"
@@ -236,9 +242,15 @@ function comparisons(
         : month.overLimit
           ? "OVER_LIMIT"
           : "NORMAL",
+      referencePeriod: "2026-05",
       baseline: formatNumber(month.referenceDaily),
+      threshold: formatNumber(month.threshold),
       actual: formatNumber(month.currentDaily),
-      difference: formatNumber(month.threshold),
+      difference: formatNumber(
+        month.currentDaily !== null && month.threshold !== null
+          ? month.currentDaily - month.threshold
+          : null,
+      ),
       ratio: month.overLimit ? formatRatio(month.ratio) : null,
       reason: !month.applicable
         ? "找不到最近合格参考月、A/B/C 缺失或 B≤0，环比不适用"
@@ -254,9 +266,13 @@ function comparisons(
         : ratedOver
           ? "OVER_LIMIT"
           : "NORMAL",
+      referencePeriod: "2026-06",
       baseline: formatNumber(benchmarkTotal),
+      threshold: formatNumber(benchmarkTotal),
       actual: formatNumber(actualTotal),
-      difference: formatNumber(benchmarkTotal),
+      difference: formatNumber(
+        actualTotal !== null && benchmarkTotal !== null ? actualTotal - benchmarkTotal : null,
+      ),
       ratio: ratedOver ? formatRatio(ratedRatio) : null,
       reason: !ratedApplicable
         ? "当月日标杆不完整，额定标杆不适用"
@@ -636,6 +652,7 @@ function initialUsers(): ManagedUser[] {
       enabled: true,
       mustChangePassword: false,
       updatedAt: FIXED_TIME,
+      version: 0,
     },
     ...SCENARIO_CITIES.map((item, index): ManagedUser => ({
       id: `user-${index + 2}`,
@@ -646,6 +663,7 @@ function initialUsers(): ManagedUser[] {
       enabled: index !== 12,
       mustChangePassword: true,
       updatedAt: FIXED_TIME,
+      version: 0,
     })),
   ];
 }
@@ -933,8 +951,14 @@ export interface ScenarioStore {
     username: string;
     displayName: string;
     cityCode: string;
+    enabled: boolean;
+    initialPassword: string;
+    confirmPassword: string;
   }): ManagedUser;
-  updateUser(id: string, input: { displayName: string }): ManagedUser;
+  updateUser(
+    id: string,
+    input: { displayName?: string; cityCode?: string; enabled?: boolean; version?: number },
+  ): ManagedUser;
   resetUserPassword(id: string): ManagedUser;
   setUserEnabled(id: string, enabled: boolean): ManagedUser;
   changeOwnPassword(id: string): ManagedUser;
@@ -1133,6 +1157,9 @@ export function createScenarioStore(): ScenarioStore {
           (item) => item.auditStatus === "PENDING_REVIEW",
         ).length,
         draftReportCount: state.drafts.filter(
+          (item) => item.status === "EDITING",
+        ).length,
+        pendingReportCount: state.drafts.filter(
           (item) => item.status === "EDITING",
         ).length,
         finalReportCount: state.reports.length,
@@ -1495,22 +1522,27 @@ export function createScenarioStore(): ScenarioStore {
         displayName: input.displayName,
         roles: ["CITY_USER"],
         city: city(input.cityCode),
-        enabled: true,
-        mustChangePassword: true,
+        enabled: input.enabled,
+        mustChangePassword: false,
         updatedAt: now(),
+        version: 0,
       };
       state.users.push(created);
       return clone(created);
     },
     updateUser(id, input) {
       const user = requiredUser(id);
-      user.displayName = input.displayName.trim();
+      if (input.displayName !== undefined) user.displayName = input.displayName.trim();
+      if (input.cityCode !== undefined) user.city = city(input.cityCode);
+      if (input.enabled !== undefined) user.enabled = input.enabled;
+      user.version += 1;
       user.updatedAt = now();
       return clone(user);
     },
     resetUserPassword(id) {
       const user = requiredUser(id);
-      user.mustChangePassword = true;
+      user.mustChangePassword = false;
+      user.version += 1;
       user.updatedAt = now();
       return clone(user);
     },
@@ -1526,6 +1558,7 @@ export function createScenarioStore(): ScenarioStore {
     changeOwnPassword(id) {
       const user = requiredUser(id);
       user.mustChangePassword = false;
+      user.version += 1;
       user.updatedAt = now();
       return clone(user);
     },

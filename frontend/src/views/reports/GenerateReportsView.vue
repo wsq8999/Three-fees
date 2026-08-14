@@ -1,672 +1,679 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import {
-  ArrowLeft,
-  Clock,
-  Picture,
-  Refresh,
-  Select,
-} from "@element-plus/icons-vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
+import { ArrowLeft, ChatLineRound, Download, Picture, Refresh } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
 
-import { businessApi } from "@/api/business-api";
+import { businessApi, triggerBrowserDownload } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
-import type {
-  BillingPointDetail,
-  DraftBlock,
-  DraftVersion,
-  PageResult,
-  ReportDraft,
-} from "@/types/business";
+import type { ReportGenerationCandidate, ReportGenerationImageInput } from "@/types/business";
+import { standardConfirm } from "@/utils/message-box";
 
-type Summary = BillingPointDetail["summary"];
-
-const router = useRouter();
 const route = useRoute();
+const router = useRouter();
 const session = useSessionStore();
 
-const loading = ref(false);
-const opening = ref(false);
-const draftLoading = ref(false);
-const saving = ref(false);
-const restoring = ref(false);
+const loading = ref(true);
+const initializing = ref(false);
+const generating = ref(false);
+const analyzing = ref(false);
 const errorMessage = ref("");
-const pageData = ref<PageResult<Summary> | null>(null);
-const currentDraft = ref<ReportDraft | null>(null);
-const selectedId = ref("");
-const versionDialogVisible = ref(false);
-const previewVersion = ref<DraftVersion | null>(null);
-const filters = reactive({ period: "2026-06", page: 1, size: 10 });
+const candidates = ref<ReportGenerationCandidate[]>([]);
+const selectedKey = ref("");
+const selected = ref<ReportGenerationCandidate | null>(null);
+const contentHtml = ref("");
+const editorRef = ref<HTMLElement>();
+const generated = ref(false);
+const suppressLeaveConfirm = ref(false);
+const analysisDialogVisible = ref(false);
+const analysisFiles = ref<File[]>([]);
+const analysisInstruction = ref("");
+const aiAnswer = ref("");
 
-const candidates = computed(() => pageData.value?.items ?? []);
-const selected = computed(
-  () => candidates.value.find((item) => item.id === selectedId.value) ?? null,
+const correctionReportId = computed(() => String(route.query.reportId ?? "").trim());
+const correctionReason = computed(() => String(route.query.reason ?? "").trim());
+const isCorrection = computed(() => correctionReportId.value.length > 0);
+
+const candidateOptions = computed(() =>
+  candidates.value.map((item) => ({
+    key: candidateKey(item),
+    label: `${item.billingPointCode} ｜ ${item.billingPointName} ｜ ${item.cityName} ｜ ${item.period}`,
+    item,
+  })),
 );
-const versions = computed(() => [...(currentDraft.value?.versions ?? [])].reverse());
-const taskCountText = computed(() => `共 ${pageData.value?.totalElements ?? 0} 项`);
 
-const auditResultText = computed(() => {
-  if (selected.value === null) return "暂无";
-  const ratio = selected.value.deviationRate;
-  return `${selected.value.overLimitType ?? "多项超标"} · ${ratio ?? "待复核"}`;
+const overLimitType = computed(() => selected.value?.overLimitType ?? "—");
+const exceedRatio = computed(() => formatRatio(selected.value?.maxExceedRatio));
+const selectedOptionLabel = computed(
+  () => candidateOptions.value.find((option) => option.key === selectedKey.value)?.label ?? "",
+);
+const selectedOptionWidth = computed(() => {
+  const label = selectedOptionLabel.value || "请选择报账点";
+  const textWidth = Array.from(label).reduce(
+    (total, char) => total + (char.charCodeAt(0) > 255 ? 18 : 10),
+    0,
+  );
+  return `${Math.max(760, textWidth + 160)}px`;
 });
-
-const periodRangeText = computed(() => {
-  if (selected.value?.periodStart && selected.value.periodEnd) {
-    return `${selected.value.periodStart} 至 ${selected.value.periodEnd}`;
-  }
-  return selected.value?.period ?? filters.period;
-});
-
-const headingBlock = computed(
-  () =>
-    currentDraft.value?.blocks.find((block) => block.type === "HEADING") ??
-    null,
-);
-const reportBlocks = computed(
-  () =>
-    currentDraft.value?.blocks.filter((block) => block.type !== "HEADING") ??
-    [],
+const hasUnsavedContent = computed(
+  () => !generated.value && Boolean(selected.value) && Boolean(editorRef.value?.innerHTML.trim()),
 );
 
-function editableText(event: Event): string {
-  return (event.target as HTMLElement).innerText.trim();
+function candidateKey(item: ReportGenerationCandidate): string {
+  return `${item.billingPointCode}@@${item.period}`;
 }
 
-function updateBlock(block: DraftBlock, content: string): void {
-  if (currentDraft.value === null) return;
-  const target = currentDraft.value.blocks.find((item) => item.id === block.id);
-  if (target !== undefined) target.content = content;
+function formatRatio(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return `${numeric.toFixed(2)}%`;
+  const text = String(value);
+  return text.endsWith("%") ? text : `${text}%`;
 }
 
-function sectionPrefix(index: number): string {
-  return ["一", "二", "三", "四"][index] ?? String(index + 1);
-}
-
-function asDraftVersion(row: unknown): DraftVersion {
-  return row as DraftVersion;
-}
-
-async function saveDraft(): Promise<void> {
-  if (currentDraft.value === null || saving.value) return;
-  saving.value = true;
-  try {
-    currentDraft.value = await businessApi.drafts.save(
-      currentDraft.value.id,
-      currentDraft.value,
-    );
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "报告内容保存失败");
-  } finally {
-    saving.value = false;
-  }
+function currentQueryTarget(): { billingPointCode: string; period: string } | null {
+  const billingPointCode = String(route.query.billingPointCode ?? "").trim();
+  const period = String(route.query.period ?? "").trim();
+  if (!billingPointCode || !period) return null;
+  return { billingPointCode, period };
 }
 
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
   try {
-    const result = await businessApi.billingPoints.list({
-      cityCode: session.currentUser?.city?.code ?? "",
-      period: filters.period,
-      keyword: "",
-      auditStatus: "OVER_LIMIT",
-      page: filters.page,
-      size: filters.size,
-    });
-    const items = result.items.filter((item) => item.reportStatus !== "FINAL");
-    pageData.value = {
-      ...result,
-      items,
-      totalElements: items.length,
-      totalPages: Math.max(1, Math.ceil(items.length / filters.size)),
-    };
-    selectedId.value = items[0]?.id ?? "";
-    await loadCurrentDraft();
+    if (isCorrection.value) {
+      const result = await businessApi.reportGeneration.correctionInitialContent(
+        correctionReportId.value,
+      );
+      candidates.value = [result.candidate];
+      selected.value = result.candidate;
+      selectedKey.value = candidateKey(result.candidate);
+      contentHtml.value = result.contentHtml;
+      generated.value = false;
+      await renderContent();
+      return;
+    }
+
+    candidates.value = await businessApi.reportGeneration.candidates(
+      session.currentUser?.city?.code ?? "",
+    );
+    const target = currentQueryTarget();
+    const option = target
+      ? candidates.value.find(
+          (item) =>
+            item.billingPointCode === target.billingPointCode && item.period === target.period,
+        )
+      : candidates.value[0];
+    if (option) {
+      selectedKey.value = candidateKey(option);
+      await initialize(option, false);
+    } else {
+      selected.value = null;
+      contentHtml.value = "";
+      aiAnswer.value = "";
+      await renderContent();
+    }
   } catch (error) {
-    errorMessage.value =
-      error instanceof Error ? error.message : "待生成报告任务加载失败";
+    errorMessage.value = error instanceof Error ? error.message : "待生成报告加载失败";
   } finally {
     loading.value = false;
   }
 }
 
-async function loadCurrentDraft(): Promise<void> {
-  if (selected.value === null) {
-    currentDraft.value = null;
+async function initialize(candidate: ReportGenerationCandidate, confirmDiscard = true): Promise<void> {
+  if (isCorrection.value) return;
+  if (confirmDiscard && !(await confirmDiscardCurrent("切换报账点"))) {
+    selectedKey.value = selected.value ? candidateKey(selected.value) : "";
     return;
   }
-  draftLoading.value = true;
+  initializing.value = true;
   try {
-    currentDraft.value = selected.value.draftId
-      ? ((await businessApi.drafts.get(selected.value.draftId)) ?? null)
-      : await businessApi.drafts.createOrResume(selected.value.id);
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "报告工作稿加载失败");
-    currentDraft.value = null;
-  } finally {
-    draftLoading.value = false;
-  }
-}
-
-async function openDraft(action: "edit" | "image" | "generate" = "edit"): Promise<void> {
-  if ((selected.value === null && currentDraft.value === null) || opening.value) return;
-  opening.value = true;
-  try {
-    await saveDraft();
-    const draft =
-      currentDraft.value ??
-      (selected.value?.draftId
-        ? await businessApi.drafts.get(selected.value.draftId)
-        : selected.value
-          ? await businessApi.drafts.createOrResume(selected.value.id)
-          : undefined);
-    if (draft === undefined) {
-      ElMessage.warning("工作稿不存在或当前账号无权访问。");
-      return;
-    }
-    await router.push({
-      name: "report-draft",
-      params: { draftId: draft.id },
-      query: { from: route.fullPath, action },
+    const result = await businessApi.reportGeneration.initialContent(
+      candidate.billingPointCode,
+      candidate.period,
+    );
+    selected.value = result.candidate;
+    selectedKey.value = candidateKey(result.candidate);
+    contentHtml.value = result.contentHtml;
+    generated.value = false;
+    aiAnswer.value = "";
+    await renderContent();
+    await router.replace({
+      name: "reports-generate",
+      query: {
+        billingPointCode: result.candidate.billingPointCode,
+        period: result.candidate.period,
+        ...(typeof route.query.from === "string" ? { from: route.query.from } : {}),
+      },
     });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "报告初始化失败");
   } finally {
-    opening.value = false;
+    initializing.value = false;
   }
 }
 
-function openVersions(): void {
-  previewVersion.value = versions.value[0] ?? null;
-  versionDialogVisible.value = true;
+async function selectChanged(key: string): Promise<void> {
+  const option = candidates.value.find((item) => candidateKey(item) === key);
+  if (option) await initialize(option);
 }
 
-async function restoreVersion(version: DraftVersion): Promise<void> {
-  if (currentDraft.value === null || restoring.value) return;
+async function renderContent(): Promise<void> {
+  await nextTick();
+  if (editorRef.value) editorRef.value.innerHTML = contentHtml.value;
+}
+
+function syncContent(): void {
+  contentHtml.value = editorRef.value?.innerHTML ?? "";
+}
+
+async function confirmDiscardCurrent(action: string): Promise<boolean> {
+  if (!hasUnsavedContent.value) return true;
   try {
-    await ElMessageBox.confirm(
-      `确认恢复 V${version.version}？系统会基于该版本创建新的当前版本，原历史版本不会删除。`,
-      "恢复历史版本",
+    await standardConfirm(
+      `当前报告尚未生成，${action}后当前编辑的文字和图片将不会保存，是否继续？`,
+      action,
       {
         type: "warning",
-        confirmButtonText: "确认恢复",
+        confirmButtonText: action === "切换报账点" ? "确认切换" : "确认离开",
         cancelButtonText: "取消",
       },
     );
+    return true;
   } catch {
-    return;
-  }
-  restoring.value = true;
-  try {
-    currentDraft.value = await businessApi.drafts.restore(
-      currentDraft.value.id,
-      version.id,
-    );
-    previewVersion.value = versions.value[0] ?? null;
-    ElMessage.success("历史版本已恢复");
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "历史版本恢复失败");
-  } finally {
-    restoring.value = false;
+    return false;
   }
 }
 
-watch(selectedId, () => {
-  void loadCurrentDraft();
+async function pasteIntoEditor(event: ClipboardEvent): Promise<void> {
+  const items = Array.from(event.clipboardData?.items ?? []);
+  const imageItems = items.filter((item) => item.type.startsWith("image/"));
+  if (imageItems.length === 0) return;
+  event.preventDefault();
+  for (const item of imageItems) {
+    const file = item.getAsFile();
+    if (!file) continue;
+    const dataUrl = await fileToDataUrl(file);
+    insertHtmlAtSelection(`<figure><img src="${dataUrl}" alt="现场图片" /></figure>`);
+  }
+  syncContent();
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return fileToDataUrl(file).then((dataUrl) => dataUrl.split(",", 2)[1] ?? "");
+}
+
+function insertHtmlAtSelection(html: string): void {
+  editorRef.value?.focus();
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return;
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const fragment = template.content;
+  const last = fragment.lastChild;
+  range.insertNode(fragment);
+  if (last) {
+    range.setStartAfter(last);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
+function openAnalysisDialog(): void {
+  if (!selected.value) {
+    ElMessage.warning("请先选择报账点。");
+    return;
+  }
+  syncContent();
+  if (!contentHtml.value.trim()) {
+    ElMessage.warning("请先生成或填写报告正文。");
+    return;
+  }
+  analysisFiles.value = [];
+  analysisInstruction.value = "";
+  analysisDialogVisible.value = true;
+}
+
+function selectAnalysisFiles(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  if (!files.length) return;
+  const accepted = files.filter((file) => ["image/png", "image/jpeg"].includes(file.type));
+  if (accepted.length !== files.length) {
+    ElMessage.warning("分析图片只支持 PNG 或 JPEG。");
+  }
+  const merged = [...analysisFiles.value, ...accepted].slice(0, 10);
+  const totalBytes = merged.reduce((sum, file) => sum + file.size, 0);
+  if (totalBytes > 20 * 1024 * 1024) {
+    ElMessage.warning("分析图片总大小不能超过 20 MiB。");
+    return;
+  }
+  if (merged.some((file) => file.size > 10 * 1024 * 1024)) {
+    ElMessage.warning("单张分析图片不能超过 10 MiB。");
+    return;
+  }
+  analysisFiles.value = merged;
+}
+
+function removeAnalysisFile(index: number): void {
+  analysisFiles.value.splice(index, 1);
+}
+
+async function submitAnalysis(): Promise<void> {
+  if (!selected.value || analyzing.value) return;
+  if (analysisFiles.value.length === 0) {
+    ElMessage.warning("请先选择需要分析的图片。");
+    return;
+  }
+  syncContent();
+  analyzing.value = true;
+  try {
+    const images: ReportGenerationImageInput[] = await Promise.all(
+      analysisFiles.value.map(async (file) => ({
+        fileName: file.name,
+        mediaType: file.type as "image/png" | "image/jpeg",
+        base64Data: await fileToBase64(file),
+      })),
+    );
+    const result = await businessApi.reportGeneration.analyzeImages({
+      billingPointCode: selected.value.billingPointCode,
+      period: selected.value.period,
+      contentHtml: contentHtml.value,
+      instruction: analysisInstruction.value,
+      images,
+    });
+    contentHtml.value = result.updatedContentHtml || contentHtml.value;
+    aiAnswer.value = result.answer || result.analysisText || "图片分析已完成。";
+    await renderContent();
+    analysisDialogVisible.value = false;
+    ElMessage.success("图片分析已完成");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "图片分析失败，请先人工编辑报告。");
+  } finally {
+    analyzing.value = false;
+  }
+}
+
+async function generate(): Promise<void> {
+  if (!selected.value || generating.value) return;
+  syncContent();
+  if (!contentHtml.value.trim()) {
+    ElMessage.warning("报告正文不能为空");
+    return;
+  }
+  generating.value = true;
+  try {
+    const report = isCorrection.value
+      ? await businessApi.reportGeneration.regenerate(correctionReportId.value, {
+          billingPointCode: selected.value.billingPointCode,
+          period: selected.value.period,
+          contentHtml: contentHtml.value,
+          reason: correctionReason.value || "报告内容更正",
+        })
+      : await businessApi.reportGeneration.generate({
+          billingPointCode: selected.value.billingPointCode,
+          period: selected.value.period,
+          contentHtml: contentHtml.value,
+        });
+    generated.value = true;
+    suppressLeaveConfirm.value = true;
+    if (!isCorrection.value) {
+      candidates.value = candidates.value.filter((item) => candidateKey(item) !== selectedKey.value);
+    }
+    try {
+      await triggerBrowserDownload(
+        `/api/v1/reports/${encodeURIComponent(report.id)}/word`,
+        report.wordFileName,
+      );
+    } catch (error) {
+      ElMessage.warning(error instanceof Error ? error.message : "Word 自动下载失败，可在详情页手动下载。");
+    }
+    await router.push({
+      name: "report-detail",
+      params: { reportId: report.id },
+      query: { from: "/reports/history" },
+    });
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "正式报告生成失败");
+  } finally {
+    generating.value = false;
+  }
+}
+
+function aiPrompt(): void {
+  ElMessage.info("AI 对话入口已保留，当前请先使用“分析图片”或人工编辑正文。");
+}
+
+async function goBack(): Promise<void> {
+  if (!(await confirmDiscardCurrent("离开页面"))) return;
+  suppressLeaveConfirm.value = true;
+  const from = typeof route.query.from === "string" ? route.query.from : "/dashboard";
+  await router.push(from);
+}
+
+onBeforeRouteLeave(async () => {
+  if (suppressLeaveConfirm.value) return true;
+  return await confirmDiscardCurrent("离开页面");
+});
+
+onBeforeUnmount(() => {
+  suppressLeaveConfirm.value = true;
 });
 
 onMounted(load);
 </script>
 
 <template>
-  <PageState v-if="!pageData && loading" kind="loading" />
+  <PageState v-if="loading" kind="loading" />
   <PageState
     v-else-if="errorMessage"
     kind="error"
-    title="任务加载失败"
+    title="待生成报告加载失败"
     :description="errorMessage"
     @retry="load"
   />
 
   <template v-else>
-    <template v-if="selected">
-      <section class="report-head business-card">
-        <div>
-          <small>报账点编码</small>
-          <strong>{{ selected.code }}</strong>
-        </div>
-        <div class="point-selector">
-          <small>报账点名称</small>
-          <ElSelect v-model="selectedId" filterable>
-            <ElOption
-              v-for="item in candidates"
-              :key="item.id"
-              :label="item.name"
-              :value="item.id"
-            />
-          </ElSelect>
-        </div>
-        <div>
-          <small>所属区域</small>
-          <strong>{{ selected.city.name }} / {{ selected.district ?? "—" }}</strong>
-        </div>
-        <div>
-          <small>账期</small>
-          <strong>{{ periodRangeText }}</strong>
-        </div>
-        <div>
-          <small>稽核结果</small>
-          <strong class="danger-text">{{ auditResultText }}</strong>
-        </div>
-      </section>
-
-      <div class="report-workspace">
-        <article v-loading="draftLoading" class="report-paper business-card">
-          <h1
-            v-if="headingBlock"
-            contenteditable="true"
-            spellcheck="false"
-            @input="updateBlock(headingBlock, editableText($event))"
-            @blur="saveDraft"
-          >
-            {{ headingBlock.content }}
-          </h1>
-          <section v-for="(block, index) in reportBlocks" :key="block.id">
-            <h2>{{ sectionPrefix(index) }}、{{ block.title }}</h2>
-            <p
-              contenteditable="true"
-              spellcheck="false"
-              @input="updateBlock(block, editableText($event))"
-              @blur="saveDraft"
-            >
-              {{ block.content }}
-            </p>
-            <div v-if="block.type === 'IMAGE'" class="evidence-grid">
-              <div>
-                <span>{{ block.imageName ?? "现场图片分析结果" }}</span>
-              </div>
-            </div>
-          </section>
-        </article>
-
-        <aside class="assistant-card business-card">
-          <header>
-            <div>
-              <h2>AI报告助手</h2>
-              <p>支持提问与修改报告</p>
-            </div>
-            <ElButton link type="primary" :icon="Clock" @click="openVersions">
-              历史版本
-            </ElButton>
-          </header>
-
-          <div class="assistant-flow">
-            <ElEmpty
-              v-if="(currentDraft?.messages ?? []).length === 0"
-              description="点击“分析图片”后，AI 分析记录会在这里显示"
-            />
-            <div
-              v-for="message in currentDraft?.messages ?? []"
-              v-else
-              :key="message.id"
-              class="chat"
-              :class="message.role === 'USER' ? 'user' : 'ai'"
-            >
-              <span>{{ message.role === "USER" ? "您" : "AI" }}</span>
-              <p>
-                {{ message.content }}
-                <small>{{ message.createdAt.slice(11, 16) }}</small>
-              </p>
-            </div>
-          </div>
-
-          <div class="assistant-input">
-            <ElInput
-              type="textarea"
-              :rows="4"
-              placeholder="请输入问题或修改指令"
-              disabled
-            />
-            <ElButton circle type="primary" :icon="Select" @click="openDraft('edit')" />
-          </div>
-        </aside>
+    <section class="generation-head business-card">
+      <label>
+        <small>报账点</small>
+        <ElSelect
+          v-model="selectedKey"
+          filterable
+          class="candidate-select"
+          :style="{ '--candidate-select-width': selectedOptionWidth }"
+          :loading="initializing"
+          :disabled="isCorrection"
+          placeholder="暂无待生成报告"
+          @change="selectChanged"
+        >
+          <ElOption
+            v-for="option in candidateOptions"
+            :key="option.key"
+            :label="option.label"
+            :value="option.key"
+          />
+        </ElSelect>
+      </label>
+      <div>
+        <small>超标类型</small>
+        <strong>{{ overLimitType }}</strong>
       </div>
+      <div>
+        <small>超标率</small>
+        <strong class="danger-text">{{ exceedRatio }}</strong>
+      </div>
+    </section>
 
-      <footer class="report-actions">
-        <ElButton :icon="ArrowLeft" @click="router.push('/dashboard')">返回</ElButton>
-        <ElButton :icon="Picture" :loading="opening" @click="openDraft('image')">
+    <section v-if="selected" class="generation-workspace">
+      <article
+        ref="editorRef"
+        class="report-editor business-card"
+        contenteditable="true"
+        spellcheck="false"
+        v-html="contentHtml"
+        @input="syncContent"
+        @paste="pasteIntoEditor"
+      />
+      <aside class="ai-card business-card">
+        <ElButton :icon="Picture" :loading="analyzing" @click="openAnalysisDialog">
           分析图片
         </ElButton>
-        <ElButton type="primary" :loading="opening" @click="openDraft('generate')">
-          生成正式报告并导出Word
-        </ElButton>
-      </footer>
-    </template>
+        <ElInput
+          v-model="aiAnswer"
+          type="textarea"
+          :rows="8"
+          placeholder="图片分析结果会显示在这里"
+          readonly
+        />
+        <ElButton :icon="ChatLineRound" @click="aiPrompt">发送到 AI</ElButton>
+      </aside>
+    </section>
 
     <section v-else class="empty-card business-card">
-      <ElEmpty description="当前账期暂无待生成报告">
-        <ElButton type="primary" :icon="Refresh" @click="load">重新加载</ElButton>
+      <ElEmpty description="当前暂无超标且未生成正式报告的报账点账期">
+        <ElButton :icon="Refresh" type="primary" @click="load">重新加载</ElButton>
       </ElEmpty>
-      <small>{{ taskCountText }}</small>
     </section>
+
+    <footer class="generation-actions">
+      <ElButton :icon="ArrowLeft" @click="goBack">返回</ElButton>
+      <ElButton
+        type="primary"
+        :icon="Download"
+        :loading="generating"
+        :disabled="!selected"
+        @click="generate"
+      >
+        {{ isCorrection ? "重新生成报告" : "生成报告" }}
+      </ElButton>
+    </footer>
+
+    <ElDialog
+      v-model="analysisDialogVisible"
+      title="分析图片"
+      width="min(560px, calc(100vw - 32px))"
+      append-to-body
+      align-center
+      destroy-on-close
+      class="analysis-dialog"
+    >
+      <div class="analysis-form">
+        <label class="file-picker">
+          <input
+            type="file"
+            multiple
+            accept="image/png,image/jpeg"
+            @change="selectAnalysisFiles"
+          />
+          <span>选择图片</span>
+        </label>
+        <ul v-if="analysisFiles.length" class="analysis-files">
+          <li v-for="(file, index) in analysisFiles" :key="`${file.name}-${file.size}-${index}`">
+            <span>{{ file.name }}</span>
+            <ElButton link type="danger" @click="removeAnalysisFile(index)">删除</ElButton>
+          </li>
+        </ul>
+        <ElInput
+          v-model="analysisInstruction"
+          type="textarea"
+          :rows="4"
+          placeholder="可填写补充要求，例如：根据现场图片补充排查分析"
+        />
+      </div>
+      <template #footer>
+        <ElButton @click="analysisDialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="analyzing" @click="submitAnalysis">开始分析</ElButton>
+      </template>
+    </ElDialog>
   </template>
-
-  <ElDialog
-    v-model="versionDialogVisible"
-    title="AI 报告历史版本"
-    width="760px"
-    class="version-dialog"
-    :close-on-click-modal="false"
-  >
-    <div class="version-layout">
-      <ElTable :data="versions" height="300">
-        <ElTableColumn label="版本" width="90">
-          <template #default="scope">V{{ scope.row.version }}</template>
-        </ElTableColumn>
-        <ElTableColumn prop="summary" label="变更类型" width="130" />
-        <ElTableColumn label="创建时间" min-width="170">
-          <template #default="scope">{{ scope.row.createdAt.replace("T", " ").slice(0, 16) }}</template>
-        </ElTableColumn>
-        <ElTableColumn label="操作" width="150">
-          <template #default="scope">
-            <div class="text-link-actions">
-              <ElButton link type="primary" @click="previewVersion = asDraftVersion(scope.row)">
-                预览
-              </ElButton>
-              <ElButton
-                link
-                type="primary"
-                :loading="restoring"
-                @click="restoreVersion(asDraftVersion(scope.row))"
-              >
-                恢复
-              </ElButton>
-            </div>
-          </template>
-        </ElTableColumn>
-      </ElTable>
-
-      <section class="version-preview">
-        <h3>
-          {{ previewVersion ? `V${previewVersion.version} 预览` : "暂无历史版本" }}
-        </h3>
-        <template v-if="previewVersion">
-          <article v-for="block in previewVersion.blocks" :key="block.id">
-            <strong>{{ block.title }}</strong>
-            <p>{{ block.content }}</p>
-          </article>
-        </template>
-      </section>
-    </div>
-  </ElDialog>
 </template>
 
 <style scoped>
-.report-head {
+.generation-head {
   display: grid;
-  grid-template-columns: 180px minmax(260px, 1.25fr) 210px 245px 180px;
-  gap: 18px;
+  grid-template-columns: max-content max-content max-content;
+  gap: 16px;
   align-items: center;
-  padding: 14px 22px;
-  margin-bottom: 14px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+  overflow-x: auto;
 }
 
-.report-head > div {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
+.generation-head label,
+.generation-head div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
 }
 
-.report-head small {
+.generation-head small {
+  flex: 0 0 auto;
   color: #7d8ca1;
-  font-weight: 600;
+  font-weight: 700;
 }
 
-.report-head strong {
-  color: #1f2d3d;
-  font-size: 15px;
+.generation-head small::after {
+  content: "：";
 }
 
-.point-selector :deep(.el-select) {
-  width: 100%;
+.generation-head strong {
+  color: #001733;
+  white-space: nowrap;
+}
+
+.candidate-select {
+  width: var(--candidate-select-width);
+  min-width: 560px;
+  max-width: calc(100vw - 520px);
+}
+
+.candidate-select :deep(.el-select__wrapper) {
+  min-width: 100%;
+}
+
+.candidate-select :deep(.el-select__selected-item) {
+  max-width: none;
 }
 
 .danger-text {
-  color: #ed2437 !important;
+  color: #f5223d !important;
 }
 
-.report-workspace {
+.generation-workspace {
   display: grid;
-  min-height: calc(100vh - 276px);
-  grid-template-columns: minmax(0, 1fr) 430px;
-  gap: 14px;
-  padding-bottom: 72px;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
 }
 
-.report-paper {
-  padding: 34px 42px 46px;
-}
-
-.report-paper h1 {
-  min-height: 38px;
-  margin: 0 0 28px;
-  color: #101827;
-  font-size: 22px;
-  line-height: 1.6;
-  text-align: center;
-}
-
-.report-paper h2 {
-  margin: 22px 0 12px;
-  color: #101827;
-  font-size: 16px;
-}
-
-.report-paper p {
-  min-height: 74px;
-  padding: 4px 6px;
-  margin: 0;
-  color: #1f2d3d;
+.report-editor {
+  min-height: 680px;
+  padding: 42px 52px;
   line-height: 1.9;
-  white-space: pre-wrap;
-  border: 1px solid transparent;
-  border-radius: 4px;
-}
-
-.report-paper h1[contenteditable="true"],
-.report-paper p[contenteditable="true"] {
-  cursor: text;
+  color: #001733;
   outline: none;
 }
 
-.report-paper h1[contenteditable="true"]:focus,
-.report-paper p[contenteditable="true"]:focus {
-  background: #fffdfd;
-  border-color: #ffb8c1;
-  box-shadow: 0 0 0 3px rgb(237 36 55 / 8%);
+.report-editor :deep(h1) {
+  margin: 0 0 28px;
+  text-align: center;
+  font-size: 24px;
 }
 
-.evidence-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  margin: 20px 0;
-}
-
-.evidence-grid div {
-  display: flex;
-  min-height: 112px;
-  align-items: flex-end;
-  padding: 10px;
-  overflow: hidden;
-  color: #fff;
-  background:
-    linear-gradient(180deg, rgb(15 23 42 / 8%), rgb(15 23 42 / 72%)),
-    linear-gradient(135deg, #dbe4ef, #8ea0b6);
-  border-radius: 6px;
-}
-
-.assistant-card {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  overflow: hidden;
-}
-
-.assistant-card header {
-  display: flex;
-  justify-content: space-between;
-  padding: 20px 18px 14px;
-  border-bottom: 1px solid #edf1f5;
-}
-
-.assistant-card h2 {
-  margin: 0;
-  color: #1f2d3d;
+.report-editor :deep(h2) {
+  margin: 24px 0 10px;
   font-size: 18px;
 }
 
-.assistant-card p {
-  margin: 0;
+.report-editor :deep(img) {
+  max-width: 100%;
+  height: auto;
 }
 
-.assistant-card header p {
-  color: #7d8ca1;
-}
-
-.assistant-flow {
-  display: grid;
-  align-content: start;
-  gap: 16px;
-  padding: 18px;
-}
-
-.chat {
+.ai-card {
   display: flex;
+  flex-direction: column;
   gap: 12px;
-}
-
-.chat.user {
-  justify-content: flex-end;
-}
-
-.chat.user span {
-  order: 2;
-}
-
-.chat span {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  place-items: center;
-  color: #fff;
-  background: #314760;
-  border-radius: 50%;
-  font-size: 12px;
-}
-
-.chat.ai span {
-  color: #314760;
-  background: #edf3fb;
-}
-
-.chat p {
-  max-width: 320px;
-  padding: 12px 14px;
-  color: #1f2d3d;
-  background: #eaf3ff;
-  border-radius: 8px;
-  line-height: 1.8;
-}
-
-.chat.ai p {
-  background: #fff1f2;
-}
-
-.chat small {
-  display: block;
-  margin-top: 4px;
-  color: #7d8ca1;
-}
-
-.assistant-input {
-  position: relative;
+  align-self: start;
   padding: 16px;
-  border-top: 1px solid #edf1f5;
-}
-
-.assistant-input .el-button {
-  position: absolute;
-  right: 26px;
-  bottom: 28px;
-}
-
-.report-actions {
-  position: fixed;
-  right: 16px;
-  bottom: 0;
-  left: calc(var(--sidebar-width) + 16px);
-  z-index: 50;
-  display: flex;
-  min-height: 58px;
-  gap: 12px;
-  align-items: center;
-  justify-content: flex-end;
-  padding: 10px 18px;
-  background: rgb(255 255 255 / 96%);
-  border-top: 1px solid #dfe5ec;
 }
 
 .empty-card {
+  padding: 36px;
+}
+
+.generation-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 0 0;
+  background: #f6f8fb;
+}
+
+.analysis-form {
   display: grid;
-  min-height: 520px;
-  place-items: center;
+  gap: 12px;
 }
 
-.empty-card small {
-  color: #7d8ca1;
+.file-picker {
+  display: inline-flex;
+  width: fit-content;
+  cursor: pointer;
 }
 
-.version-layout {
+.file-picker input {
+  display: none;
+}
+
+.file-picker span {
+  padding: 8px 14px;
+  color: #1f6feb;
+  background: #eef6ff;
+  border: 1px solid #b9dcff;
+  border-radius: 6px;
+}
+
+.analysis-files {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
-  gap: 16px;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
 }
 
-.version-preview {
-  min-height: 300px;
-  padding: 14px;
-  overflow: auto;
-  background: #f8fafd;
-  border: 1px solid #edf1f5;
-  border-radius: 8px;
+.analysis-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: #f6f8fb;
+  border-radius: 6px;
 }
 
-.version-preview h3 {
-  margin: 0 0 12px;
-}
-
-.version-preview article {
-  padding-top: 10px;
-  border-top: 1px solid #edf1f5;
-}
-
-.version-preview article:first-of-type {
-  border-top: 0;
-}
-
-.version-preview p {
-  color: #4d5d73;
-  line-height: 1.8;
-  white-space: pre-wrap;
-}
-
-@media (width <= 1280px) {
-  .report-head,
-  .report-workspace,
-  .version-layout {
+@media (max-width: 1024px) {
+  .generation-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .candidate-select {
+    min-width: 420px;
+    max-width: calc(100vw - 180px);
+  }
+}
+
+@media (max-width: 640px) {
+  .generation-head {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-select {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .report-editor {
+    min-height: 520px;
+    padding: 24px 18px;
   }
 }
 </style>

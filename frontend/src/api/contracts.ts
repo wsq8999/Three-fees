@@ -38,6 +38,7 @@ export const DashboardSummarySchema = z.object({
   billingPointCount: z.number().int().nonnegative(),
   overLimitBillingPointCount: z.number().int().nonnegative(),
   draftReportCount: z.number().int().nonnegative(),
+  pendingReportCount: z.number().int().nonnegative().optional(),
 });
 export type DashboardSummary = z.infer<typeof DashboardSummarySchema>;
 

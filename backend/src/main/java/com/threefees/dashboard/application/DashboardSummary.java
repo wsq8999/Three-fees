@@ -9,6 +9,7 @@ public record DashboardSummary(
     long billingPointCount,
     long overLimitBillingPointCount,
     long draftReportCount,
+    long pendingReportCount,
     long siteCount,
     String lastUpdatedAt,
     long normalBillingPointCount,

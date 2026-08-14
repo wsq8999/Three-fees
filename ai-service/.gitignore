@@ -1,5 +1,13 @@
+.env
 .venv/
+.venv-image-analysis/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.pyc
+*.pyo
+*.egg-info/
+data/uploads/
+data/import-results/
+data/docx-template-qa/
+.runtime-smoke-report-image-analysis.json

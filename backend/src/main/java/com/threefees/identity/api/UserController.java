@@ -59,7 +59,9 @@ public class UserController {
             request.username(),
             request.displayName(),
             request.cityCode(),
-            request.initialPassword());
+            request.enabled(),
+            request.initialPassword(),
+            request.confirmPassword());
     return ResponseEntity.created(URI.create("/api/v1/users/" + created.id()))
         .body(UserResponse.from(created));
   }
@@ -86,11 +88,11 @@ public class UserController {
     return ResponseEntity.noContent().build();
   }
 
-  @PostMapping("/{id}/password-reset")
+  @PostMapping({"/{id}/password-reset", "/{id}/password-resets"})
   @PreAuthorize("hasRole('SUPER_ADMIN')")
   public ResponseEntity<Void> resetPassword(
       @PathVariable long id, @Valid @RequestBody ResetPasswordRequest request) {
-    userManagementService.resetPassword(id, request.newPassword());
+    userManagementService.resetPassword(id, request.newPassword(), request.confirmPassword());
     return ResponseEntity.noContent().build();
   }
 
@@ -99,7 +101,7 @@ public class UserController {
       @AuthenticationPrincipal CurrentUser currentUser,
       @Valid @RequestBody ChangePasswordRequest request) {
     userManagementService.changeOwnPassword(
-        currentUser, request.currentPassword(), request.newPassword());
+        currentUser, request.currentPassword(), request.newPassword(), request.confirmPassword());
     return ResponseEntity.noContent().build();
   }
 }

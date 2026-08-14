@@ -126,8 +126,8 @@ const paymentSummaryGroups = computed<FieldGroup[]>(() => [
     title: "账期汇总",
     fields: [
       valueField("paymentCount", "本账期缴费单笔数", `${detail.value?.payments.length ?? 0}笔`),
-      valueField("actualEnergy", "汇总实际总耗电量", totalEnergy.value, "度"),
-      valueField("actualAmount", "汇总实际报账金额", amount.value, "元"),
+      valueField("actualEnergy", "汇总实际总耗电量", String(totalEnergy.value), "度"),
+      valueField("actualAmount", "汇总实际报账金额", String(amount.value), "元"),
     ],
   },
 ]);
@@ -270,13 +270,54 @@ const auditRows = computed(() =>
   (detail.value?.audit.comparisons ?? []).map((row) => ({
     ...row,
     label: cleanText(row.label, auditLabel(row.key)),
+    referencePeriod: cleanText(row.referencePeriod),
+    baseline: formatKwh(row.baseline),
+    threshold: formatKwh(row.threshold),
+    actual: formatKwh(row.actual),
     reason: cleanText(row.reason, auditReasonByKey(row.key)),
-    baseline: cleanText(row.baseline),
-    actual: cleanText(row.actual),
-    difference: cleanText(row.difference),
-    ratio: cleanText(row.ratio),
-    formula: cleanText(row.formula),
+    ratio: formatRatio(row.ratio),
+    formula: cleanText(row.formula, auditReasonByKey(row.key)),
   })),
+);
+
+function formatKwh(value: string | null | undefined): string {
+  const text = cleanText(value);
+  if (text === "—") return text;
+  const number = numeric(text);
+  if (number === 0 && !/^0(?:\.0+)?$/.test(text.replace(/,/g, ""))) return text;
+  return `${number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}度`;
+}
+
+function formatRatio(value: string | null | undefined): string {
+  const text = cleanText(value);
+  if (text === "—") return text;
+  const raw = text.endsWith("%") ? text.slice(0, -1) : text;
+  const number = Number(raw);
+  if (!Number.isFinite(number)) return text;
+  return `${number.toFixed(2)}%`;
+}
+
+function auditStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    OVER_LIMIT: "超标",
+    NORMAL: "正常",
+    NOT_APPLICABLE: "不适用",
+    NA: "不适用",
+    PENDING_REVIEW: "待稽核",
+  };
+  return labels[status] ?? status;
+}
+
+function auditStatusClass(status: string): string {
+  if (status === "OVER_LIMIT") return "audit-status-over";
+  if (status === "NORMAL") return "audit-status-normal";
+  return "audit-status-na";
+}
+
+const auditSummaryReason = computed(() =>
+  translateOverLimitType(
+    cleanText(detail.value?.audit.finalReason, "当前报账点尚未完成稽核，请确认四类文件已导入成功"),
+  ),
 );
 
 function normalizeTab(value: unknown): DetailTab {
@@ -355,8 +396,31 @@ function fieldValue(groups: FieldGroup[], labels: string[], fallback = "—"): s
 }
 
 function cleanText(value: string | null | undefined, fallback = "—"): string {
-  if (value === null || value === undefined || value.length === 0) return fallback;
-  return /^\?+$/.test(value) ? fallback : value;
+  if (value === null || value === undefined) return fallback;
+  const text = String(value).trim();
+  if (
+    text.length === 0 ||
+    /^\?+$/.test(text) ||
+    ["null", "undefined", "NaN", "N/A"].includes(text) ||
+    (text.charCodeAt(0) === 0x9225 && text.endsWith("?"))
+  ) {
+    return fallback;
+  }
+  return text;
+}
+
+function translateOverLimitType(value: string): string {
+  const labels: Record<string, string> = {
+    ONLY_YOY: "仅同比超标",
+    ONLY_MOM: "仅环比超标",
+    ONLY_RATED: "仅额定标杆超标",
+    MULTIPLE: "多项超标",
+    NONE: "未超标",
+  };
+  return Object.entries(labels).reduce(
+    (text, [key, label]) => text.replace(new RegExp(`\\b${key}\\b`, "g"), label),
+    value,
+  );
 }
 
 function numeric(value: string | null | undefined): number {
@@ -496,22 +560,21 @@ function meterRowClass({ row }: { row: MeterRecord }): string {
 
 function auditLabel(key: AuditComparison["key"]): string {
   const labels: Record<AuditComparison["key"], string> = {
-    YEAR_ON_YEAR: "历史同期电量同比标杆",
-    MONTH_ON_MONTH: "历史环比电量标杆",
-    RATED_BENCHMARK: "额定功率标杆",
+    YEAR_ON_YEAR: "同比",
+    MONTH_ON_MONTH: "环比",
+    RATED_BENCHMARK: "额定标杆",
   };
   return labels[key];
 }
 
 function auditReasonByKey(key: AuditComparison["key"]): string {
   const labels: Record<AuditComparison["key"], string> = {
-    YEAR_ON_YEAR: "参考上一年度同账期日均用电量",
-    MONTH_ON_MONTH: "参考上一自然月日均用电量",
-    RATED_BENCHMARK: "参考当月额定功率标杆值合计",
+    YEAR_ON_YEAR: "固定对比去年同月，按参考日均和标杆修正系数计算阈值",
+    MONTH_ON_MONTH: "固定对比上一个自然月，按参考日均和标杆修正系数计算阈值",
+    RATED_BENCHMARK: "对比当月日标杆合计",
   };
   return labels[key];
 }
-
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
@@ -678,22 +741,22 @@ onMounted(load);
               height="178"
               @row-click="selectPayment"
             >
-              <ElTableColumn label="缴费单编码" min-width="210">
+              <ElTableColumn label="缴费单编号" min-width="210">
                 <template #default="scope"><strong>{{ paymentCode(scope.row) }}</strong></template>
               </ElTableColumn>
-              <ElTableColumn label="缴费期始" width="120">
+              <ElTableColumn label="缴费起始" width="120">
                 <template #default="scope">{{ paymentStart(scope.row) }}</template>
               </ElTableColumn>
-              <ElTableColumn label="缴费期终" width="120">
+              <ElTableColumn label="缴费终止" width="120">
                 <template #default="scope">{{ paymentEnd(scope.row) }}</template>
               </ElTableColumn>
               <ElTableColumn label="缴费天数" width="90" align="right">
                 <template #default="scope">{{ paymentDays(scope.row) }}</template>
               </ElTableColumn>
-              <ElTableColumn label="实际总耗电量" width="130" align="right">
+              <ElTableColumn label="实际总电量" width="130" align="right">
                 <template #default="scope">{{ paymentEnergy(scope.row) }}</template>
               </ElTableColumn>
-              <ElTableColumn label="实际报账金额" width="130" align="right">
+              <ElTableColumn label="实际金额" width="130" align="right">
                 <template #default="scope">{{ paymentAmount(scope.row) }}</template>
               </ElTableColumn>
               <ElTableColumn label="审核状态" width="110">
@@ -702,7 +765,6 @@ onMounted(load);
             </ElTable>
             <div class="current-record-title">
               当前选中：{{ paymentCode(selectedPayment) }}
-              <span>业务系统归档同步</span>
             </div>
             <FieldGroups v-if="selectedPayment" paired class="detail-groups" :groups="paymentDefaultGroups" />
           </template>
@@ -721,7 +783,7 @@ onMounted(load);
               height="196"
               @row-click="selectMeter"
             >
-              <ElTableColumn label="缴费单编码" min-width="180">
+              <ElTableColumn label="缴费单编号" min-width="180">
                 <template #default="scope"><strong>{{ meterPaymentCode(scope.row) }}</strong></template>
               </ElTableColumn>
               <ElTableColumn label="电表编码" width="145">
@@ -730,16 +792,16 @@ onMounted(load);
               <ElTableColumn label="电表户号" width="145">
                 <template #default="scope">{{ meterField(scope.row, "电表户号") }}</template>
               </ElTableColumn>
-              <ElTableColumn label="缴费期始" width="115">
-                <template #default="scope">{{ meterField(scope.row, "缴费期始") }}</template>
+              <ElTableColumn label="缴费起始" width="115">
+                <template #default="scope">{{ meterField(scope.row, "缴费起始") }}</template>
               </ElTableColumn>
-              <ElTableColumn label="缴费期终" width="115">
-                <template #default="scope">{{ meterField(scope.row, "缴费期终") }}</template>
+              <ElTableColumn label="缴费终止" width="115">
+                <template #default="scope">{{ meterField(scope.row, "缴费终止") }}</template>
               </ElTableColumn>
-              <ElTableColumn label="电表耗电量" width="120" align="right">
-                <template #default="scope">{{ meterField(scope.row, "电表耗电量") }}</template>
+              <ElTableColumn label="电表用电量" width="120" align="right">
+                <template #default="scope">{{ meterField(scope.row, "电表用电量") }}</template>
               </ElTableColumn>
-              <ElTableColumn label="分摊后度数" width="120" align="right">
+              <ElTableColumn label="分摊后电量" width="120" align="right">
                 <template #default="scope">{{ meterField(scope.row, "分摊后度数") }}</template>
               </ElTableColumn>
             </ElTable>
@@ -776,27 +838,52 @@ onMounted(load);
             </div>
             <div class="current-record-title import-check-title">
               导入校验
-              <span>批次 BGZ-202606-0008 · 导入时间 2026-07-02 10:36</span>
             </div>
             <FieldGroups paired class="detail-groups validation-groups" :groups="benchmarkValidationGroups" />
           </template>
         </ElTabPane>
 
         <ElTabPane label="稽核分析" name="audit">
-          <div class="metric-strip">
+          <div class="metric-strip audit-summary-strip">
             <div><small>当前账期</small><strong>{{ periodText }}</strong></div>
             <div><small>实际总用电量</small><strong>{{ totalEnergy }}度</strong></div>
             <div><small>实际报账金额</small><strong>{{ amount }}元</strong></div>
           </div>
-          <ElTable :data="auditRows">
-            <ElTableColumn prop="label" label="标杆项目" width="160" />
-            <ElTableColumn prop="reason" label="对比账期 / 取值依据" min-width="260" />
-            <ElTableColumn prop="baseline" label="参考值" width="120" />
-            <ElTableColumn prop="actual" label="本期实际值" width="120" />
-            <ElTableColumn label="结果" width="110">
-              <template #default="scope"><StatusTag :value="scope.row.status" /></template>
+          <ElAlert
+            class="audit-reason"
+            :title="auditSummaryReason"
+            type="info"
+            :closable="false"
+            show-icon
+          />
+          <ElTable :data="auditRows" class="audit-table">
+            <ElTableColumn prop="label" label="分析类型" width="110" />
+            <ElTableColumn prop="referencePeriod" label="参考账期" width="110" />
+            <ElTableColumn prop="baseline" label="参考电量" width="130" />
+            <ElTableColumn prop="threshold" label="判定阈值" width="130" />
+            <ElTableColumn prop="actual" label="本期实际" width="130" />
+            <ElTableColumn label="结果" width="100">
+              <template #default="scope">
+                <span class="audit-status" :class="auditStatusClass(scope.row.status)">
+                  {{ auditStatusLabel(scope.row.status) }}
+                </span>
+              </template>
             </ElTableColumn>
-            <ElTableColumn prop="ratio" label="超标比例" width="110" />
+            <ElTableColumn label="超标比例" width="110">
+              <template #default="scope">
+                <span class="audit-ratio" :class="{ 'audit-ratio-over': scope.row.status === 'OVER_LIMIT' }">
+                  {{ scope.row.ratio }}
+                </span>
+              </template>
+            </ElTableColumn>
+            <ElTableColumn label="分析说明" min-width="260">
+              <template #default="scope">
+                <div class="audit-note">
+                  <strong>{{ scope.row.reason }}</strong>
+                  <small>{{ scope.row.formula }}</small>
+                </div>
+              </template>
+            </ElTableColumn>
           </ElTable>
         </ElTabPane>
       </ElTabs>
@@ -982,7 +1069,18 @@ onMounted(load);
 }
 
 .overview-groups :deep(.field-card dl > div) {
-  grid-template-columns: minmax(110px, 0.75fr) minmax(150px, 1.25fr);
+  grid-template-columns: minmax(110px, 0.72fr) minmax(0, 1.28fr);
+}
+
+.overview-groups :deep(.field-card dd) {
+  min-width: 0;
+  overflow: visible;
+  line-height: 1.45;
+  text-align: right;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .current-record-title {
@@ -1058,10 +1156,82 @@ onMounted(load);
   font-weight: 800;
 }
 
+.audit-summary-strip > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.audit-summary-strip small,
+.audit-summary-strip strong {
+  display: inline;
+  margin-top: 0;
+}
+
+.audit-summary-strip strong {
+  min-width: 0;
+  text-align: right;
+}
+
+.audit-ratio-over {
+  color: #f5223d;
+  font-weight: 800;
+}
+
+.audit-reason {
+  margin-bottom: 12px;
+}
+
+.audit-table :deep(.el-table__cell) {
+  vertical-align: top;
+}
+
+.audit-status {
+  font-weight: 800;
+}
+
+.audit-status-over {
+  color: #f5223d;
+}
+
+.audit-status-normal {
+  color: #16a34a;
+}
+
+.audit-status-na {
+  color: #7d8ca1;
+}
+
+.audit-note {
+  display: grid;
+  gap: 4px;
+  line-height: 1.5;
+}
+
+.audit-note small {
+  color: #7d8ca1;
+}
 @media (width <= 1180px) {
   .summary-card,
   .metric-strip {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .overview-groups :deep(.field-card dl > div) {
+    grid-template-columns: minmax(96px, 0.8fr) minmax(0, 1.2fr);
+  }
+}
+
+@media (width <= 820px) {
+  .overview-groups :deep(.field-card dl),
+  .overview-groups :deep(.field-card dl > div) {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-groups :deep(.field-card dd) {
+    text-align: left;
   }
 }
 </style>

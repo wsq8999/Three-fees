@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
 import { Key, Plus, Refresh, Search } from "@element-plus/icons-vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
 import type { BusinessCity, ManagedUser, PageResult } from "@/types/business";
+import { standardConfirm } from "@/utils/message-box";
 
-const INITIAL_PASSWORD = "123456";
 
 const loading = ref(false);
 const saving = ref(false);
@@ -16,8 +16,11 @@ const pageData = ref<PageResult<ManagedUser> | null>(null);
 const cities = ref<BusinessCity[]>([]);
 const createVisible = ref(false);
 const editVisible = ref(false);
+const passwordVisible = ref(false);
 const editingUser = ref<ManagedUser | null>(null);
+const passwordUser = ref<ManagedUser | null>(null);
 const formError = ref("");
+const passwordError = ref("");
 
 const filters = reactive({
   keyword: "",
@@ -32,10 +35,19 @@ const createForm = reactive({
   displayName: "",
   cityCode: "",
   enabled: true,
+  initialPassword: "",
+  confirmPassword: "",
 });
 
 const editForm = reactive({
   displayName: "",
+  cityCode: "",
+  enabled: true,
+});
+
+const passwordForm = reactive({
+  newPassword: "",
+  confirmPassword: "",
 });
 
 const filteredItems = computed(() => {
@@ -95,6 +107,8 @@ function openCreate(): void {
     displayName: "",
     cityCode: cities.value[0]?.code ?? "",
     enabled: true,
+    initialPassword: "",
+    confirmPassword: "",
   });
   formError.value = "";
   createVisible.value = true;
@@ -105,11 +119,22 @@ async function createUser(): Promise<void> {
   if (
     createForm.username.trim().length === 0 ||
     createForm.displayName.trim().length === 0 ||
-    createForm.cityCode.length === 0
+    createForm.cityCode.length === 0 ||
+    createForm.initialPassword.length === 0 ||
+    createForm.confirmPassword.length === 0
   ) {
     formError.value = "请完整填写用户名、用户名称和绑定城市。";
     return;
   }
+  if (createForm.initialPassword !== createForm.confirmPassword) {
+    formError.value = "两次输入的初始密码不一致。";
+    return;
+  }
+  if (createForm.initialPassword.length < 6) {
+    formError.value = "初始密码至少 6 位。";
+    return;
+  }
+
   if (!/^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(createForm.username)) {
     formError.value =
       "用户名需以字母开头，只能包含字母、数字和下划线，长度 4–32 位。";
@@ -118,17 +143,17 @@ async function createUser(): Promise<void> {
 
   saving.value = true;
   try {
-    const created = await businessApi.users.create({
+    await businessApi.users.create({
       username: createForm.username.trim(),
       displayName: createForm.displayName.trim(),
       cityCode: createForm.cityCode,
+      enabled: createForm.enabled,
+      initialPassword: createForm.initialPassword,
+      confirmPassword: createForm.confirmPassword,
     });
-    if (!createForm.enabled) {
-      await businessApi.users.setEnabled(created.id, false);
-    }
     createVisible.value = false;
     await load();
-    ElMessage.success(`用户已创建，初始密码为 ${INITIAL_PASSWORD}`);
+    ElMessage.success("用户已创建，可直接使用初始密码登录");
   } catch (error) {
     formError.value = error instanceof Error ? error.message : "用户创建失败";
   } finally {
@@ -139,6 +164,8 @@ async function createUser(): Promise<void> {
 function openEdit(user: ManagedUser): void {
   editingUser.value = user;
   editForm.displayName = user.displayName;
+  editForm.cityCode = user.city?.code ?? cities.value[0]?.code ?? "";
+  editForm.enabled = user.enabled;
   formError.value = "";
   editVisible.value = true;
 }
@@ -152,7 +179,12 @@ async function saveEdit(): Promise<void> {
 
   saving.value = true;
   try {
-    await businessApi.users.update(editingUser.value.id, editForm.displayName);
+    await businessApi.users.update(editingUser.value.id, {
+      displayName: editForm.displayName.trim(),
+      cityCode: editForm.cityCode,
+      enabled: editForm.enabled,
+      version: editingUser.value.version,
+    });
     editVisible.value = false;
     await load();
     ElMessage.success("用户信息已更新");
@@ -163,34 +195,45 @@ async function saveEdit(): Promise<void> {
   }
 }
 
-async function resetPassword(user: ManagedUser): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      `确认将 ${user.displayName} 的登录密码重置为 ${INITIAL_PASSWORD}？`,
-      "重置密码",
-      {
-        type: "warning",
-        confirmButtonText: "确认重置",
-        cancelButtonText: "取消",
-      },
-    );
-  } catch {
+function openPassword(user: ManagedUser): void {
+  passwordUser.value = user;
+  Object.assign(passwordForm, { newPassword: "", confirmPassword: "" });
+  passwordError.value = "";
+  passwordVisible.value = true;
+}
+
+async function resetPassword(): Promise<void> {
+  if (passwordUser.value === null) return;
+  passwordError.value = "";
+  if (passwordForm.newPassword.length < 6) {
+    passwordError.value = "新密码至少 6 位。";
     return;
   }
-
+  if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+    passwordError.value = "两次输入的新密码不一致。";
+    return;
+  }
+  saving.value = true;
   try {
-    await businessApi.users.resetPassword(user.id);
+    await businessApi.users.resetPassword(
+      passwordUser.value.id,
+      passwordForm.newPassword,
+      passwordForm.confirmPassword,
+    );
+    passwordVisible.value = false;
     await load();
-    ElMessage.success(`密码已重置为 ${INITIAL_PASSWORD}`);
+    ElMessage.success("密码已更新，新密码立即生效");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "密码重置失败");
+    passwordError.value = error instanceof Error ? error.message : "密码修改失败";
+  } finally {
+    saving.value = false;
   }
 }
 
 async function toggleEnabled(user: ManagedUser): Promise<void> {
   const target = !user.enabled;
   try {
-    await ElMessageBox.confirm(
+    await standardConfirm(
       target
         ? `确认启用 ${user.displayName}？`
         : `停用后 ${user.displayName} 将不能登录。确认停用？`,
@@ -206,7 +249,12 @@ async function toggleEnabled(user: ManagedUser): Promise<void> {
   }
 
   try {
-    await businessApi.users.setEnabled(user.id, target);
+    await businessApi.users.update(user.id, {
+      displayName: user.displayName,
+      cityCode: user.city?.code ?? "",
+      enabled: target,
+      version: user.version,
+    });
     await load();
     ElMessage.success(target ? "账号已启用" : "账号已停用");
   } catch (error) {
@@ -306,7 +354,7 @@ onMounted(async () => {
             link
             type="danger"
             :icon="Key"
-            @click="resetPassword(asManagedUser(scope.row))"
+            @click="openPassword(asManagedUser(scope.row))"
           >
             重置密码
           </ElButton>
@@ -349,7 +397,9 @@ onMounted(async () => {
     v-model="createVisible"
     title="新增用户"
     width="690px"
-    class="prototype-dialog"
+    class="prototype-dialog centered-dialog"
+    append-to-body
+    align-center
     :close-on-click-modal="false"
   >
     <ElForm label-position="top">
@@ -382,7 +432,10 @@ onMounted(async () => {
           </ElSelect>
         </ElFormItem>
         <ElFormItem label="初始密码 *">
-          <ElInput :model-value="INITIAL_PASSWORD" disabled />
+          <ElInput v-model="createForm.initialPassword" type="password" show-password />
+        </ElFormItem>
+        <ElFormItem label="确认初始密码 *">
+          <ElInput v-model="createForm.confirmPassword" type="password" show-password />
         </ElFormItem>
         <ElFormItem label="账号状态 *">
           <ElSelect v-model="createForm.enabled">
@@ -418,7 +471,9 @@ onMounted(async () => {
     v-model="editVisible"
     title="编辑用户"
     width="520px"
-    class="prototype-dialog"
+    class="prototype-dialog centered-dialog"
+    append-to-body
+    align-center
     :close-on-click-modal="false"
   >
     <ElForm label-position="top">
@@ -444,12 +499,45 @@ onMounted(async () => {
       <ElButton type="primary" :loading="saving" @click="saveEdit">保存</ElButton>
     </template>
   </ElDialog>
+
+  <ElDialog
+    v-model="passwordVisible"
+    title="修改密码"
+    width="480px"
+    class="prototype-dialog centered-dialog"
+    append-to-body
+    align-center
+    :close-on-click-modal="false"
+  >
+    <ElForm label-position="top">
+      <ElFormItem label="用户">
+        <ElInput :model-value="passwordUser?.displayName ?? ''" disabled />
+      </ElFormItem>
+      <ElFormItem label="新密码 *">
+        <ElInput v-model="passwordForm.newPassword" type="password" show-password />
+      </ElFormItem>
+      <ElFormItem label="确认新密码 *">
+        <ElInput v-model="passwordForm.confirmPassword" type="password" show-password />
+      </ElFormItem>
+      <ElAlert
+        v-if="passwordError"
+        :title="passwordError"
+        type="error"
+        :closable="false"
+        show-icon
+      />
+    </ElForm>
+    <template #footer>
+      <ElButton @click="passwordVisible = false">取消</ElButton>
+      <ElButton type="primary" :loading="saving" @click="resetPassword">确认</ElButton>
+    </template>
+  </ElDialog>
 </template>
 
 <style scoped>
 .user-filter {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr auto;
+  grid-template-columns: minmax(min(100%, 260px), 2fr) repeat(2, minmax(min(100%, 150px), 1fr));
   gap: 14px;
   align-items: end;
   padding: 16px;
@@ -466,11 +554,15 @@ onMounted(async () => {
 
 .filter-actions {
   display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
   gap: 10px;
+  justify-content: flex-end;
 }
 
 .user-table {
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .user-table > .el-alert {
@@ -538,6 +630,19 @@ onMounted(async () => {
 
   .filter-actions {
     justify-content: flex-end;
+  }
+}
+
+@media (width <= 640px) {
+  .filter-actions,
+  .filter-actions .el-button,
+  .user-table footer {
+    width: 100%;
+  }
+
+  .user-table footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

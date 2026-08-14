@@ -20,6 +20,13 @@ body {
   overflow-x: hidden;
 }
 
+img,
+svg,
+canvas,
+video {
+  max-width: 100%;
+}
+
 button,
 input,
 textarea,
@@ -45,6 +52,7 @@ select:focus-visible,
 
 #app {
   min-height: 100vh;
+  min-width: 0;
 }
 
 .el-button.el-button--primary:not(.is-link) {
@@ -192,6 +200,10 @@ select:focus-visible,
 }
 
 .el-dialog {
+  width: min(var(--el-dialog-width, 560px), calc(100vw - var(--dialog-gutter))) !important;
+  max-height: calc(100vh - var(--dialog-gutter));
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   box-shadow: 0 22px 70px rgb(18 28 42 / 28%);
 }
@@ -204,6 +216,16 @@ select:focus-visible,
 
 .el-dialog__body {
   padding: 24px 28px;
+  overflow: auto;
+}
+
+.el-dialog__header,
+.el-dialog__footer {
+  flex: none;
+}
+
+.el-table {
+  max-width: 100%;
 }
 
 .el-dialog__footer {
@@ -246,8 +268,104 @@ select:focus-visible,
   background-color: rgb(31 42 56 / 52%);
 }
 
+.standard-message-box-overlay {
+  position: fixed !important;
+  inset: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 16px !important;
+  background-color: rgb(31 42 56 / 52%) !important;
+  overflow: auto !important;
+}
+
+.standard-message-box {
+  position: relative !important;
+  inset: auto !important;
+  width: min(420px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px) !important;
+  max-height: calc(100vh - 32px) !important;
+  margin: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  border: 1px solid var(--color-neutral-200);
+  border-radius: 10px;
+  background: #fff !important;
+  box-shadow: 0 22px 70px rgb(18 28 42 / 28%);
+  overflow: hidden;
+}
+
+.standard-message-box .el-message-box__header,
+.standard-message-box .el-message-box__btns {
+  flex: none;
+}
+
+.standard-message-box .el-message-box__header {
+  position: relative;
+  padding: 18px 48px 12px 20px;
+  border-bottom: 1px solid var(--color-neutral-200);
+}
+
+.standard-message-box .el-message-box__title {
+  max-width: 100%;
+  color: #1f2d3d;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.standard-message-box .el-message-box__headerbtn {
+  position: absolute !important;
+  top: 14px !important;
+  right: 14px !important;
+  left: auto !important;
+  width: 28px;
+  height: 28px;
+}
+
+.standard-message-box .el-message-box__content {
+  max-height: calc(100vh - 150px);
+  padding: 18px 20px;
+  overflow: auto;
+}
+
+.standard-message-box .el-message-box__container {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.standard-message-box .el-message-box__status {
+  position: static !important;
+  flex: none;
+  transform: none !important;
+}
+
+.standard-message-box .el-message-box__message {
+  flex: 1;
+  max-width: 100%;
+  color: #334155;
+  line-height: 1.7;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.standard-message-box .el-message-box__message p {
+  margin: 0;
+}
+
+.standard-message-box .el-message-box__btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  padding: 0 20px 20px;
+}
+
 .business-card {
   min-width: 0;
+  max-width: 100%;
   background: white;
   border: 1px solid #dfe6f0;
   border-radius: 10px;
@@ -256,10 +374,77 @@ select:focus-visible,
 
 .business-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
   justify-content: space-between;
   margin: var(--space-3) 0;
+}
+
+.responsive-table,
+.table-card,
+.report-table,
+.user-table,
+.benchmark-table {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.responsive-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: var(--grid-gap);
+}
+
+.responsive-form-grid label,
+.responsive-field {
+  min-width: 0;
+}
+
+.responsive-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.query-actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (width <= 720px) {
+  .business-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .business-toolbar .el-button,
+  .responsive-actions .el-button,
+  .query-actions .el-button {
+    width: 100%;
+  }
+
+  .query-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .el-dialog {
+    --dialog-gutter: 20px;
+  }
+
+  .el-dialog__header,
+  .el-dialog__body,
+  .el-dialog__footer {
+    padding-inline: 18px;
+  }
 }
 
 .status-over {

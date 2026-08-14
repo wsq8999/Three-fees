@@ -4,24 +4,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.DefaultApplicationArguments;
-import org.springframework.mock.env.MockEnvironment;
 
 class ProcessRoleGuardTest {
 
   @Test
-  void allRoleIsRejectedWithoutAnIsolatedProfile() {
-    var guard = new ProcessRoleGuard("all", new MockEnvironment().withProperty("x", "y"));
+  void invalidRoleIsRejected() {
+    var guard = new ProcessRoleGuard("invalid");
 
     assertThatThrownBy(() -> guard.run(new DefaultApplicationArguments()))
         .isInstanceOf(IllegalStateException.class)
-        .hasMessageContaining("restricted");
+        .hasMessageContaining("api, worker or all");
   }
 
   @Test
-  void allRoleIsAcceptedForDev() {
-    var environment = new MockEnvironment();
-    environment.setActiveProfiles("dev");
-    var guard = new ProcessRoleGuard("all", environment);
+  void allRoleIsAccepted() {
+    var guard = new ProcessRoleGuard("all");
 
     guard.run(new DefaultApplicationArguments());
   }

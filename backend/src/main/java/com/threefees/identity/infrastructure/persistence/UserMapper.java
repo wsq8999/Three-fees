@@ -219,7 +219,7 @@ public interface UserMapper {
       INSERT INTO app_user
         (username, display_name, password_hash, city_id, is_enabled, must_change_password,
          created_by, updated_by, version)
-      SELECT #{username}, #{displayName}, #{passwordHash}, c.id, TRUE, TRUE,
+      SELECT #{username}, #{displayName}, #{passwordHash}, c.id, #{enabled}, FALSE,
              #{actor}, #{actor}, 0
         FROM city c
        WHERE c.code = #{cityCode}
@@ -230,6 +230,7 @@ public interface UserMapper {
       @Param("displayName") String displayName,
       @Param("passwordHash") String passwordHash,
       @Param("cityCode") String cityCode,
+      @Param("enabled") boolean enabled,
       @Param("actor") String actor,
       @Param("holder") GeneratedId holder);
 

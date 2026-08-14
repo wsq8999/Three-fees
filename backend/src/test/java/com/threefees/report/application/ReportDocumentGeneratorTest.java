@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.threefees.ai.application.AiServiceClient.ReportSections;
 import java.io.ByteArrayInputStream;
+import java.lang.reflect.Method;
 import java.util.List;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -53,5 +54,26 @@ class ReportDocumentGeneratorTest {
     try (var document = Loader.loadPDF(pdf)) {
       assertThat(document.getNumberOfPages()).isGreaterThanOrEqualTo(1);
     }
+  }
+
+  @Test
+  void removesLegacyDocPictureFieldCodesFromPreviewText() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    Method method = ReportDocumentGenerator.class.getDeclaredMethod("cleanWordText", String.class);
+    method.setAccessible(true);
+
+    String cleaned =
+        (String)
+            method.invoke(
+                generator,
+                """
+                移动：华为4GBBU*1+RRU*3
+                INCLUDEPICTURE \\d "http://180.153.49.130:9000/imageMountShow?imageId=/itower18/2020/07/21/13/xunjian/demo.jpg" \\* MERGEFORMATINET
+                三、整改小结
+                """);
+
+    assertThat(cleaned)
+        .contains("移动：华为4GBBU*1+RRU*3", "三、整改小结")
+        .doesNotContain("INCLUDEPICTURE", "MERGEFORMAT", "imageMountShow", "http://");
   }
 }
