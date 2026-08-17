@@ -20,12 +20,18 @@ const sending = ref(false);
 const generating = ref(false);
 const errorMessage = ref("");
 const prompt = ref("");
+const assistantError = ref("");
 const historyVisible = ref(false);
-const assistantVisible = ref(false);
+const assistantVisible = ref(true);
 const previewVisible = ref(false);
 const previewVersion = ref<DraftVersion | null>(null);
 const fileInput = ref<HTMLInputElement>();
-const pendingImage = ref<File | null>(null);
+const pendingImageIds = ref<string[]>([]);
+const uploadingImages = ref(false);
+
+const allImageIds = computed(() =>
+  Array.from(new Set([...(draft.value?.imageFileIds ?? []), ...pendingImageIds.value])),
+);
 
 const chineseNumbers = ["一", "二", "三", "四", "五", "六", "七", "八"];
 
@@ -67,10 +73,9 @@ async function load(): Promise<void> {
     const loaded = await businessApi.drafts.get(String(route.params.draftId));
     if (loaded === undefined) throw new Error("工作稿不存在或无权访问");
     draft.value = loaded;
-    assistantVisible.value =
-      loaded.messages.length > 0 || route.query.action === "image";
+    assistantVisible.value = true;
     if (route.query.action === "image") {
-      ElMessage.info("请点击底部“分析图片”选择现场图片。");
+      ElMessage.info("可直接在左侧“排查分析”粘贴图片，再点击“分析全部图片”。");
     }
   } catch (error) {
     errorMessage.value =
@@ -87,9 +92,10 @@ async function send(
   if (draft.value === null || sending.value) return;
   const content = prompt.value.trim();
   if (intent === "AUTO" && content.length === 0) return;
-  if (intent === "IMAGE_ANALYSIS" && imageFileIds.length === 0) return;
+  if (intent === "IMAGE_ANALYSIS" && allImageIds.value.length === 0) return;
 
   assistantVisible.value = true;
+  assistantError.value = "";
   sending.value = true;
   try {
     draft.value = await businessApi.drafts.sendMessage(
@@ -99,17 +105,19 @@ async function send(
         content:
           content ||
           "分析现场图片，补充问题原因、整改建议和报告结论。",
-        imageNames: pendingImage.value ? [pendingImage.value.name] : [],
+        imageNames: imageFileIds,
         imageFileIds,
       },
       draft.value.entityVersion,
     );
     prompt.value = "";
-    pendingImage.value = null;
-  } catch (error) {
-    ElMessage.error(
-      error instanceof Error ? error.message : "AI 请求失败，工作稿未修改",
+    pendingImageIds.value = pendingImageIds.value.filter(
+      (id) => !imageFileIds.includes(id),
     );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "AI 请求失败，工作稿未修改";
+    assistantError.value = message;
+    ElMessage.error(message);
   } finally {
     sending.value = false;
   }
@@ -122,30 +130,107 @@ function chooseImage(): void {
 
 async function imageSelected(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (file === undefined) return;
-  if (!file.type.startsWith("image/")) {
-    ElMessage.error("请选择图片文件。");
-    input.value = "";
-    return;
-  }
-
-  pendingImage.value = file;
-  prompt.value = `分析 ${file.name}，补充现场凭证结论。`;
-  sending.value = true;
+  const files = Array.from(input.files ?? []);
+  if (files.length === 0) return;
   try {
-    if (draft.value === null) return;
-    const fileId = await businessApi.drafts.uploadImage(draft.value.id, file);
-    sending.value = false;
-    await send("IMAGE_ANALYSIS", [fileId]);
-    ElMessage.success("AI 图片分析已完成，报告区已回显最新内容。");
+    await addImages(files);
+    ElMessage.success("图片已加入当前报告，点击“分析全部图片”后 AI 会逐张处理。");
   } catch (error) {
     ElMessage.error(
-      error instanceof Error ? error.message : "图片分析失败，工作稿未修改",
+      error instanceof Error ? error.message : "图片加入报告失败",
     );
-    sending.value = false;
   } finally {
     input.value = "";
+  }
+}
+
+async function pasteImages(event: ClipboardEvent): Promise<void> {
+  const files = Array.from(event.clipboardData?.items ?? [])
+    .filter((item) => item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+  if (files.length === 0) return;
+  event.preventDefault();
+  try {
+    await addImages(files);
+    ElMessage.success(`已粘贴 ${files.length} 张图片到当前报告。`);
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "粘贴图片失败");
+  }
+}
+
+async function addImages(files: File[]): Promise<void> {
+  if (draft.value === null || uploadingImages.value) return;
+  const accepted = files.filter((file) => ["image/png", "image/jpeg"].includes(file.type));
+  if (accepted.length !== files.length) throw new Error("仅支持 PNG 或 JPEG 图片");
+  if (allImageIds.value.length + accepted.length > 10) throw new Error("一份报告最多包含 10 张图片");
+  if (accepted.some((file) => file.size > 10 * 1024 * 1024)) throw new Error("单张图片不能超过 10 MiB");
+  uploadingImages.value = true;
+  try {
+    const ids: string[] = [];
+    for (const file of accepted) {
+      const uploaded = await businessApi.drafts.uploadImage(draft.value.id, file);
+      ids.push(uploaded.fileId);
+      draft.value.entityVersion = uploaded.entityVersion;
+      draft.value.imageFileIds.push(uploaded.fileId);
+    }
+    pendingImageIds.value.push(...ids);
+  } finally {
+    uploadingImages.value = false;
+  }
+}
+
+async function analyzeAllImages(): Promise<void> {
+  if (draft.value === null || allImageIds.value.length === 0) {
+    ElMessage.warning("请先在左侧排查分析中粘贴图片。");
+    return;
+  }
+  await saveDraft(false);
+  prompt.value = "逐张分析当前报告中的全部图片，结合系统事实和历史案例重写完整报告。";
+  await send("IMAGE_ANALYSIS", pendingImageIds.value);
+  ElMessage.success("全部图片已分析，左侧已回显最新完整报告。");
+}
+
+function imageUrl(id: string): string {
+  return `/api/v1/files/${encodeURIComponent(id)}?inline=true`;
+}
+
+async function removeImage(id: string): Promise<void> {
+  if (draft.value === null || sending.value) return;
+  sending.value = true;
+  try {
+    draft.value = await businessApi.drafts.removeImage(
+      draft.value.id,
+      id,
+      draft.value.entityVersion,
+    );
+    pendingImageIds.value = pendingImageIds.value.filter((value) => value !== id);
+    ElMessage.success("图片已从当前报告移除。");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "移除图片失败");
+  } finally {
+    sending.value = false;
+  }
+}
+
+async function moveImage(index: number, offset: -1 | 1): Promise<void> {
+  if (draft.value === null || sending.value) return;
+  const target = index + offset;
+  if (target < 0 || target >= allImageIds.value.length) return;
+  const ordered = [...allImageIds.value];
+  [ordered[index], ordered[target]] = [ordered[target]!, ordered[index]!];
+  sending.value = true;
+  try {
+    draft.value = await businessApi.drafts.reorderImages(
+      draft.value.id,
+      ordered,
+      draft.value.entityVersion,
+    );
+    pendingImageIds.value = [];
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "调整图片顺序失败");
+  } finally {
+    sending.value = false;
   }
 }
 
@@ -189,11 +274,11 @@ async function generate(): Promise<void> {
   await saveDraft(false);
   try {
     await standardConfirm(
-      "确认后将生成正式报告并下载 Word。同一报账点和账期只保留一个当前正式报告；后续修改需走更正流程。",
-      "生成正式报告",
+      "确认后将生成正式报告并把最终原因沉淀到当前城市经验库。同一报账点和账期只保留一个正式报告。",
+      "确认报告",
       {
         type: "warning",
-        confirmButtonText: "生成并下载",
+        confirmButtonText: "确认并生成",
         cancelButtonText: "继续检查",
       },
     );
@@ -294,13 +379,22 @@ onMounted(load);
             spellcheck="false"
             @input="updateBlock(block, editableText($event))"
             @blur="saveDraft(false)"
+            @paste="block.type === 'ANALYSIS' ? pasteImages($event) : undefined"
           >
             {{ block.content }}
           </p>
-          <div v-if="block.type === 'IMAGE'" class="image-evidence">
-            <Picture />
-            <span>{{ block.imageName ?? "现场图片分析结果" }}</span>
-            <small>AI 图片分析凭证</small>
+          <div v-if="block.type === 'ANALYSIS' && allImageIds.length" class="evidence-grid">
+            <figure v-for="(imageId, imageIndex) in allImageIds" :key="imageId">
+              <img :src="imageUrl(imageId)" :alt="`稽核证据图片 ${imageIndex + 1}`" />
+              <figcaption>
+                <span>图片 IMG-{{ imageIndex + 1 }}</span>
+                <span>
+                  <ElButton link :disabled="imageIndex === 0" @click="moveImage(imageIndex, -1)">上移</ElButton>
+                  <ElButton link :disabled="imageIndex === allImageIds.length - 1" @click="moveImage(imageIndex, 1)">下移</ElButton>
+                  <ElButton link type="danger" @click="removeImage(imageId)">删除</ElButton>
+                </span>
+              </figcaption>
+            </figure>
           </div>
         </section>
       </article>
@@ -320,6 +414,17 @@ onMounted(load);
             历史版本
           </ElButton>
         </header>
+
+        <ElAlert
+          v-if="assistantError"
+          class="assistant-error"
+          type="error"
+          title="AI 助手处理失败"
+          :description="assistantError"
+          show-icon
+          closable
+          @close="assistantError = ''"
+        />
 
         <div class="chat-list">
           <ElEmpty
@@ -343,9 +448,11 @@ onMounted(load);
                     ? "仅问答，正文未变"
                     : message.intent === "EDIT"
                       ? "正文已创建新版本"
-                      : message.intent === "IMAGE_ANALYSIS"
+                    : message.intent === "IMAGE_ANALYSIS"
                         ? "图片分析已回填正文"
-                        : "系统消息"
+                        : message.intent === "CORRECTION"
+                          ? "纠错已创建新版本"
+                          : "系统消息"
                 }}
               </small>
             </div>
@@ -378,8 +485,11 @@ onMounted(load);
 
     <footer class="draft-actions">
       <ElButton :icon="ArrowLeft" @click="goBack">返回</ElButton>
-      <ElButton :icon="Picture" :loading="sending" @click="chooseImage">
-        分析图片
+      <ElButton :icon="Picture" :loading="uploadingImages" @click="chooseImage">
+        添加图片
+      </ElButton>
+      <ElButton type="primary" plain :icon="Picture" :loading="sending" @click="analyzeAllImages">
+        分析全部图片
       </ElButton>
       <ElButton
         type="primary"
@@ -387,12 +497,13 @@ onMounted(load);
         :disabled="draft.status !== 'EDITING'"
         @click="generate"
       >
-        生成正式报告并导出Word
+        确认报告并导出 Word
       </ElButton>
       <input
         ref="fileInput"
         class="sr-only"
         type="file"
+        multiple
         accept="image/*"
         @change="imageSelected"
       />
@@ -551,17 +662,36 @@ onMounted(load);
   box-shadow: 0 0 0 3px rgb(237 36 55 / 8%);
 }
 
-.image-evidence {
+.evidence-grid {
   display: grid;
-  min-height: 130px;
-  place-items: center;
-  color: #52657a;
-  background: linear-gradient(135deg, #eef2f7, #dfe6ef);
-  border-radius: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
 }
 
-.image-evidence svg {
-  width: 34px;
+.evidence-grid figure {
+  margin: 0;
+  overflow: hidden;
+  background: #f6f8fb;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+}
+
+.evidence-grid img {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  background: #eef2f7;
+}
+
+.evidence-grid figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  color: #52657a;
+  font-size: 12px;
 }
 
 .assistant-panel {

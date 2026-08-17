@@ -1,14 +1,26 @@
 spring:
   application:
     name: three-fees-api
+  ai:
+    model:
+      chat: openai
+    openai:
+      base-url: ${KIMI_BASE_URL:https://api.moonshot.cn/v1}
+      api-key: ${KIMI_API_KEY}
+      chat:
+        model: ${KIMI_MODEL:kimi-k3}
+        options:
+          reasoning-effort: ${KIMI_REASONING_EFFORT:low}
+          max-completion-tokens: ${KIMI_MAX_COMPLETION_TOKENS:8192}
+          timeout: ${KIMI_REQUEST_TIMEOUT:10m}
   servlet:
     multipart:
       max-file-size: -1
       max-request-size: -1
   datasource:
     url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&sslMode=DISABLED}
-    username: ${DB_USERNAME:}
-    password: ${DB_PASSWORD:}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:123456}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 2
@@ -45,16 +57,16 @@ app:
     enabled: ${INITIAL_ACCOUNT_BOOTSTRAP_ENABLED:false}
     initial-password: ${INITIAL_ACCOUNT_PASSWORD:}
   file:
-    root: ${APP_FILE_ROOT:}
+    root: ${APP_FILE_ROOT:runtime/files}
     max-import-rows: 200000
   worker:
     poll-delay: 500
     lease-seconds: 30
   ai:
-    enabled: ${AI_SERVICE_ENABLED:false}
-    base-url: ${AI_SERVICE_BASE_URL:http://127.0.0.1:8100}
-    token: ${AI_SERVICE_TOKEN:}
-    timeout-seconds: 30
+    enabled: ${AI_ENABLED:true}
+    model: ${KIMI_MODEL:kimi-k3}
+    max-history-cases: ${AI_MAX_HISTORY_CASES:30}
+    max-cross-city-cases: ${AI_MAX_CROSS_CITY_CASES:5}
   report:
     font-path: ${REPORT_FONT_PATH:}
 

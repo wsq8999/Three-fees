@@ -14,7 +14,7 @@
 - Spring Boot `dev` profile
 - MySQL 数据库 `three_fees`
 - Vue Vite 开发服务器
-- AI 默认关闭
+- Spring AI 直连 Kimi（不需要 FastAPI sidecar）
 
 ## 3. 后端环境变量
 
@@ -30,7 +30,13 @@
 | `INITIAL_ACCOUNT_BOOTSTRAP_ENABLED` | 空库首次启动时设为 `true` |
 | `INITIAL_ACCOUNT_PASSWORD` | 首批账号临时密码，当前约定为 `123456` |
 | `APP_FILE_ROOT` | 上传文件、报告文件存储根目录 |
-| `AI_SERVICE_ENABLED` | 当前阶段设为 `false` |
+| `AI_ENABLED` | 是否启用 AI 稽核助手 |
+| `KIMI_API_KEY` | Kimi 密钥，仅通过本机/服务环境注入 |
+| `KIMI_BASE_URL` | Kimi OpenAI 兼容地址，默认 `https://api.moonshot.cn/v1` |
+| `KIMI_MODEL` | Kimi 模型名，默认 `kimi-k3`，可按实际账号可用模型调整 |
+| `KIMI_REASONING_EFFORT` | 推理强度，交互默认 `low`，可按需改为 `high` 或 `max` |
+| `KIMI_MAX_COMPLETION_TOKENS` | 单次最大输出 token，默认 `8192` |
+| `KIMI_REQUEST_TIMEOUT` | Java 等待 Kimi 的时限，默认 `10m` |
 
 ## 4. 后端启动
 
@@ -45,7 +51,10 @@ set "DB_PASSWORD=你的数据库密码"
 set "INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=true"
 set "INITIAL_ACCOUNT_PASSWORD=123456"
 set "APP_FILE_ROOT=D:\Three-fees\runtime\files"
-set "AI_SERVICE_ENABLED=false"
+set "AI_ENABLED=true"
+set "KIMI_BASE_URL=https://api.moonshot.cn/v1"
+set "KIMI_MODEL=kimi-k3"
+set "KIMI_API_KEY=在本机运行配置中填写"
 
 mvnw.cmd spring-boot:run
 ```

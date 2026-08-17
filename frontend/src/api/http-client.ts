@@ -13,15 +13,16 @@ export interface HttpClient {
     body: unknown,
     options?: RequestOptions,
   ): Promise<unknown>;
-  put(path: string, body: unknown): Promise<unknown>;
+  put(path: string, body: unknown, options?: RequestOptions): Promise<unknown>;
   getBlob(path: string): Promise<Blob>;
   getBlobResponse(path: string): Promise<{ blob: Blob; fileName?: string }>;
-  delete(path: string): Promise<void>;
+  delete(path: string, options?: RequestOptions): Promise<unknown>;
   setUnauthorizedHandler(handler: () => void): void;
 }
 
 export interface RequestOptions {
   headers?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 interface HttpClientOptions {
@@ -62,9 +63,13 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     requestOptions: RequestOptions = {},
   ) {
     const controller = new AbortController();
+    const requestTimeoutMs =
+      requestOptions.timeoutMs !== undefined && requestOptions.timeoutMs > 0
+        ? requestOptions.timeoutMs
+        : options.timeoutMs;
     const timeoutId = globalThis.setTimeout(
       () => controller.abort(),
-      options.timeoutMs,
+      requestTimeoutMs,
     );
     const headers = new Headers({ Accept: "application/json" });
     if (body !== undefined && !(body instanceof FormData)) {
@@ -136,7 +141,8 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
       request("POST", path, body, "json", options),
     patch: (path, body, options) =>
       request("PATCH", path, body, "json", options),
-    put: (path, body) => request("PUT", path, body),
+    put: (path, body, requestOptions) =>
+      request("PUT", path, body, "json", requestOptions),
     getBlob: async (path) =>
       (
         (await request("GET", path, undefined, "blob")) as {
@@ -149,9 +155,8 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
         blob: Blob;
         fileName?: string;
       }>,
-    delete: async (path) => {
-      await request("DELETE", path);
-    },
+    delete: (path, requestOptions) =>
+      request("DELETE", path, undefined, "json", requestOptions),
     setUnauthorizedHandler: (handler) => {
       handleUnauthorized = handler;
     },

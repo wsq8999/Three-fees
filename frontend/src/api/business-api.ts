@@ -147,7 +147,7 @@ interface ReportSections {
 
 interface BackendDraftMessage {
   id: string;
-  intent: "ASK" | "EDIT" | "IMAGE_ANALYSIS";
+  intent: "ASK" | "EDIT" | "CORRECTION" | "IMAGE_ANALYSIS";
   userContent: string;
   assistantContent: string;
   changedDraft: boolean;
@@ -158,7 +158,14 @@ interface BackendDraftMessage {
 interface BackendDraftVersion {
   id: string;
   version: number;
-  changeType: "INITIAL" | "EDIT" | "IMAGE_ANALYSIS" | "RESTORE" | "MANUAL";
+  changeType:
+    | "INITIAL"
+    | "AI_INITIAL"
+    | "EDIT"
+    | "CORRECTION"
+    | "IMAGE_ANALYSIS"
+    | "RESTORE"
+    | "MANUAL";
   sections: ReportSections;
   imageFileIds: string[];
   createdAt: string;
@@ -456,6 +463,7 @@ function mapDraft(
           ? "FINALIZED"
           : "EDITING",
     blocks: sectionsToBlocks(item.sections),
+    imageFileIds: item.currentImageFileIds ?? [],
     messages: (item.messages ?? []).flatMap((message) => [
       {
         id: `${message.id}-user`,
@@ -755,16 +763,19 @@ export const businessApi = {
       ).map(mapDraftVersion);
       return mapDraft(raw, versions);
     },
-    async uploadImage(id: string, file: File): Promise<string> {
+    async uploadImage(
+      id: string,
+      file: File,
+    ): Promise<{ fileId: string; entityVersion: number }> {
       const form = new FormData();
       form.set("file", file);
-      const response = asResult<{ fileId: string }>(
+      const response = asResult<{ fileId: string; entityVersion: number }>(
         await httpClient.postForm(
           `/api/v1/report-drafts/${encodeURIComponent(id)}/images`,
           form,
         ),
       );
-      return response.fileId;
+      return response;
     },
     async sendMessage(
       id: string,
@@ -779,7 +790,43 @@ export const businessApi = {
             content: input.content,
             imageFileIds: input.imageFileIds ?? [],
           },
-          { headers: { "If-Match": String(version ?? 0) } },
+          {
+            headers: { "If-Match": String(version ?? 0) },
+            timeoutMs: 600_000,
+          },
+        ),
+      );
+      const versions = asResult<BackendDraftVersion[]>(
+        await httpClient.get(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
+        ),
+      ).map(mapDraftVersion);
+      return mapDraft(raw, versions);
+    },
+    async removeImage(id: string, fileId: string, version: number): Promise<ReportDraft> {
+      const raw = asResult<BackendReportDraft>(
+        await httpClient.delete(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/images/${encodeURIComponent(fileId)}`,
+          { headers: { "If-Match": String(version) } },
+        ),
+      );
+      const versions = asResult<BackendDraftVersion[]>(
+        await httpClient.get(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
+        ),
+      ).map(mapDraftVersion);
+      return mapDraft(raw, versions);
+    },
+    async reorderImages(
+      id: string,
+      imageFileIds: string[],
+      version: number,
+    ): Promise<ReportDraft> {
+      const raw = asResult<BackendReportDraft>(
+        await httpClient.put(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/images/order`,
+          { imageFileIds },
+          { headers: { "If-Match": String(version) } },
         ),
       );
       const versions = asResult<BackendDraftVersion[]>(

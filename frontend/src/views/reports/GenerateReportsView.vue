@@ -108,7 +108,8 @@ async function load(): Promise<void> {
       : candidates.value[0];
     if (option) {
       selectedKey.value = candidateKey(option);
-      await initialize(option, false);
+      selected.value = option;
+      if (target) await initialize(option);
     } else {
       selected.value = null;
       contentHtml.value = "";
@@ -122,30 +123,17 @@ async function load(): Promise<void> {
   }
 }
 
-async function initialize(candidate: ReportGenerationCandidate, confirmDiscard = true): Promise<void> {
+async function initialize(candidate: ReportGenerationCandidate): Promise<void> {
   if (isCorrection.value) return;
-  if (confirmDiscard && !(await confirmDiscardCurrent("切换报账点"))) {
-    selectedKey.value = selected.value ? candidateKey(selected.value) : "";
-    return;
-  }
   initializing.value = true;
   try {
-    const result = await businessApi.reportGeneration.initialContent(
-      candidate.billingPointCode,
-      candidate.period,
-    );
-    selected.value = result.candidate;
-    selectedKey.value = candidateKey(result.candidate);
-    contentHtml.value = result.contentHtml;
-    generated.value = false;
-    aiAnswer.value = "";
-    await renderContent();
-    await router.replace({
-      name: "reports-generate",
+    const draft = await businessApi.drafts.createOrResume(candidate.billingPointPeriodId);
+    suppressLeaveConfirm.value = true;
+    await router.push({
+      name: "report-draft",
+      params: { draftId: draft.id },
       query: {
-        billingPointCode: result.candidate.billingPointCode,
-        period: result.candidate.period,
-        ...(typeof route.query.from === "string" ? { from: route.query.from } : {}),
+        from: typeof route.query.from === "string" ? route.query.from : "/reports/generate",
       },
     });
   } catch (error) {
@@ -157,7 +145,7 @@ async function initialize(candidate: ReportGenerationCandidate, confirmDiscard =
 
 async function selectChanged(key: string): Promise<void> {
   const option = candidates.value.find((item) => candidateKey(item) === key);
-  if (option) await initialize(option);
+  if (option) selected.value = option;
 }
 
 async function renderContent(): Promise<void> {
@@ -420,7 +408,7 @@ onMounted(load);
       </div>
     </section>
 
-    <section v-if="selected" class="generation-workspace">
+    <section v-if="selected && isCorrection" class="generation-workspace">
       <article
         ref="editorRef"
         class="report-editor business-card"
@@ -445,6 +433,19 @@ onMounted(load);
       </aside>
     </section>
 
+    <section v-else-if="selected" class="agent-entry business-card">
+      <div>
+        <h2>城市 AI 电费稽核助手</h2>
+        <p>
+          进入后左侧为完整报告，支持直接粘贴多张现场图片；右侧可以分析全部图片、查询本报账点历史、连续纠正原因。
+          最终确认后，结论才会沉淀到当前城市自己的经验库。
+        </p>
+      </div>
+      <ElButton type="primary" size="large" :loading="initializing" @click="initialize(selected)">
+        进入 AI 稽核助手
+      </ElButton>
+    </section>
+
     <section v-else class="empty-card business-card">
       <ElEmpty description="当前暂无超标且未生成正式报告的报账点账期">
         <ElButton :icon="Refresh" type="primary" @click="load">重新加载</ElButton>
@@ -456,11 +457,11 @@ onMounted(load);
       <ElButton
         type="primary"
         :icon="Download"
-        :loading="generating"
+        :loading="generating || initializing"
         :disabled="!selected"
-        @click="generate"
+        @click="isCorrection ? generate() : initialize(selected!)"
       >
-        {{ isCorrection ? "重新生成报告" : "生成报告" }}
+        {{ isCorrection ? "重新生成报告" : "进入 AI 稽核助手" }}
       </ElButton>
     </footer>
 
@@ -596,6 +597,27 @@ onMounted(load);
 
 .empty-card {
   padding: 36px;
+}
+
+.agent-entry {
+  display: flex;
+  min-height: 260px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 32px;
+  padding: 42px;
+}
+
+.agent-entry h2 {
+  margin: 0 0 14px;
+  color: #001733;
+}
+
+.agent-entry p {
+  max-width: 760px;
+  margin: 0;
+  color: #52657a;
+  line-height: 1.9;
 }
 
 .generation-actions {

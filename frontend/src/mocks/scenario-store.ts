@@ -702,6 +702,7 @@ function initialDraft(): ReportDraft {
     period: "2026-06",
     status: "EDITING",
     blocks,
+    imageFileIds: [],
     messages: [],
     versions: [
       {

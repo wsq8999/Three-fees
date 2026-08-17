@@ -41,7 +41,9 @@ export function createHttpAppApi(client: HttpClient): AppApi {
         CurrentSessionSchema.parse(
           await client.get("/api/v1/sessions/current"),
         ),
-      remove: async () => client.delete("/api/v1/sessions/current"),
+      remove: async () => {
+        await client.delete("/api/v1/sessions/current");
+      },
     },
     dashboard: {
       getSummary: async () =>

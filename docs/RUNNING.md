@@ -1,6 +1,6 @@
 # 真实启动说明
 
-本文档记录当前智能物业管理系统的真实本地启动方式。此方式用于人工测试和实地联调，不使用 H2 演示库，不启动 AI demo，不走 mock 页面入口。
+本文档记录当前智能物业管理系统的真实本地启动方式。此方式用于人工测试和实地联调，不使用 H2 演示库，不启动 Python/FastAPI 服务，不走 mock 页面入口。
 
 ## 当前运行链路
 
@@ -24,7 +24,10 @@ set "DB_PASSWORD=你的数据库密码"
 set "INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=true"
 set "INITIAL_ACCOUNT_PASSWORD=123456"
 set "APP_FILE_ROOT=D:\Three-fees\runtime\files"
-set "AI_SERVICE_ENABLED=false"
+set "AI_ENABLED=true"
+set "KIMI_BASE_URL=https://api.moonshot.cn/v1"
+set "KIMI_MODEL=kimi-k3"
+set "KIMI_API_KEY=在本机运行配置中填写"
 
 mvnw.cmd spring-boot:run
 ```
@@ -65,5 +68,6 @@ http://127.0.0.1:5173/
 - `dev` 是本地真实开发 profile，连接 MySQL。
 - `THREE_FEES_PROCESS_ROLE=all` 只用于本机开发和自动化测试。
 - 正式部署时必须拆分 API 和 worker。
-- AI 默认关闭，后续只在“生成报告 -> 分析图片”流程中接入。
+- AI 由 Spring AI 在本项目内直接调用 Kimi；关闭时设 `AI_ENABLED=false`。
+- `KIMI_API_KEY` 不写入源码、Markdown、日志或提交记录。
 - 密码、Token、数据库凭据不写入源码、Markdown、日志或提交记录。

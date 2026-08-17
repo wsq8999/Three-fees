@@ -217,7 +217,7 @@ export interface DashboardData {
   }>;
 }
 
-export type DraftIntent = "AUTO" | "ASK" | "EDIT" | "IMAGE_ANALYSIS";
+export type DraftIntent = "AUTO" | "ASK" | "EDIT" | "CORRECTION" | "IMAGE_ANALYSIS";
 
 export interface DraftBlock {
   id: string;
@@ -239,7 +239,7 @@ export interface DraftMessage {
 export interface DraftVersion {
   id: string;
   version: number;
-  reason: "INITIAL" | "EDIT" | "IMAGE_ANALYSIS" | "RESTORE";
+  reason: "INITIAL" | "AI_INITIAL" | "EDIT" | "CORRECTION" | "IMAGE_ANALYSIS" | "RESTORE";
   summary: string;
   createdAt: string;
   blocks: DraftBlock[];
@@ -254,6 +254,7 @@ export interface ReportDraft {
   period: string;
   status: "EDITING" | "GENERATING" | "FINALIZED";
   blocks: DraftBlock[];
+  imageFileIds: string[];
   messages: DraftMessage[];
   versions: DraftVersion[];
   updatedAt: string;
@@ -302,6 +303,7 @@ export interface ReportSummary {
 }
 
 export interface ReportGenerationCandidate {
+  billingPointPeriodId: string;
   billingPointCode: string;
   billingPointName: string;
   cityCode: string;

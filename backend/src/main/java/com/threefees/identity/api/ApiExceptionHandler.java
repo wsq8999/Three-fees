@@ -1,5 +1,6 @@
 package com.threefees.identity.api;
 
+import com.threefees.ai.application.AiServiceException;
 import com.threefees.identity.application.AuthenticationRequiredException;
 import com.threefees.identity.application.BusinessRuleException;
 import com.threefees.identity.application.CsrfValidationException;
@@ -121,6 +122,21 @@ public class ApiExceptionHandler {
         List.of());
   }
 
+  @ExceptionHandler(AiServiceException.class)
+  ResponseEntity<ProblemDetail> aiServiceFailed(
+      AiServiceException exception, HttpServletRequest request) {
+    HttpStatus status =
+        exception.retryable() ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.UNPROCESSABLE_ENTITY;
+    return problem(
+        status,
+        "ai-service-failed",
+        exception.code(),
+        "AI 稽核助手暂未完成处理",
+        exception.getMessage(),
+        request,
+        List.of());
+  }
+
   @ExceptionHandler(ImportValidationException.class)
   ResponseEntity<ProblemDetail> importValidationFailed(
       ImportValidationException exception, HttpServletRequest request) {
@@ -214,7 +230,8 @@ public class ApiExceptionHandler {
     LOGGER.error(
         "Unhandled request failure traceId={} exceptionType={}",
         traceId,
-        exception.getClass().getName());
+        exception.getClass().getName(),
+        exception);
     return problem(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "internal-error",
