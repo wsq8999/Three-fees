@@ -27,6 +27,7 @@ import java.util.zip.ZipInputStream;
 import javax.imageio.ImageIO;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -39,11 +40,15 @@ public class StoredFileService {
 
   private final StoredFileRepository repository;
   private final String configuredRoot;
+  private final JdbcTemplate jdbcTemplate;
 
   public StoredFileService(
-      StoredFileRepository repository, @Value("${app.file.root:}") String configuredRoot) {
+      StoredFileRepository repository,
+      @Value("${app.file.root:}") String configuredRoot,
+      JdbcTemplate jdbcTemplate) {
     this.repository = repository;
     this.configuredRoot = configuredRoot;
+    this.jdbcTemplate = jdbcTemplate;
   }
 
   public StoredFile storeUpload(
@@ -99,6 +104,25 @@ public class StoredFileService {
     } catch (IOException exception) {
       throw new ResourceNotFoundException("文件内容");
     }
+  }
+
+  public boolean isDraftImageAccessibleToCity(long fileId, String cityCode) {
+    if (cityCode == null || cityCode.isBlank()) {
+      return false;
+    }
+    Integer count =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+              FROM report_draft_image i
+              JOIN report_draft d ON d.id=i.draft_id
+              JOIN billing_point_snapshot s ON s.id=d.billing_point_snapshot_id
+             WHERE i.file_id=? AND s.city_code=?
+            """,
+            Integer.class,
+            fileId,
+            cityCode);
+    return count != null && count > 0;
   }
 
   public void deletePhysical(StoredFile storedFile) {

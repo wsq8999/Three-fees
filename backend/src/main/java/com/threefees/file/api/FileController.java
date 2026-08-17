@@ -34,7 +34,9 @@ public class FileController {
       @AuthenticationPrincipal CurrentUser currentUser) {
     var storedFile = storedFileService.find(publicId);
     if (!currentUser.roles().contains(Role.SUPER_ADMIN)
-        && !currentUser.username().equals(storedFile.createdBy())) {
+        && !currentUser.username().equals(storedFile.createdBy())
+        && !storedFileService.isDraftImageAccessibleToCity(
+            storedFile.id(), currentUser.cityCode())) {
       throw new AccessDeniedException("File is outside the current user's scope");
     }
     ContentDisposition disposition =

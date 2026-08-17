@@ -5,48 +5,66 @@
 !.env.*.example
 *.local
 secrets/
+*.pem
+*.p12
+*.pfx
 
 # IDE and operating system
 .idea/
 .vscode/
 *.iml
+.classpath
+.project
+.settings/
 .DS_Store
 Thumbs.db
+Desktop.ini
 
 # Java / Maven
-backend/target/
+target/
 *.class
 *.log
+*.log.*
+*.pid
 
 # Node / frontend
-frontend/node_modules/
+node_modules/
 frontend/dist/
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
+frontend/blob-report/
+frontend/.vite/
+.npm/
+.pnpm-store/
+.yarn/cache/
 *.tsbuildinfo
 
 # Python / AI sidecar
-ai-service/.venv/
-ai-service/venv/
-ai-service/__pycache__/
-ai-service/.pytest_cache/
-ai-service/.ruff_cache/
-ai-service/.mypy_cache/
-ai-service/.coverage
-ai-service/htmlcov/
+.venv/
+.venv-*/
+venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 *.py[cod]
 
 # Runtime state must live outside the repository
-data/
-files/
-storage/
-uploads/
-logs/
-backups/
-tmp/
-temp/
+/.runtime/
+/runtime/
+/outputs/
+/data/
+/files/
+/storage/
+/uploads/
+/logs/
+/backups/
+/tmp/
+/temp/
 
 # Office temporary files
 ~$*
-

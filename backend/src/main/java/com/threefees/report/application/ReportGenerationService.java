@@ -111,9 +111,7 @@ public class ReportGenerationService {
     GenerationSource source = sourceForReport(reportId, actor);
     String contentHtml =
         jdbcTemplate.queryForObject(
-            "SELECT situation FROM audit_report WHERE public_id = ?",
-            String.class,
-            reportId);
+            "SELECT situation FROM audit_report WHERE public_id = ?", String.class, reportId);
     if (contentHtml == null || contentHtml.isBlank()) {
       contentHtml = initialHtml(source);
     }
@@ -307,8 +305,7 @@ public class ReportGenerationService {
     }
     if (rows.size() > 1) {
       throw new ResourceConflictException(
-          "REPORT_GENERATION_PERIOD_AMBIGUOUS",
-          "报账点编码和账期匹配到多条快照，请检查城市维度数据。");
+          "REPORT_GENERATION_PERIOD_AMBIGUOUS", "报账点编码和账期匹配到多条快照，请检查城市维度数据。");
     }
     GenerationSource source = rows.getFirst();
     requireScope(actor, source.cityCode());
@@ -326,9 +323,7 @@ public class ReportGenerationService {
   private GenerationSource sourceForReport(String reportId, CurrentUser actor) {
     List<GenerationSource> rows =
         jdbcTemplate.query(
-            sourceSql("WHERE r.public_id = ?"),
-            (rs, row) -> mapSource(rs),
-            reportId);
+            sourceSql("WHERE r.public_id = ?"), (rs, row) -> mapSource(rs), reportId);
     GenerationSource source =
         rows.stream().findFirst().orElseThrow(() -> new ResourceNotFoundException("正式报告"));
     requireScope(actor, source.cityCode());
@@ -400,7 +395,8 @@ public class ReportGenerationService {
         rs.getString("report_number"));
   }
 
-  private List<AiServiceClient.AiImage> validateImages(List<AnalyzeImageCommand.ImageInput> inputs) {
+  private List<AiServiceClient.AiImage> validateImages(
+      List<AnalyzeImageCommand.ImageInput> inputs) {
     if (inputs == null || inputs.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请至少选择一张需要分析的图片。");
     }
@@ -456,14 +452,14 @@ public class ReportGenerationService {
     String paragraph = "<p>" + escape(analysisText).replace("\n", "<br />") + "</p>";
     var matcher = HTML_SECTION_ANALYSIS.matcher(contentHtml);
     if (matcher.find()) {
-      return matcher.replaceFirst("$1$2" + java.util.regex.Matcher.quoteReplacement(paragraph) + "$3");
+      return matcher.replaceFirst(
+          "$1$2" + java.util.regex.Matcher.quoteReplacement(paragraph) + "$3");
     }
     return contentHtml + paragraph;
   }
 
   private ResourceConflictException formalReportExists() {
-    return new ResourceConflictException(
-        "FORMAL_REPORT_EXISTS", "该报账点当前账期已生成正式报告，请刷新页面后查看。");
+    return new ResourceConflictException("FORMAL_REPORT_EXISTS", "该报账点当前账期已生成正式报告，请刷新页面后查看。");
   }
 
   private Candidate candidate(GenerationSource source) {
@@ -520,7 +516,8 @@ public class ReportGenerationService {
 
   private String titleFromHtml(String html, GenerationSource source) {
     java.util.regex.Matcher matcher =
-        java.util.regex.Pattern.compile("(?is)<h1[^>]*>(.*?)</h1>").matcher(html == null ? "" : html);
+        java.util.regex.Pattern.compile("(?is)<h1[^>]*>(.*?)</h1>")
+            .matcher(html == null ? "" : html);
     if (matcher.find()) {
       String text = matcher.group(1).replaceAll("<[^>]+>", "").trim();
       if (!text.isBlank()) {
@@ -590,7 +587,9 @@ public class ReportGenerationService {
   }
 
   private String percent(BigDecimal value) {
-    return value == null ? "0%" : value.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString() + "%";
+    return value == null
+        ? "0%"
+        : value.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString() + "%";
   }
 
   private static String overLimitTypeLabel(String value) {

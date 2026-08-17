@@ -9,7 +9,9 @@ import { mockApiPlugin } from "./build/mock-api-plugin";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const proxyTarget = env.VITE_API_PROXY_TARGET?.trim();
+  const proxyTarget =
+    env.VITE_API_PROXY_TARGET?.trim() ||
+    (mode === "development" ? "http://127.0.0.1:8080" : undefined);
 
   return {
     plugins: [

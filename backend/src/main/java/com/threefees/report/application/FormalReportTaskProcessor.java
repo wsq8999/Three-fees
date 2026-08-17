@@ -1,5 +1,6 @@
 package com.threefees.report.application;
 
+import com.threefees.ai.application.CityMemoryService;
 import com.threefees.file.application.StoredFileService;
 import com.threefees.file.domain.StoredFile;
 import com.threefees.report.application.ReportDocumentGenerator.ReportImage;
@@ -19,16 +20,19 @@ public class FormalReportTaskProcessor implements TaskProcessor {
   private final AuditReportService reportService;
   private final ReportDocumentGenerator documentGenerator;
   private final StoredFileService storedFileService;
+  private final CityMemoryService cityMemoryService;
 
   public FormalReportTaskProcessor(
       ObjectMapper objectMapper,
       AuditReportService reportService,
       ReportDocumentGenerator documentGenerator,
-      StoredFileService storedFileService) {
+      StoredFileService storedFileService,
+      CityMemoryService cityMemoryService) {
     this.objectMapper = objectMapper;
     this.reportService = reportService;
     this.documentGenerator = documentGenerator;
     this.storedFileService = storedFileService;
+    this.cityMemoryService = cityMemoryService;
   }
 
   @Override
@@ -45,6 +49,7 @@ public class FormalReportTaskProcessor implements TaskProcessor {
       String existing = reportService.existingReportForSnapshot(input.snapshotId());
       if (existing != null) {
         reportService.reconcileDraftWithExistingReport(input.draftId(), existing, task.createdBy());
+        cityMemoryService.confirmGeneratedReport(draftId, existing, task.createdBy());
         return result(existing);
       }
     }
@@ -61,12 +66,15 @@ public class FormalReportTaskProcessor implements TaskProcessor {
         }
         images.add(
             new ReportImage(
-                file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
+                fileId,
+                file.originalName(),
+                file.mediaType(),
+                storedFileService.readBytes(file)));
       }
       var generated = documentGenerator.generate(input.sections(), images);
       byte[] wordBytes =
           correction && looksLikeHtml(input.sections().situation())
-              ? documentGenerator.generateWordFromHtml(input.sections().situation())
+              ? documentGenerator.generateWordFromHtml(input.sections().situation(), images)
               : generated.word();
       word =
           storedFileService.storeGenerated(
@@ -87,6 +95,7 @@ public class FormalReportTaskProcessor implements TaskProcessor {
               ? reportService.finalizeCorrectionReport(input, word.id(), pdf.id(), task.createdBy())
               : reportService.finalizeSystemReport(input, word.id(), pdf.id(), task.createdBy());
       finalized = finalization.created();
+      cityMemoryService.confirmGeneratedReport(draftId, finalization.reportId(), task.createdBy());
       if (!finalization.created()) {
         storedFileService.deleteGenerated(pdf);
         pdf = null;

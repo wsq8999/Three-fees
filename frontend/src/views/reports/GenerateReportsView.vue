@@ -460,11 +460,11 @@ onMounted(load);
       <ElButton
         type="primary"
         :icon="Download"
-        :loading="generating"
+        :loading="generating || initializing"
         :disabled="!selected"
-        @click="generate"
+        @click="isCorrection ? generate() : initialize(selected!)"
       >
-        重新生成报告
+        {{ isCorrection ? "重新生成报告" : "进入 AI 稽核助手" }}
       </ElButton>
     </footer>
 

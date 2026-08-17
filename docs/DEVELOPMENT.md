@@ -14,7 +14,7 @@
 - Spring Boot `dev` profile
 - MySQL 数据库 `three_fees`
 - Vue Vite 开发服务器
-- AI 默认关闭
+- Spring AI 直连 Kimi（不需要 FastAPI sidecar）
 
 ## 3. 后端环境变量
 
@@ -31,9 +31,12 @@
 | `INITIAL_ACCOUNT_PASSWORD` | 首批账号临时密码，当前约定为 `123456` |
 | `APP_FILE_ROOT` | 上传文件、报告文件存储根目录 |
 | `AI_ENABLED` | 是否启用生成报告 AI 助手，本地默认可设为 `false` |
-| `KIMI_API_KEY` | Kimi 模型密钥；只放本机环境变量或本地私有配置，上传前不要入库 |
+| `KIMI_API_KEY` | Kimi 密钥，仅通过本机或服务环境注入，不要写入仓库 |
 | `KIMI_BASE_URL` | Kimi OpenAI 兼容接口，默认 `https://api.moonshot.cn/v1` |
-| `KIMI_MODEL` | Kimi 模型名，默认 `kimi-k3` |
+| `KIMI_MODEL` | Kimi 模型名，默认 `kimi-k3`，可按实际账号可用模型调整 |
+| `KIMI_REASONING_EFFORT` | 推理强度，交互默认 `low`，可按需改为 `high` 或 `max` |
+| `KIMI_MAX_COMPLETION_TOKENS` | 单次最大输出 token，默认 `8192` |
+| `KIMI_REQUEST_TIMEOUT` | Java 等待 Kimi 的时限，默认 `10m` |
 
 ## 4. 后端启动
 
