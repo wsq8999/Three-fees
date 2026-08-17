@@ -30,9 +30,9 @@
 | `INITIAL_ACCOUNT_BOOTSTRAP_ENABLED` | 空库首次启动时设为 `true` |
 | `INITIAL_ACCOUNT_PASSWORD` | 首批账号临时密码，当前约定为 `123456` |
 | `APP_FILE_ROOT` | 上传文件、报告文件存储根目录 |
-| `AI_ENABLED` | 是否启用 AI 稽核助手 |
-| `KIMI_API_KEY` | Kimi 密钥，仅通过本机/服务环境注入 |
-| `KIMI_BASE_URL` | Kimi OpenAI 兼容地址，默认 `https://api.moonshot.cn/v1` |
+| `AI_ENABLED` | 是否启用生成报告 AI 助手，本地默认可设为 `false` |
+| `KIMI_API_KEY` | Kimi 密钥，仅通过本机或服务环境注入，不要写入仓库 |
+| `KIMI_BASE_URL` | Kimi OpenAI 兼容接口，默认 `https://api.moonshot.cn/v1` |
 | `KIMI_MODEL` | Kimi 模型名，默认 `kimi-k3`，可按实际账号可用模型调整 |
 | `KIMI_REASONING_EFFORT` | 推理强度，交互默认 `low`，可按需改为 `high` 或 `max` |
 | `KIMI_MAX_COMPLETION_TOKENS` | 单次最大输出 token，默认 `8192` |
@@ -51,10 +51,12 @@ set "DB_PASSWORD=你的数据库密码"
 set "INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=true"
 set "INITIAL_ACCOUNT_PASSWORD=123456"
 set "APP_FILE_ROOT=D:\Three-fees\runtime\files"
-set "AI_ENABLED=true"
+set "AI_ENABLED=false"
 set "KIMI_BASE_URL=https://api.moonshot.cn/v1"
 set "KIMI_MODEL=kimi-k3"
-set "KIMI_API_KEY=在本机运行配置中填写"
+rem 如需启用生成报告 AI 助手，再设置：
+rem set "AI_ENABLED=true"
+rem set "KIMI_API_KEY=你的Kimi密钥"
 
 mvnw.cmd spring-boot:run
 ```

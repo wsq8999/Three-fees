@@ -5,8 +5,6 @@ param(
     [string]$ReleaseArchive,
 
     [string]$DeploymentRoot = 'C:\ProgramData\ThreeFees',
-    [string]$PythonExe = 'C:\Program Files\Python312\python.exe',
-    [string]$Wheelhouse,
     [string]$HealthUri = 'http://127.0.0.1:8080/actuator/health',
     [switch]$Apply
 )
@@ -15,7 +13,6 @@ param(
 
 $root = Resolve-SafeAbsolutePath -Path $DeploymentRoot -Label 'DeploymentRoot'
 $archivePath = [System.IO.Path]::GetFullPath($ReleaseArchive)
-$pythonPath = [System.IO.Path]::GetFullPath($PythonExe)
 $manifest = Test-ReleaseArchive -ArchivePath $archivePath
 $version = [string]$manifest.version
 $releasePath = Get-ReleasePath -DeploymentRoot $root -Version $version
@@ -25,9 +22,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $root 'current'))) {
 }
 if (Test-Path -LiteralPath $releasePath) {
     throw "Release version already exists and will not be overwritten: $releasePath"
-}
-if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-    throw "Python executable does not exist: $pythonPath"
 }
 foreach ($serviceId in $script:ThreeFeesServiceIds) {
     if (-not (Get-Service -Name $serviceId -ErrorAction SilentlyContinue) -and $Apply) {
@@ -57,7 +51,6 @@ Assert-PathInside -ParentPath $stagingRoot -ChildPath $stagingPath -Label 'Stagi
 try {
     Expand-VerifiedReleaseArchive -ArchivePath $archivePath -DestinationPath $stagingPath | Out-Null
     Move-Item -LiteralPath $stagingPath -Destination $releasePath
-    Initialize-AiVirtualEnvironment -ReleasePath $releasePath -PythonExe $pythonPath -Wheelhouse $Wheelhouse
     Write-ReleaseReadyMarker -ReleasePath $releasePath
 }
 finally {

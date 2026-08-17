@@ -4,6 +4,7 @@ import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
 import com.threefees.importing.domain.ImportError;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -11,6 +12,8 @@ public record ImportBatchResponse(
     String id,
     DatasetType datasetType,
     String period,
+    LocalDate periodStart,
+    LocalDate periodEnd,
     String cityCode,
     ImportBatchStatus status,
     String taskId,
@@ -26,6 +29,8 @@ public record ImportBatchResponse(
         batch.publicId(),
         batch.datasetType(),
         batch.period(),
+        batch.periodStart(),
+        batch.periodEnd(),
         batch.cityCode(),
         batch.status(),
         batch.taskPublicId(),

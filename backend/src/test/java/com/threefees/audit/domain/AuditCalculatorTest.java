@@ -67,7 +67,7 @@ class AuditCalculatorTest {
     assertThat(zero.status()).isEqualTo(AuditStatus.NORMAL);
     assertThat(positive.status()).isEqualTo(AuditStatus.OVER_LIMIT);
     assertThat(positive.rated().ratioPercent()).isNull();
-    assertThat(positive.rated().note()).contains("阈值为0");
+    assertThat(positive.rated().note()).contains("阈值为 0");
   }
 
   @Test
@@ -112,5 +112,31 @@ class AuditCalculatorTest {
 
     assertThat(result.yoy().threshold()).isEqualByComparingTo("1.20");
     assertThat(result.yoy().overLimit()).isTrue();
+  }
+
+  @Test
+  void historicalDailyMetricsUsePaymentDaysAndDoNotReduceThresholdWhenRatedRatioIsBelowOne() {
+    var reference =
+        new AuditCalculationInput.ReferencePeriod(
+            YearMonth.of(2025, 6),
+            true,
+            new BigDecimal("300"),
+            10,
+            new BigDecimal("400"));
+    var result =
+        calculator.calculate(
+            new AuditCalculationInput(
+                YearMonth.of(2026, 6),
+                true,
+                new BigDecimal("361"),
+                10,
+                new BigDecimal("200"),
+                reference,
+                reference));
+
+    assertThat(result.currentDailyEnergy()).isEqualByComparingTo("36.1");
+    assertThat(result.yoy().threshold()).isEqualByComparingTo("36.00");
+    assertThat(result.yoy().overLimit()).isTrue();
+    assertThat(result.yoy().note()).contains("max(1, A/B)");
   }
 }

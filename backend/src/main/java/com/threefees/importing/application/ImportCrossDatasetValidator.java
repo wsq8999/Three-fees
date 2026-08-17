@@ -23,32 +23,15 @@ public class ImportCrossDatasetValidator {
   public void validate(ImportBatch batch, List<ImportRow> rows) {
     var errors = new ArrayList<ImportError>();
     switch (batch.datasetType()) {
-      case BILLING_POINT -> validateBillingPointReplacement(batch, rows, errors);
-      case PAYMENT -> validatePayments(batch, rows, errors);
+      case BILLING_POINT -> {
+        // Billing point files are incremental upserts for their own city + period + point codes.
+      }
+      case PAYMENT -> validateBillingPointReferences(batch, rows, errors);
       case METER_READING -> validateMeters(batch, rows, errors);
       case BENCHMARK -> validateBillingPointReferences(batch, rows, errors);
     }
     if (!errors.isEmpty()) {
       throw new ImportValidationException(errors);
-    }
-  }
-
-  private void validatePayments(
-      ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
-    validateBillingPointReferences(batch, rows, errors);
-    Set<String> incomingPairs = new HashSet<>();
-    for (ImportRow row : rows) {
-      incomingPairs.add(pair(row.billingPointCode(), row.paymentCode()));
-    }
-    for (ReferenceRow meter : meterReferences(batch)) {
-      if (!incomingPairs.contains(pair(meter.billingPointCode(), meter.paymentCode()))) {
-        add(
-            errors,
-            0,
-            "缴费单编码",
-            "ACTIVE_METER_PAYMENT_MISSING",
-            "当前有效电表读数仍引用将被替换的缴费单：" + meter.paymentCode());
-      }
     }
   }
 
@@ -62,9 +45,10 @@ public class ImportCrossDatasetValidator {
         add(
             errors,
             row.sourceRow(),
-            "缴费单编码",
+            "\u7f34\u8d39\u5355\u7f16\u7801",
             "PAYMENT_REFERENCE_NOT_FOUND",
-            "同城市同账期不存在对应报账点的缴费单");
+            "\u540c\u57ce\u5e02\u540c\u8d26\u671f\u4e0d\u5b58\u5728\u5bf9\u5e94"
+                + "\u62a5\u8d26\u70b9\u7684\u7f34\u8d39\u5355");
       }
     }
   }
@@ -77,45 +61,9 @@ public class ImportCrossDatasetValidator {
         add(
             errors,
             row.sourceRow(),
-            "报账点编码",
+            "\u62a5\u8d26\u70b9\u7f16\u7801",
             "BILLING_POINT_REFERENCE_NOT_FOUND",
-            "同城市不存在已导入的报账点主数据");
-      }
-    }
-  }
-
-  private void validateBillingPointReplacement(
-      ImportBatch batch, List<ImportRow> rows, List<ImportError> errors) {
-    Set<String> incoming = new HashSet<>();
-    rows.forEach(row -> incoming.add(row.billingPointCode()));
-    for (ReferenceRow reference : paymentReferences(batch)) {
-      if (!incoming.contains(reference.billingPointCode())) {
-        add(
-            errors,
-            0,
-            "报账点编码",
-            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
-            "当前有效缴费明细仍引用将被移除的报账点：" + reference.billingPointCode());
-      }
-    }
-    for (ReferenceRow reference : meterReferences(batch)) {
-      if (!incoming.contains(reference.billingPointCode())) {
-        add(
-            errors,
-            0,
-            "报账点编码",
-            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
-            "当前有效电表读数仍引用将被移除的报账点：" + reference.billingPointCode());
-      }
-    }
-    for (ReferenceRow reference : benchmarkReferences(batch)) {
-      if (!incoming.contains(reference.billingPointCode())) {
-        add(
-            errors,
-            0,
-            "报账点编码",
-            "ACTIVE_DEPENDENT_BILLING_POINT_MISSING",
-            "当前有效标杆值仍引用将被移除的报账点：" + reference.billingPointCode());
+            "\u540c\u57ce\u5e02\u4e0d\u5b58\u5728\u5df2\u5bfc\u5165\u7684\u62a5\u8d26\u70b9\u4e3b\u6570\u636e");
       }
     }
   }
@@ -152,33 +100,6 @@ public class ImportCrossDatasetValidator {
         batch.cityCode());
   }
 
-  private List<ReferenceRow> meterReferences(ImportBatch batch) {
-    return jdbcTemplate.query(
-        """
-        SELECT billing_point_code, payment_bill_code
-          FROM meter_reading
-         WHERE data_period = ? AND city_code = ?
-        """,
-        (resultSet, rowNumber) ->
-            new ReferenceRow(
-                resultSet.getString("billing_point_code"),
-                resultSet.getString("payment_bill_code")),
-        batch.period(),
-        batch.cityCode());
-  }
-
-  private List<ReferenceRow> benchmarkReferences(ImportBatch batch) {
-    return jdbcTemplate.query(
-        """
-        SELECT billing_point_code, NULL AS payment_bill_code
-          FROM benchmark_value
-         WHERE data_period = ? AND city_code = ?
-        """,
-        (resultSet, rowNumber) -> new ReferenceRow(resultSet.getString("billing_point_code"), null),
-        batch.period(),
-        batch.cityCode());
-  }
-
   private String pair(String billingPointCode, String paymentCode) {
     return billingPointCode + "\u0000" + (paymentCode == null ? "" : paymentCode);
   }
@@ -191,5 +112,3 @@ public class ImportCrossDatasetValidator {
 
   private record ReferenceRow(String billingPointCode, String paymentCode) {}
 }
-
-

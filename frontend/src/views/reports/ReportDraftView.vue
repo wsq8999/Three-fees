@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Clock, Picture, Promotion } from "@element-plus/icons-vue";
+import { ArrowLeft, Picture, Promotion } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
-import { businessApi, triggerBrowserDownload } from "@/api/business-api";
-import StatusTag from "@/components/business/StatusTag.vue";
+import { businessApi, saveBlob } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
-import type { DraftBlock, DraftVersion, ReportDraft } from "@/types/business";
+import type { DraftBlock, ReportDraft } from "@/types/business";
 import { standardConfirm } from "@/utils/message-box";
 
 const route = useRoute();
@@ -21,11 +20,10 @@ const generating = ref(false);
 const errorMessage = ref("");
 const prompt = ref("");
 const assistantError = ref("");
-const historyVisible = ref(false);
 const assistantVisible = ref(true);
-const previewVisible = ref(false);
-const previewVersion = ref<DraftVersion | null>(null);
 const fileInput = ref<HTMLInputElement>();
+const reportPaperRef = ref<HTMLElement>();
+const htmlReportRef = ref<HTMLElement>();
 const pendingImageIds = ref<string[]>([]);
 const uploadingImages = ref(false);
 
@@ -43,8 +41,42 @@ const bodyBlocks = computed(
   () => draft.value?.blocks.filter((block) => block.type !== "HEADING") ?? [],
 );
 
+const htmlReportBlock = computed(() => {
+  const situation = draft.value?.blocks.find((block) => block.type === "SITUATION") ?? null;
+  if (draft.value?.formalReportId === null || situation === null) return null;
+  return looksLikeHtml(situation.content) ? situation : null;
+});
+
+const billingPointLabel = computed(() => {
+  if (draft.value === null) return "";
+  return [
+    draft.value.billingPointCode ?? draft.value.billingPointId,
+    draft.value.billingPointName,
+    draft.value.city?.name,
+    draft.value.period,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ｜ ");
+});
+
+function formatRatio(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return `${numeric.toFixed(2)}%`;
+  const text = String(value);
+  return text.endsWith("%") ? text : `${text}%`;
+}
+
 function editableText(event: Event): string {
   return (event.target as HTMLElement).innerText.trim();
+}
+
+function editableHtml(event: Event): string {
+  return (event.target as HTMLElement).innerHTML.trim();
+}
+
+function looksLikeHtml(value: string): boolean {
+  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(value);
 }
 
 function updateBlock(block: DraftBlock, content: string): void {
@@ -53,14 +85,31 @@ function updateBlock(block: DraftBlock, content: string): void {
   if (target !== undefined) target.content = content;
 }
 
-async function saveDraft(showSuccess = false): Promise<void> {
-  if (draft.value === null || saving.value || draft.value.status !== "EDITING") return;
+function syncReportContentFromDom(): void {
+  if (draft.value === null) return;
+  if (htmlReportBlock.value !== null && htmlReportRef.value !== undefined) {
+    updateBlock(htmlReportBlock.value, htmlReportRef.value.innerHTML.trim());
+    return;
+  }
+  if (reportPaperRef.value === undefined) return;
+  reportPaperRef.value.querySelectorAll<HTMLElement>("[data-block-id]").forEach((element) => {
+    const id = element.dataset.blockId;
+    const block = draft.value?.blocks.find((item) => item.id === id);
+    if (block !== undefined) updateBlock(block, element.innerText.trim());
+  });
+}
+
+async function saveDraft(showSuccess = false): Promise<boolean> {
+  if (draft.value === null || saving.value || draft.value.status !== "EDITING") return false;
+  syncReportContentFromDom();
   saving.value = true;
   try {
     draft.value = await businessApi.drafts.save(draft.value.id, draft.value);
     if (showSuccess) ElMessage.success("报告内容已保存。");
+    return true;
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "报告内容保存失败");
+    return false;
   } finally {
     saving.value = false;
   }
@@ -234,44 +283,9 @@ async function moveImage(index: number, offset: -1 | 1): Promise<void> {
   }
 }
 
-async function restore(version: DraftVersion): Promise<void> {
-  if (draft.value === null) return;
-  try {
-    await standardConfirm(
-      `将以 V${version.version} 的内容创建新的当前版本，现有历史不会删除。`,
-      "恢复历史版本",
-      {
-        type: "warning",
-        confirmButtonText: "确认恢复",
-        cancelButtonText: "取消",
-      },
-    );
-  } catch {
-    return;
-  }
-
-  sending.value = true;
-  try {
-    draft.value = await businessApi.drafts.restore(draft.value.id, version.id);
-    historyVisible.value = false;
-    ElMessage.success("已基于历史内容创建新版本。");
-  } finally {
-    sending.value = false;
-  }
-}
-
-function previewVersionRow(row: unknown): void {
-  previewVersion.value = row as DraftVersion;
-  previewVisible.value = true;
-}
-
-function restoreVersionRow(row: unknown): void {
-  void restore(row as DraftVersion);
-}
-
 async function generate(): Promise<void> {
   if (draft.value === null) return;
-  await saveDraft(false);
+  syncReportContentFromDom();
   try {
     await standardConfirm(
       "确认后将生成正式报告并把最终原因沉淀到当前城市经验库。同一报账点和账期只保留一个正式报告。",
@@ -288,13 +302,15 @@ async function generate(): Promise<void> {
 
   generating.value = true;
   try {
+    syncReportContentFromDom();
+    if (!(await saveDraft(false))) return;
     const report = await businessApi.drafts.generate(draft.value.id);
-    await saveGeneratedWord(report.id, report.wordFileName);
     await router.replace({
       name: "report-detail",
       params: { reportId: report.id },
       query: { from: "/reports/generate" },
     });
+    await saveGeneratedWord(report.id, report.wordFileName);
   } catch (error) {
     ElMessage.error(
       error instanceof Error ? error.message : "正式报告生成失败",
@@ -306,10 +322,7 @@ async function generate(): Promise<void> {
 
 async function saveGeneratedWord(reportId: string, fileName: string): Promise<void> {
   try {
-    await triggerBrowserDownload(
-      `/api/v1/reports/${encodeURIComponent(reportId)}/word`,
-      fileName,
-    );
+    saveBlob(await businessApi.reports.downloadWord(reportId), fileName);
   } catch {
     ElMessage.warning("正式报告已生成，Word 自动下载失败，可在报告详情页手动下载。");
   }
@@ -339,31 +352,37 @@ onMounted(load);
   <template v-else-if="draft">
     <section class="draft-summary business-card">
       <div>
-        <small>报账点编码</small>
-        <strong>{{ draft.billingPointCode ?? draft.billingPointId }}</strong>
+        <small>报账点</small>
+        <strong>{{ billingPointLabel }}</strong>
       </div>
       <div>
-        <small>报账点名称</small>
-        <strong>{{ draft.billingPointName }}</strong>
+        <small>超标类型</small>
+        <strong>{{ draft.overLimitType ?? "—" }}</strong>
       </div>
       <div>
-        <small>所属区域</small>
-        <strong>{{ draft.city?.name ?? "—" }}</strong>
-      </div>
-      <div>
-        <small>账期</small>
-        <strong>{{ draft.period }}</strong>
-      </div>
-      <div>
-        <small>报告状态</small>
-        <StatusTag :value="draft.status" />
+        <small>超标率</small>
+        <strong class="danger-text">{{ formatRatio(draft.maxExceedRatio) }}</strong>
       </div>
     </section>
 
     <div class="draft-workspace" :class="{ 'assistant-open': assistantVisible }">
-      <article class="report-paper business-card" aria-label="可编辑报告正文">
+      <article
+        v-if="htmlReportBlock"
+        ref="htmlReportRef"
+        class="report-paper html-report-paper business-card"
+        aria-label="可编辑报告正文"
+        contenteditable="true"
+        spellcheck="false"
+        v-html="htmlReportBlock.content"
+        @input="updateBlock(htmlReportBlock, editableHtml($event))"
+        @blur="saveDraft(false)"
+        @paste="pasteImages"
+      />
+
+      <article v-else ref="reportPaperRef" class="report-paper business-card" aria-label="可编辑报告正文">
         <h1
           v-if="headingBlock"
+          :data-block-id="headingBlock.id"
           contenteditable="true"
           spellcheck="false"
           @input="updateBlock(headingBlock, editableText($event))"
@@ -375,6 +394,7 @@ onMounted(load);
         <section v-for="(block, index) in bodyBlocks" :key="block.id">
           <h2>{{ chineseNumbers[index] ?? index + 1 }}、{{ block.title }}</h2>
           <p
+            :data-block-id="block.id"
             contenteditable="true"
             spellcheck="false"
             @input="updateBlock(block, editableText($event))"
@@ -405,14 +425,6 @@ onMounted(load);
             <h2>AI报告助手</h2>
             <small>分析图片后自动补充报告内容，人工确认后再生成正式报告。</small>
           </div>
-          <ElButton
-            link
-            type="primary"
-            :icon="Clock"
-            @click="historyVisible = true"
-          >
-            历史版本
-          </ElButton>
         </header>
 
         <ElAlert
@@ -509,108 +521,54 @@ onMounted(load);
       />
     </footer>
 
-    <ElDialog
-      v-model="historyVisible"
-      title="AI 报告历史版本"
-      width="min(980px, 92vw)"
-    >
-      <ElAlert
-        title="仅在修改报告正文时生成版本；普通问答不进入版本历史。"
-        type="info"
-        :closable="false"
-        show-icon
-      />
-      <ElTable :data="[...draft.versions].reverse()" class="version-table">
-        <ElTableColumn label="版本" width="130">
-          <template #default="scope">
-            <strong>V{{ scope.row.version }}</strong>
-            <ElTag
-              v-if="scope.row.id === draft.versions.at(-1)?.id"
-              type="danger"
-              size="small"
-            >
-              当前版本
-            </ElTag>
-          </template>
-        </ElTableColumn>
-        <ElTableColumn prop="createdAt" label="时间" width="190" />
-        <ElTableColumn prop="reason" label="变更来源" width="130" />
-        <ElTableColumn prop="summary" label="指令摘要" min-width="260" />
-        <ElTableColumn label="操作" width="145">
-          <template #default="scope">
-            <div class="text-link-actions">
-              <ElButton link type="primary" @click="previewVersionRow(scope.row)">
-                预览
-              </ElButton>
-              <ElButton
-                v-if="scope.row.id !== draft.versions.at(-1)?.id"
-                link
-                type="primary"
-                @click="restoreVersionRow(scope.row)"
-              >
-                恢复
-              </ElButton>
-            </div>
-          </template>
-        </ElTableColumn>
-      </ElTable>
-      <ElAlert
-        title="恢复会基于所选版本创建一个新的当前版本，原有历史版本不会删除。"
-        type="info"
-        :closable="false"
-      />
-      <template #footer>
-        <ElButton @click="historyVisible = false">关闭</ElButton>
-      </template>
-    </ElDialog>
-
-    <ElDrawer v-model="previewVisible" title="版本预览" size="520px">
-      <template v-if="previewVersion">
-        <h3>V{{ previewVersion.version }} · {{ previewVersion.summary }}</h3>
-        <section v-for="block in previewVersion.blocks" :key="block.id">
-          <h4>{{ block.title }}</h4>
-          <p>{{ block.content }}</p>
-        </section>
-      </template>
-    </ElDrawer>
   </template>
 </template>
 
 <style scoped>
 .draft-summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
-  gap: 18px;
-  padding: 16px 24px;
+  grid-template-columns: max-content max-content max-content;
+  gap: 16px;
+  align-items: center;
+  padding: 16px 20px;
   margin-bottom: 16px;
+  overflow-x: auto;
 }
 
 .draft-summary > div {
   display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .draft-summary small {
+  flex: 0 0 auto;
   color: #7d8ca1;
-  font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
+}
+
+.draft-summary small::after {
+  content: "：";
 }
 
 .draft-summary strong {
-  overflow: hidden;
-  color: #1f2d3d;
-  text-overflow: ellipsis;
+  color: #001733;
   white-space: nowrap;
+}
+
+.danger-text {
+  color: #f5223d !important;
 }
 
 .draft-workspace {
   display: grid;
-  min-height: calc(100vh - 212px);
+  height: calc(100vh - 212px);
+  min-height: 420px;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   padding-bottom: 72px;
+  overflow: hidden;
 }
 
 .draft-workspace.assistant-open {
@@ -619,7 +577,10 @@ onMounted(load);
 
 .report-paper {
   position: relative;
+  height: 100%;
+  min-height: 0;
   padding: clamp(18px, 3vw, 28px) clamp(16px, 4vw, 36px) 42px;
+  overflow-y: auto;
   background: #fff;
 }
 
@@ -647,6 +608,46 @@ onMounted(load);
   white-space: pre-wrap;
   border: 1px solid transparent;
   border-radius: 4px;
+}
+
+.html-report-paper {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  color: #001733;
+  line-height: 1.9;
+}
+
+.html-report-paper :deep(h1) {
+  margin: 0 0 28px;
+  text-align: center;
+  font-size: 24px;
+}
+
+.html-report-paper :deep(h2) {
+  margin: 24px 0 10px;
+  font-size: 18px;
+}
+
+.html-report-paper :deep(p) {
+  margin: 8px 0;
+  white-space: pre-wrap;
+}
+
+.html-report-paper :deep(table) {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+}
+
+.html-report-paper :deep(td),
+.html-report-paper :deep(th) {
+  padding: 6px 8px;
+  border: 1px solid #d8e0eb;
+}
+
+.html-report-paper :deep(img) {
+  max-width: 100%;
+  height: auto;
 }
 
 .report-paper h1[contenteditable="true"],
@@ -695,7 +696,10 @@ onMounted(load);
 }
 
 .assistant-panel {
+  position: sticky;
+  top: 0;
   display: grid;
+  height: 100%;
   min-height: 0;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
@@ -723,7 +727,7 @@ onMounted(load);
 
 .chat-list {
   display: flex;
-  max-height: calc(100vh - 390px);
+  min-height: 0;
   flex-direction: column;
   gap: 12px;
   padding: 18px;
@@ -806,19 +810,19 @@ onMounted(load);
   border-top: 1px solid #dfe5ec;
 }
 
-.version-table {
-  margin: 14px 0;
-}
-
-.version-table strong {
-  margin-right: 8px;
-}
-
 @media (width <= 1280px) {
-  .draft-summary,
   .draft-workspace,
   .draft-workspace.assistant-open {
+    height: auto;
+    overflow: visible;
     grid-template-columns: 1fr;
+  }
+
+  .report-paper,
+  .assistant-panel {
+    height: auto;
+    max-height: none;
+    overflow: visible;
   }
 }
 

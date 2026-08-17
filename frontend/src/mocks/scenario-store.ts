@@ -704,16 +704,6 @@ function initialDraft(): ReportDraft {
     blocks,
     imageFileIds: [],
     messages: [],
-    versions: [
-      {
-        id: "draft-version-1",
-        version: 1,
-        reason: "INITIAL",
-        summary: "系统基于审计结果生成初稿",
-        createdAt: FIXED_TIME,
-        blocks: clone(blocks),
-      },
-    ],
     updatedAt: FIXED_TIME,
     formalReportId: null,
     entityVersion: 1,
@@ -929,7 +919,6 @@ export interface ScenarioStore {
   getBillingPoint(id: string): BillingPointDetail | undefined;
   getDraft(id: string): ReportDraft | undefined;
   sendDraftMessage(id: string, input: SendDraftMessageInput): ReportDraft;
-  restoreDraftVersion(id: string, versionId: string): ReportDraft;
   generateFormalReport(draftId: string): ReportSummary;
   listReports(query: ReportQuery): PageResult<ReportSummary>;
   getReport(id: string): ReportSummary | undefined;
@@ -1016,19 +1005,7 @@ export function createScenarioStore(): ScenarioStore {
     return periods[0] ?? null;
   }
 
-  function appendVersion(
-    draft: ReportDraft,
-    reason: "EDIT" | "IMAGE_ANALYSIS" | "RESTORE",
-    summary: string,
-  ): void {
-    draft.versions.push({
-      id: `draft-version-${++sequence}`,
-      version: draft.versions.length + 1,
-      reason,
-      summary,
-      createdAt: now(),
-      blocks: clone(draft.blocks),
-    });
+  function touchDraft(draft: ReportDraft): void {
     draft.updatedAt = now();
     draft.entityVersion += 1;
   }
@@ -1210,6 +1187,7 @@ export function createScenarioStore(): ScenarioStore {
         pendingTasks: [
           {
             id: "task-1",
+            billingPointPeriodId: "bp-2",
             title: "复核超标报账点",
             description: `${points.filter((item) => item.auditStatus === "OVER_LIMIT").length} 个报账点待确认原因`,
             target: "/billing-points?status=OVER_LIMIT&page=1&size=20",
@@ -1224,6 +1202,7 @@ export function createScenarioStore(): ScenarioStore {
           },
           {
             id: "task-2",
+            billingPointPeriodId: "bp-2",
             title: "完善 AI 工作稿",
             description: "1 份结构化草稿等待确认",
             target: "/reports/drafts/draft-1",
@@ -1293,7 +1272,7 @@ export function createScenarioStore(): ScenarioStore {
           (item) => item.type === "RECTIFICATION",
         );
         if (block !== undefined) block.content = input.content;
-        appendVersion(draft, "EDIT", "根据对话修改整改建议");
+        touchDraft(draft);
       } else if (resolvedIntent === "IMAGE_ANALYSIS") {
         if (input.imageNames.length === 0)
           throw new Error("DRAFT_IMAGE_REQUIRED");
@@ -1305,14 +1284,14 @@ export function createScenarioStore(): ScenarioStore {
           content: `${input.content}：已识别设备运行标识与现场环境，建议人工复核。`,
           imageName,
         });
-        appendVersion(draft, "IMAGE_ANALYSIS", `分析图片 ${imageName}`);
+        touchDraft(draft);
       }
       const answer =
         resolvedIntent === "ASK"
           ? "根据归档审计输入，超标主要来自本期实际总电量高于同比与额定标杆基线；问答未修改正文。"
           : resolvedIntent === "EDIT"
-            ? "已按要求更新整改建议并创建新版本。"
-            : "已加入现场图片分析块并创建新版本。";
+            ? "已按要求更新整改建议。"
+            : "已加入现场图片分析块。";
       draft.messages.push({
         id: `message-${++sequence}`,
         role: "ASSISTANT",
@@ -1321,14 +1300,6 @@ export function createScenarioStore(): ScenarioStore {
         imageNames: [],
         createdAt: now(),
       });
-      return clone(draft);
-    },
-    restoreDraftVersion(id, versionId) {
-      const draft = requiredDraft(id);
-      const version = draft.versions.find((item) => item.id === versionId);
-      if (version === undefined) throw new Error("DRAFT_VERSION_NOT_FOUND");
-      draft.blocks = clone(version.blocks);
-      appendVersion(draft, "RESTORE", `恢复自版本 V${version.version}`);
       return clone(draft);
     },
     generateFormalReport(draftId) {

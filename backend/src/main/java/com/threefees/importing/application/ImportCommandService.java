@@ -14,6 +14,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.LocalDate;
+import java.time.YearMonth;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -27,10 +31,19 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ImportCommandService {
+
+  private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
+  private static final String LAST_PERIOD_START = "最后报账期始";
+  private static final String LAST_PERIOD_END = "最后报账期终";
+  private static final String PAYMENT_PERIOD_START = "缴费期始";
+  private static final String PAYMENT_PERIOD_END = "缴费期终";
+  private static final String YEAR = "年份";
+  private static final String MONTH = "月份";
 
   private final StoredFileService storedFileService;
   private final BusinessTaskRepository taskRepository;
@@ -83,7 +96,6 @@ public class ImportCommandService {
     if (groups.isEmpty()) {
       throw new BusinessRuleException("IMPORT_DATA_EMPTY", "No importable rows found");
     }
-
     var storedFile =
         storedFileService.storeUpload(
             file, Set.of("xlsx", "xls", "csv"), "IMPORT_SOURCE", actor.username());
@@ -132,6 +144,8 @@ public class ImportCommandService {
               batchPublicId,
               datasetType,
               group.period(),
+              scopeStart(datasetType, group),
+              scopeEnd(datasetType, group),
               group.cityCode(),
               storedFile.id(),
               task.publicId(),
@@ -184,6 +198,89 @@ public class ImportCommandService {
     } catch (java.time.format.DateTimeParseException exception) {
       throw new BusinessRuleException("PERIOD_INVALID", "Period must use YYYY-MM");
     }
+  }
+
+  private LocalDate scopeStart(DatasetType datasetType, ImportRowGroup group) {
+    return scopeDate(datasetType, group, true);
+  }
+
+  private LocalDate scopeEnd(DatasetType datasetType, ImportRowGroup group) {
+    return scopeDate(datasetType, group, false);
+  }
+
+  private LocalDate scopeDate(DatasetType datasetType, ImportRowGroup group, boolean start) {
+    LocalDate selected = null;
+    for (ImportRow row : group.rows()) {
+      LocalDate value = rowScopeDate(datasetType, group.period(), row, start);
+      if (value == null) {
+        continue;
+      }
+      if (selected == null
+          || (start ? value.isBefore(selected) : value.isAfter(selected))) {
+        selected = value;
+      }
+    }
+    if (selected != null) {
+      return selected;
+    }
+    YearMonth month = YearMonth.parse(group.period());
+    return start ? month.atDay(1) : month.atEndOfMonth();
+  }
+
+  private LocalDate rowScopeDate(
+      DatasetType datasetType, String fallbackPeriod, ImportRow row, boolean start) {
+    Map<String, String> values = readRowValues(row.valuesJson());
+    return switch (datasetType) {
+      case BILLING_POINT ->
+          parseDate(values.get(start ? LAST_PERIOD_START : LAST_PERIOD_END));
+      case PAYMENT, METER_READING ->
+          parseDate(values.get(start ? PAYMENT_PERIOD_START : PAYMENT_PERIOD_END));
+      case BENCHMARK -> {
+        YearMonth month = parseBenchmarkMonth(values, fallbackPeriod);
+        yield start ? month.atDay(1) : month.atEndOfMonth();
+      }
+    };
+  }
+
+  private YearMonth parseBenchmarkMonth(Map<String, String> values, String fallbackPeriod) {
+    try {
+      int year = Integer.parseInt(value(values, YEAR));
+      int month = Integer.parseInt(value(values, MONTH).replaceFirst("^0", ""));
+      return YearMonth.of(year, month);
+    } catch (RuntimeException exception) {
+      return YearMonth.parse(fallbackPeriod);
+    }
+  }
+
+  private LocalDate parseDate(String raw) {
+    String value = raw == null ? "" : raw.trim();
+    if (value.isBlank() || "-".equals(value)) {
+      return null;
+    }
+    for (DateTimeFormatter formatter :
+        List.of(
+            DateTimeFormatter.ISO_LOCAL_DATE,
+            DateTimeFormatter.ofPattern("yyyy/M/d"),
+            DateTimeFormatter.ofPattern("yyyy.M.d"))) {
+      try {
+        return LocalDate.parse(value, formatter);
+      } catch (DateTimeParseException ignored) {
+        // Try next source format.
+      }
+    }
+    return null;
+  }
+
+  private Map<String, String> readRowValues(String json) {
+    try {
+      return objectMapper.readValue(json, STRING_MAP);
+    } catch (JacksonException exception) {
+      throw new IllegalStateException("Import row JSON is invalid", exception);
+    }
+  }
+
+  private String value(Map<String, String> values, String key) {
+    return values.getOrDefault(key, "").trim();
   }
 
   private byte[] readUploadBytes(MultipartFile file) {

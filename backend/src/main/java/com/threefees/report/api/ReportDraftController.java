@@ -54,6 +54,17 @@ public class ReportDraftController {
         .body(DraftResponse.from(draft));
   }
 
+  @PostMapping("/corrections/{reportId}")
+  public ResponseEntity<DraftResponse> createCorrection(
+      @PathVariable String reportId,
+      @Valid @RequestBody CreateCorrectionDraftRequest request,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.createCorrection(reportId, request.reason(), actor);
+    return draftResponse(draft)
+        .location(URI.create("/api/v1/report-drafts/" + draft.publicId()))
+        .body(DraftResponse.from(draft));
+  }
+
   @GetMapping("/{publicId}")
   public ResponseEntity<DraftResponse> find(
       @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
@@ -169,6 +180,8 @@ public class ReportDraftController {
 
   public record CreateDraftRequest(@NotBlank String billingPointPeriodId) {}
 
+  public record CreateCorrectionDraftRequest(@NotBlank @Size(max = 1_000) String reason) {}
+
   public record UpdateDraftRequest(
       @NotBlank @Size(max = 500) String title,
       @NotBlank @Size(max = 100_000) String situation,
@@ -197,8 +210,12 @@ public class ReportDraftController {
       String billingPointCode,
       String billingPointName,
       String cityCode,
+      String cityName,
+      String district,
       String period,
       String auditStatus,
+      String overLimitType,
+      java.math.BigDecimal maxExceedRatio,
       String status,
       ReportSections sections,
       int currentVersion,
@@ -216,8 +233,12 @@ public class ReportDraftController {
           draft.billingPointCode(),
           draft.billingPointName(),
           draft.cityCode(),
+          draft.cityName(),
+          draft.district(),
           draft.period(),
           draft.auditStatus(),
+          draft.overLimitType(),
+          draft.maxExceedRatio(),
           draft.status(),
           draft.sections(),
           draft.currentVersion(),

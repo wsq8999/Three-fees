@@ -94,20 +94,18 @@ describe("complete-system mock scenario", () => {
     expect(result.items[0]?.auditStatus).toBe("OVER_LIMIT");
   });
 
-  it("creates draft versions for edits, images and restoration but not questions", () => {
+  it("updates the current draft for edits and images but not questions", () => {
     const scenario = createScenarioStore();
     const draft = scenario.getDraft("draft-1");
     expect(draft).toBeDefined();
-    const initialVersions = draft?.versions.length ?? 0;
+    const initialVersion = draft?.entityVersion ?? 0;
 
     scenario.sendDraftMessage("draft-1", {
       intent: "ASK",
       content: "本月为什么超标？",
       imageNames: [],
     });
-    expect(scenario.getDraft("draft-1")?.versions).toHaveLength(
-      initialVersions,
-    );
+    expect(scenario.getDraft("draft-1")?.entityVersion).toBe(initialVersion);
 
     scenario.sendDraftMessage("draft-1", {
       intent: "EDIT",
@@ -119,14 +117,7 @@ describe("complete-system mock scenario", () => {
       content: "分析现场照片。",
       imageNames: ["现场照片.png"],
     });
-    expect(scenario.getDraft("draft-1")?.versions).toHaveLength(
-      initialVersions + 2,
-    );
-
-    scenario.restoreDraftVersion("draft-1", "draft-version-1");
-    expect(scenario.getDraft("draft-1")?.versions).toHaveLength(
-      initialVersions + 3,
-    );
+    expect(scenario.getDraft("draft-1")?.entityVersion).toBe(initialVersion + 2);
   });
 
   it("keeps the formal report number when applying a reasoned correction", () => {

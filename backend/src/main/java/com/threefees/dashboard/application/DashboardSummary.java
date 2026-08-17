@@ -26,6 +26,7 @@ public record DashboardSummary(
 
   public record PendingReportTask(
       String id,
+      String billingPointPeriodId,
       String title,
       String description,
       String target,

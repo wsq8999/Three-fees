@@ -153,6 +153,13 @@ function dailyEnergy(row: Summary): string {
   return (Number(row.actualEnergy) / days).toFixed(2);
 }
 
+function joinedValues(values: string[] | undefined): string {
+  const normalized = Array.from(
+    new Set((values ?? []).map((value) => value.trim()).filter(Boolean)),
+  );
+  return normalized.length === 0 ? "—" : normalized.join("、");
+}
+
 function paymentEligibilityText(row: Summary): "APPROVED" | "PENDING" {
   return row.paymentEligibility === "ELIGIBLE" ? "APPROVED" : "PENDING";
 }
@@ -262,13 +269,11 @@ async function openDetail(row: Summary): Promise<void> {
 }
 
 async function openDraft(row: Summary): Promise<void> {
+  const draft = await businessApi.drafts.createOrResume(row.id);
   await router.push({
-    name: "reports-generate",
-    query: {
-      from: route.fullPath,
-      billingPointCode: row.code,
-      period: row.period,
-    },
+    name: "report-draft",
+    params: { draftId: draft.id },
+    query: { from: route.fullPath },
   });
 }
 
@@ -301,7 +306,8 @@ function closeImport(visible: boolean): void {
   }
 }
 
-async function handleImported(batch: ImportBatch): Promise<void> {
+async function handleImported(batches: ImportBatch[]): Promise<void> {
+  void batches;
   selectedIds.value = new Set();
   Object.assign(filters, {
     code: "",
@@ -315,8 +321,8 @@ async function handleImported(batch: ImportBatch): Promise<void> {
     pointStatus: "",
     auditStatus: "",
     reportStatus: "",
-    focusPeriod: batch.period,
-    focusCityCode: batch.cityCode ?? "",
+    focusPeriod: "",
+    focusCityCode: "",
     page: 1,
   });
   importVisible.value = false;
@@ -489,8 +495,10 @@ watch(
       <ElTableColumn label="所属区县" width="110">
         <template #default="scope">{{ asSummary(scope.row).district ?? "—" }}</template>
       </ElTableColumn>
-      <ElTableColumn label="缴费单编码" width="190">
-        <template #default="scope">{{ asSummary(scope.row).paymentCodes?.[0] ?? "—" }}</template>
+      <ElTableColumn label="缴费单编码" min-width="220">
+        <template #default="scope">
+          <span class="multi-value-cell">{{ joinedValues(asSummary(scope.row).paymentCodes) }}</span>
+        </template>
       </ElTableColumn>
       <ElTableColumn label="账期" width="190">
         <template #default="scope">{{ periodText(asSummary(scope.row)) }}</template>
@@ -611,6 +619,13 @@ watch(
 <style scoped>
 .filter-card {
   padding: 14px 16px;
+}
+
+.multi-value-cell {
+  display: inline-block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 .filter-grid {

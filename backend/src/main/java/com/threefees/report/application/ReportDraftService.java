@@ -21,14 +21,18 @@ import com.threefees.task.domain.TaskType;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.security.access.AccessDeniedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -39,6 +43,7 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class ReportDraftService {
 
+  private static final Logger LOGGER = LoggerFactory.getLogger(ReportDraftService.class);
   private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
 
   private final JdbcTemplate jdbcTemplate;
@@ -112,38 +117,110 @@ public class ReportDraftService {
     }
     saveVersion(key.longValue(), 0, "INITIAL", sections, List.of(), actor.username());
     if (aiServiceClient.isAvailable()) {
-      Draft initialDraft = loadDraft(publicId);
-      var generated =
-          aiServiceClient.assist(
-              UUID.randomUUID().toString(),
-              "EDIT",
-              "请严格依据系统事实生成第一版完整电费稽核说明。证据不足时明确列出待核查事项，不能猜测具体原因。",
-              initialDraft.sections(),
-              facts(initialDraft),
-              List.of(),
-              agentContext(initialDraft),
-              UUID.randomUUID().toString());
-      if (generated.updatedSections() == null) {
-        throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整初始报告", true);
+      try {
+        Draft initialDraft = loadDraft(publicId);
+        var generated =
+            aiServiceClient.assist(
+                UUID.randomUUID().toString(),
+                "EDIT",
+                "请严格依据系统事实生成第一版完整电费稽核说明。证据不足时明确列出待核查事项，不能猜测具体原因。",
+                initialDraft.sections(),
+                facts(initialDraft),
+                List.of(),
+                agentContext(initialDraft),
+                UUID.randomUUID().toString());
+        if (generated.updatedSections() == null) {
+          throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整初始报告", true);
+        }
+        updateDraft(
+            key.longValue(),
+            generated.updatedSections(),
+            List.of(),
+            1,
+            generated.initialReason(),
+            generated.finalReason(),
+            actor.username(),
+            0);
+        saveVersion(
+            key.longValue(),
+            1,
+            "AI_INITIAL",
+            generated.updatedSections(),
+            List.of(),
+            actor.username());
+      } catch (AiServiceException exception) {
+        LOGGER.warn(
+            "Initial AI draft generation failed; keeping default draft. draftId={}, code={}",
+            publicId,
+            exception.code());
       }
-      updateDraft(
-          key.longValue(),
-          generated.updatedSections(),
-          List.of(),
-          1,
-          generated.initialReason(),
-          generated.finalReason(),
-          actor.username(),
-          0);
-      saveVersion(
-          key.longValue(),
-          1,
-          "AI_INITIAL",
-          generated.updatedSections(),
-          List.of(),
-          actor.username());
     }
     return find(publicId, actor);
+  }
+
+  @Transactional
+  public Draft createCorrection(String reportId, String reason, CurrentUser actor) {
+    String safeReason = reason == null ? "" : reason.trim();
+    if (safeReason.isBlank()) {
+      throw new BusinessRuleException("CORRECTION_REASON_REQUIRED", "请填写更正原因");
+    }
+    SourceReport source = sourceReport(reportId);
+    requireScope(actor, source.cityCode());
+    ReportSections sections = reportSections(source);
+    List<String> imageIds = extractInlineImages(source.html(), actor.username());
+    Draft existing = findBySnapshotId(source.snapshotId());
+    if (existing == null) {
+      String publicId = UUID.randomUUID().toString();
+      var keyHolder = new GeneratedKeyHolder();
+      jdbcTemplate.update(
+          connection ->
+              insertCorrectionDraft(
+                  connection,
+                  publicId,
+                  source.snapshotId(),
+                  reportId,
+                  sections,
+                  imageIds,
+                  safeReason,
+                  actor.username()),
+          keyHolder);
+      Number key = keyHolder.getKey();
+      if (key == null) {
+        throw new IllegalStateException("Correction draft key was not generated");
+      }
+      bindImages(key.longValue(), imageIds, List.of(), actor.username());
+      saveVersion(key.longValue(), 0, "CORRECTION", sections, imageIds, actor.username());
+      return find(publicId, actor);
+    }
+    if ("GENERATING".equals(existing.status())) {
+      throw new ResourceConflictException("DRAFT_GENERATING", "工作稿正在生成报告，请稍后再试");
+    }
+    int nextVersion = existing.currentVersion() + 1;
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET status = 'CORRECTING',
+               title = ?, situation = ?, analysis = ?, rectification = ?,
+               current_image_file_ids_json = ?,
+               current_version_no = ?,
+               formal_report_public_id = ?,
+               ai_final_reason = ?,
+               updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
+         WHERE id = ?
+        """,
+        sections.title(),
+        sections.situation(),
+        sections.analysis(),
+        sections.rectification(),
+        writeJson(imageIds),
+        nextVersion,
+        reportId,
+        safeReason,
+        actor.username(),
+        existing.id());
+    bindImages(existing.id(), imageIds, List.of(), actor.username());
+    saveVersion(existing.id(), nextVersion, "CORRECTION", sections, imageIds, actor.username());
+    return find(existing.publicId(), actor);
   }
 
   @Transactional(readOnly = true)
@@ -490,7 +567,10 @@ public class ReportDraftService {
   @Transactional
   public BusinessTask submitFormal(String publicId, long expectedVersion, CurrentUser actor) {
     Draft draft = find(publicId, actor);
-    String businessKey = "FORMAL_REPORT:" + draft.billingPointPeriodId();
+    String businessKey =
+        draft.formalReportId() == null
+            ? "FORMAL_REPORT:" + draft.billingPointPeriodId()
+            : "FORMAL_REPORT_CORRECTION:" + draft.formalReportId();
     var existing = taskRepository.findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey);
     if (existing.isPresent()) {
       return existing.orElseThrow();
@@ -866,6 +946,40 @@ public class ReportDraftService {
     return statement;
   }
 
+  private PreparedStatement insertCorrectionDraft(
+      java.sql.Connection connection,
+      String publicId,
+      long snapshotId,
+      String reportId,
+      ReportSections sections,
+      List<String> imageIds,
+      String reason,
+      String actor)
+      throws SQLException {
+    PreparedStatement statement =
+        connection.prepareStatement(
+            """
+            INSERT INTO report_draft
+              (public_id, billing_point_snapshot_id, status, title, situation, analysis,
+               rectification, current_version_no, formal_report_public_id, ai_final_reason,
+               current_image_file_ids_json, created_by, updated_by)
+            VALUES (?, ?, 'CORRECTING', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            new String[] {"id"});
+    statement.setString(1, publicId);
+    statement.setLong(2, snapshotId);
+    statement.setString(3, sections.title());
+    statement.setString(4, sections.situation());
+    statement.setString(5, sections.analysis());
+    statement.setString(6, sections.rectification());
+    statement.setString(7, reportId);
+    statement.setString(8, reason);
+    statement.setString(9, writeJson(imageIds));
+    statement.setString(10, actor);
+    statement.setString(11, actor);
+    return statement;
+  }
+
   private void updateDraft(
       long draftId,
       ReportSections sections,
@@ -913,10 +1027,13 @@ public class ReportDraftService {
                    d.current_image_file_ids_json,
                    d.created_at, d.updated_at, d.version,
                    s.public_id AS snapshot_public_id, s.billing_point_code,
-                   s.billing_point_name, s.city_code, s.data_period,
-                   COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status
+                   s.billing_point_name, s.city_code, c.name AS city_name, s.district_name,
+                   s.data_period,
+                   COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status,
+                   a.over_limit_type, a.max_ratio
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
+              JOIN city c ON c.code = s.city_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
@@ -929,8 +1046,12 @@ public class ReportDraftService {
                     resultSet.getString("billing_point_code"),
                     resultSet.getString("billing_point_name"),
                     resultSet.getString("city_code"),
+                    resultSet.getString("city_name"),
+                    resultSet.getString("district_name"),
                     resultSet.getString("data_period"),
                     resultSet.getString("audit_status"),
+                    resultSet.getString("over_limit_type"),
+                    resultSet.getBigDecimal("max_ratio"),
                     resultSet.getString("status"),
                     new ReportSections(
                         resultSet.getString("title"),
@@ -977,6 +1098,31 @@ public class ReportDraftService {
         .stream()
         .findFirst()
         .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
+  }
+
+  private SourceReport sourceReport(String publicId) {
+    return jdbcTemplate
+        .query(
+            """
+            SELECT r.public_id, r.title, r.situation, r.analysis, r.rectification,
+                   s.id AS snapshot_id, s.city_code
+              FROM audit_report r
+              JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
+             WHERE r.public_id = ?
+            """,
+            (rs, row) ->
+                new SourceReport(
+                    rs.getString("public_id"),
+                    rs.getLong("snapshot_id"),
+                    rs.getString("city_code"),
+                    nonBlank(rs.getString("title"), "电费稽核报告"),
+                    nonBlank(rs.getString("situation"), ""),
+                    nonBlank(rs.getString("analysis"), ""),
+                    nonBlank(rs.getString("rectification"), "")),
+            publicId)
+        .stream()
+        .findFirst()
+        .orElseThrow(() -> new ResourceNotFoundException("正式报告"));
   }
 
   private Draft findBySnapshotId(long snapshotId) {
@@ -1136,6 +1282,80 @@ public class ReportDraftService {
     return value == null || value.isBlank() ? null : value;
   }
 
+  private String nonBlank(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
+  private ReportSections reportSections(SourceReport source) {
+    String html = source.html();
+    if (looksLikeHtml(html)) {
+      return new ReportSections(
+          cleanReportText(firstMatch(html, "(?is)<h1[^>]*>(.*?)</h1>", source.title())),
+          html,
+          nonBlank(cleanReportText(source.analysis()), "请在此补充更正后的排查分析。"),
+          nonBlank(cleanReportText(source.rectification()), "请在此补充更正后的整改建议。"));
+    }
+    String title = cleanReportText(source.title());
+    String situation = cleanReportText(source.situation());
+    String analysis = cleanReportText(source.analysis());
+    String rectification = cleanReportText(source.rectification());
+    return new ReportSections(
+        nonBlank(title, source.title()),
+        nonBlank(situation, "原报告正文待补充。"),
+        nonBlank(analysis, "请在此补充更正后的排查分析。"),
+        nonBlank(rectification, "请在此补充更正后的整改建议。"));
+  }
+
+  private boolean looksLikeHtml(String value) {
+    return value != null
+        && Pattern.compile("(?is)</?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\\b")
+            .matcher(value)
+            .find();
+  }
+
+  private String firstMatch(String value, String pattern, String fallback) {
+    var matcher = Pattern.compile(pattern).matcher(value == null ? "" : value);
+    return matcher.find() ? matcher.group(1) : fallback;
+  }
+
+  private List<String> extractInlineImages(String html, String actor) {
+    if (html == null || html.isBlank()) {
+      return List.of();
+    }
+    var imageIds = new java.util.ArrayList<String>();
+    var matcher =
+        Pattern.compile("(?is)<img[^>]+src=[\"']data:image/(png|jpe?g);base64,([^\"']+)[\"'][^>]*>")
+            .matcher(html);
+    int index = 1;
+    while (matcher.find() && imageIds.size() < 10) {
+      String extension = "png".equalsIgnoreCase(matcher.group(1)) ? "png" : "jpg";
+      String mediaType = "png".equals(extension) ? "image/png" : "image/jpeg";
+      byte[] bytes = Base64.getMimeDecoder().decode(matcher.group(2));
+      var stored =
+          storedFileService.storeGenerated(
+              bytes, "更正报告图片-" + index + "." + extension, mediaType, "DRAFT_IMAGE", actor);
+      imageIds.add(stored.publicId());
+      index++;
+    }
+    return List.copyOf(imageIds);
+  }
+
+  private String cleanReportText(String value) {
+    return value
+        .replaceAll("(?i)<br\\s*/?>", "\n")
+        .replaceAll("(?i)</(p|div|section|article|h[1-6]|li|tr)>", "\n")
+        .replaceAll("<[^>]+>", "")
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .replaceAll("(?m)^\\s+", "")
+        .replaceAll("\\n{3,}", "\n\n")
+        .trim();
+  }
+
   public record Draft(
       long id,
       String publicId,
@@ -1143,8 +1363,12 @@ public class ReportDraftService {
       String billingPointCode,
       String billingPointName,
       String cityCode,
+      String cityName,
+      String district,
       String period,
       String auditStatus,
+      String overLimitType,
+      java.math.BigDecimal maxExceedRatio,
       String status,
       ReportSections sections,
       int currentVersion,
@@ -1184,4 +1408,17 @@ public class ReportDraftService {
       String period,
       String auditStatus,
       String reportId) {}
+
+  private record SourceReport(
+      String publicId,
+      long snapshotId,
+      String cityCode,
+      String title,
+      String html,
+      String analysis,
+      String rectification) {
+    String situation() {
+      return html;
+    }
+  }
 }

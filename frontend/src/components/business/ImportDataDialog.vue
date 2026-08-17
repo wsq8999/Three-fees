@@ -9,7 +9,7 @@ import type { DatasetType, ImportBatch } from "@/types/business";
 const props = defineProps<{ modelValue: boolean; defaultPeriod?: string }>();
 const emit = defineEmits<{
   "update:modelValue": [value: boolean];
-  imported: [batch: ImportBatch];
+  imported: [batches: ImportBatch[]];
 }>();
 
 const datasetTypes: DatasetType[] = [
@@ -45,7 +45,6 @@ const datasetMeta: Record<
   },
 };
 
-const period = ref(props.defaultPeriod ?? "");
 const selectedType = ref<DatasetType>("BILLING_POINT");
 const selectedFile = ref<File | null>(null);
 const batches = ref<ImportBatch[]>([]);
@@ -54,6 +53,7 @@ const runningBatches = ref<ImportBatch[]>([]);
 const progressVisible = ref(false);
 const successVisible = ref(false);
 const pendingFocusBatch = ref<ImportBatch | null>(null);
+const pendingImportedBatches = ref<ImportBatch[]>([]);
 const isSubmitting = ref(false);
 const errorMessage = ref("");
 const uploadRef = ref<UploadInstance>();
@@ -62,21 +62,99 @@ const uploadKey = ref(0);
 const canSubmit = computed(
   () => selectedFile.value !== null && !isSubmitting.value && !progressVisible.value,
 );
+const trackedBatches = computed(() =>
+  runningBatches.value.length > 0
+    ? runningBatches.value
+    : runningBatch.value === null
+      ? []
+      : [runningBatch.value],
+);
+const failedBatches = computed(() =>
+  trackedBatches.value.filter((batch) => batch.status === "FAILED"),
+);
+const completedBatches = computed(() =>
+  trackedBatches.value.filter((batch) => batch.status === "ACTIVE" || batch.status === "FAILED"),
+);
+const succeededBatches = computed(() =>
+  trackedBatches.value.filter((batch) => batch.status === "ACTIVE"),
+);
+const totalErrors = computed(() =>
+  failedBatches.value.reduce((total, batch) => total + batch.errors.length, 0),
+);
+const totalRows = computed(() =>
+  trackedBatches.value.reduce((total, batch) => total + batch.rowCount, 0),
+);
+const progressPercentage = computed(() => {
+  if (trackedBatches.value.length === 0) return isSubmitting.value ? 20 : 0;
+  return Math.round((completedBatches.value.length / trackedBatches.value.length) * 100);
+});
+const progressStatus = computed(() => {
+  if (failedBatches.value.length > 0) return "exception";
+  if (
+    trackedBatches.value.length > 0 &&
+    completedBatches.value.length === trackedBatches.value.length
+  ) {
+    return "success";
+  }
+  return undefined;
+});
+const progressSummary = computed(() => {
+  const total = trackedBatches.value.length;
+  if (total === 0) return "正在提交导入任务";
+  if (failedBatches.value.length > 0 && completedBatches.value.length === total) {
+    return failedBatches.value.length === total ? "导入失败" : "部分账期导入失败";
+  }
+  if (completedBatches.value.length === total) return "导入成功";
+  return total > 1 ? "正在处理多个账期" : "正在处理导入任务";
+});
+const progressDetail = computed(() => {
+  const total = trackedBatches.value.length;
+  if (total === 0) return "正在上传并解析文件";
+  const parts = [
+    `总批次 ${total} 个`,
+    `已完成 ${completedBatches.value.length} 个`,
+    `成功 ${succeededBatches.value.length} 个`,
+  ];
+  if (failedBatches.value.length > 0) parts.push(`失败 ${failedBatches.value.length} 个`);
+  if (totalRows.value > 0) parts.push(`总行数 ${totalRows.value}`);
+  if (totalErrors.value > 0) parts.push(`错误 ${totalErrors.value} 条`);
+  return parts.join("，");
+});
+const retryableFailedBatches = computed(() =>
+  failedBatches.value.filter(
+    (batch) =>
+      batch.errors.length > 0 &&
+      batch.errors.every((error) => error.code === "IMPORT_PROCESSING_FAILED"),
+  ),
+);
+const canRetryFailedBatches = computed(
+  () =>
+    failedBatches.value.length > 0 &&
+    retryableFailedBatches.value.length === failedBatches.value.length,
+);
+const sampledErrors = computed(() =>
+  failedBatches.value
+    .flatMap((batch) =>
+      batch.errors.map((error) => ({
+        ...error,
+        batchLabel: importBatchLabel(batch),
+      })),
+    )
+    .slice(0, 8),
+);
+const remainingErrorCount = computed(() =>
+  Math.max(0, totalErrors.value - sampledErrors.value.length),
+);
+const requiresNewFile = computed(
+  () => failedBatches.value.length > 0 && !canRetryFailedBatches.value,
+);
+function importBatchLabel(batch: ImportBatch): string {
+  return `${batch.period} / ${batch.cityCode ?? "-"}`;
+}
 
 function selectDataset(datasetType: DatasetType): void {
   if (progressVisible.value) return;
   selectedType.value = datasetType;
-}
-
-function statusLabel(status: ImportBatch["status"]): string {
-  const labels: Record<ImportBatch["status"], string> = {
-    QUEUED: "待处理",
-    ACTIVE: "已生效",
-    PROCESSING: "处理中",
-    FAILED: "失败",
-    SUPERSEDED: "已被替换",
-  };
-  return labels[status] ?? status;
 }
 
 async function loadBatches(): Promise<void> {
@@ -89,6 +167,7 @@ function resetForm(): void {
   runningBatch.value = null;
   runningBatches.value = [];
   pendingFocusBatch.value = null;
+  pendingImportedBatches.value = [];
   errorMessage.value = "";
   uploadRef.value?.clearFiles();
   uploadKey.value += 1;
@@ -133,6 +212,7 @@ async function pollBatches(ids: string[]): Promise<void> {
       if (succeeded.length === latestList.length) {
         pendingFocusBatch.value =
           succeeded.find((batch) => batch.datasetType === "BILLING_POINT") ?? succeeded[0] ?? null;
+        pendingImportedBatches.value = succeeded;
         successVisible.value = true;
       }
       return;
@@ -150,7 +230,7 @@ async function confirmSuccess(): Promise<void> {
   resetForm();
   await loadBatches();
   if (focusBatch) {
-    emit("imported", focusBatch);
+    emit("imported", pendingImportedBatches.value.length > 0 ? pendingImportedBatches.value : [focusBatch]);
   }
 }
 
@@ -187,22 +267,29 @@ async function submit(): Promise<void> {
 }
 
 async function retry(): Promise<void> {
-  const failed = runningBatches.value.filter((batch) => batch.status === "FAILED");
-  if (failed.length === 0 && runningBatch.value === null) return;
+  if (!canRetryFailedBatches.value) {
+    errorMessage.value = "请修正文件后重新导入。";
+    return;
+  }
   isSubmitting.value = true;
   progressVisible.value = true;
   try {
     const retried = await Promise.all(
-      (failed.length > 0 ? failed : [runningBatch.value as ImportBatch]).map((batch) =>
-        businessApi.imports.retry(batch.id),
-      ),
+      retryableFailedBatches.value.map((batch) => businessApi.imports.retry(batch.id)),
     );
     runningBatches.value = retried;
     runningBatch.value = retried[0] ?? null;
     await pollBatches(retried.map((batch) => batch.id));
   } catch (error) {
     progressVisible.value = false;
-    errorMessage.value = error instanceof Error ? error.message : "重试失败";
+    errorMessage.value =
+      error instanceof ApiProblem &&
+      (error.code === "IMPORT_REQUIRES_NEW_FILE" ||
+        error.code === "IMPORT_BATCH_NOT_RETRYABLE")
+        ? error.detail
+        : error instanceof Error
+          ? error.message
+          : "重试失败";
   } finally {
     isSubmitting.value = false;
   }
@@ -217,7 +304,6 @@ watch(
   () => props.modelValue,
   (visible) => {
     if (!visible) return;
-    period.value = props.defaultPeriod ?? "";
     resetForm();
     void loadBatches();
   },
@@ -322,59 +408,61 @@ watch(
     :show-close="false"
   >
     <div class="progress-list">
-      <div
-        v-for="batch in runningBatches.length > 0 ? runningBatches : runningBatch ? [runningBatch] : []"
-        :key="batch.id"
-        class="batch-result"
-      >
+      <section class="batch-result batch-summary">
         <div>
-          <strong>{{ batch.period }} / {{ batch.cityCode ?? "-" }}</strong>
-          <span>{{ statusLabel(batch.status) }}</span>
+          <strong>{{ progressSummary }}</strong>
+          <span>{{ progressPercentage }}%</span>
         </div>
         <ElProgress
-          :percentage="
-            batch.status === 'ACTIVE' || batch.status === 'FAILED'
-              ? 100
-              : batch.status === 'PROCESSING'
-                ? 66
-                : 20
-          "
-          :status="
-            batch.status === 'FAILED'
-              ? 'exception'
-              : batch.status === 'ACTIVE'
-                ? 'success'
-                : undefined
-          "
+          :percentage="progressPercentage"
+          :status="progressStatus"
         />
-        <ElAlert
-          v-if="batch.status === 'FAILED'"
-          class="import-errors"
-          type="error"
-          :closable="false"
-          show-icon
-        >
-          <ul>
-            <li
-              v-for="item in batch.errors"
-              :key="`${batch.id}-${item.row}-${item.column}-${item.code ?? ''}`"
-            >
-              第 {{ item.row }} 行 {{ item.column }} {{ item.code ?? "" }} {{ item.message }}
-            </li>
-          </ul>
-        </ElAlert>
-      </div>
+        <p>{{ progressDetail }}</p>
+      </section>
+
+      <ElAlert
+        v-if="requiresNewFile"
+        class="import-errors"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="请修正文件后重新导入，校验失败类任务不能直接重试。"
+      />
+
+      <ElAlert
+        v-if="failedBatches.length > 0"
+        class="import-errors"
+        type="error"
+        :closable="false"
+        show-icon
+      >
+        <p>
+          {{ failedBatches.length }} 个任务失败，共 {{ totalErrors }} 条错误。
+        </p>
+        <ul v-if="sampledErrors.length > 0">
+          <li
+            v-for="item in sampledErrors"
+            :key="`${item.batchLabel}-${item.row}-${item.column}-${item.code ?? ''}`"
+          >
+            {{ item.batchLabel }}：第 {{ item.row }} 行 {{ item.column }}
+            {{ item.code ?? "" }} {{ item.message }}
+          </li>
+        </ul>
+        <p v-if="remainingErrorCount > 0">
+          还有 {{ remainingErrorCount }} 条错误未展示。
+        </p>
+      </ElAlert>
     </div>
     <template #footer>
       <ElButton
-        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
+        v-if="canRetryFailedBatches"
         :loading="isSubmitting"
         @click="retry"
       >
         重新提交任务
       </ElButton>
       <ElButton
-        v-if="runningBatches.some((batch) => batch.status === 'FAILED') || runningBatch?.status === 'FAILED'"
+        v-if="failedBatches.length > 0"
         @click="progressVisible = false"
       >
         关闭
@@ -512,6 +600,12 @@ watch(
   gap: 10px;
 }
 
+.batch-summary p {
+  margin: 0;
+  color: #5f6f86;
+  line-height: 1.7;
+}
+
 .import-errors ul {
   padding-left: 18px;
   margin: 0;
@@ -560,5 +654,6 @@ watch(
     align-items: flex-start;
     flex-direction: column;
   }
+
 }
 </style>

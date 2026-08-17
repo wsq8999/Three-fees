@@ -47,7 +47,7 @@ public class AuditReportService {
             """
             SELECT d.id AS draft_db_id, d.public_id AS draft_public_id, d.status AS draft_status,
                    d.title, d.situation, d.analysis, d.rectification,
-                   d.current_image_file_ids_json,
+                   d.current_image_file_ids_json, d.formal_report_public_id, d.ai_final_reason,
                    s.id AS snapshot_db_id, s.public_id AS snapshot_public_id,
                    s.billing_point_code, s.billing_point_name, s.city_code, s.data_period,
                    s.data_json AS snapshot_json,
@@ -64,6 +64,8 @@ public class AuditReportService {
                     resultSet.getLong("draft_db_id"),
                     resultSet.getString("draft_public_id"),
                     resultSet.getString("draft_status"),
+                    resultSet.getString("formal_report_public_id"),
+                    resultSet.getString("ai_final_reason"),
                     resultSet.getLong("snapshot_db_id"),
                     resultSet.getString("snapshot_public_id"),
                     resultSet.getString("billing_point_code"),
@@ -199,13 +201,79 @@ public class AuditReportService {
   }
 
   @Transactional
+  public FinalizationResult finalizeCorrectionReport(
+      GenerationInput input, long wordFileId, long pdfFileId, String actor) {
+    if (input.formalReportId() == null || input.formalReportId().isBlank()) {
+      throw new ResourceConflictException("CORRECTION_REPORT_MISSING", "更正工作稿未关联正式报告");
+    }
+    jdbcTemplate.queryForObject(
+        "SELECT version FROM report_draft WHERE id = ? FOR UPDATE", Long.class, input.draftId());
+    if (!"GENERATING"
+        .equals(
+            jdbcTemplate.queryForObject(
+                "SELECT status FROM report_draft WHERE id = ?", String.class, input.draftId()))) {
+      throw new ResourceConflictException("DRAFT_NOT_GENERATING", "工作稿不在正式报告生成状态");
+    }
+    String snapshot =
+        writeJson(
+            Map.of(
+                "snapshotId", input.snapshotPublicId(),
+                "billingPointCode", input.billingPointCode(),
+                "billingPointName", input.billingPointName(),
+                "cityCode", input.cityCode(),
+                "period", input.period(),
+                "billingPoint", input.snapshotJson(),
+                "audit", input.auditJson(),
+                "sections", input.sections(),
+                "imageFileIds", input.imageFileIds()));
+    int updated =
+        jdbcTemplate.update(
+            """
+            UPDATE audit_report
+               SET status = 'CORRECTED',
+                   title = ?, situation = ?, analysis = ?, rectification = ?,
+                   word_file_id = ?, pdf_file_id = ?, business_snapshot_json = ?,
+                   correction_reason = ?,
+                   corrected_at = CURRENT_TIMESTAMP(3), corrected_by = ?,
+                   updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
+             WHERE public_id = ?
+            """,
+            input.sections().title(),
+            input.sections().situation(),
+            input.sections().analysis(),
+            input.sections().rectification(),
+            wordFileId,
+            pdfFileId,
+            snapshot,
+            valueOr(input.correctionReason(), "报告内容更正"),
+            actor,
+            actor,
+            input.formalReportId());
+    if (updated != 1) {
+      throw new ResourceNotFoundException("正式报告");
+    }
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET status = 'FORMALIZED', formal_report_public_id = ?,
+               updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
+         WHERE id = ? AND status = 'GENERATING'
+        """,
+        input.formalReportId(),
+        actor,
+        input.draftId());
+    return new FinalizationResult(input.formalReportId(), true);
+  }
+
+  @Transactional
   public void resetFailedGeneration(String draftPublicId, String actor) {
     jdbcTemplate.update(
         """
         UPDATE report_draft
-           SET status = 'DRAFT', updated_at = CURRENT_TIMESTAMP(3), updated_by = ?,
+           SET status = CASE WHEN formal_report_public_id IS NULL THEN 'DRAFT' ELSE 'CORRECTING' END,
+               updated_at = CURRENT_TIMESTAMP(3), updated_by = ?,
                version = version + 1
-         WHERE public_id = ? AND status = 'GENERATING' AND formal_report_public_id IS NULL
+         WHERE public_id = ? AND status = 'GENERATING'
         """,
         actor,
         draftPublicId);
@@ -218,9 +286,8 @@ public class AuditReportService {
             """
             UPDATE report_draft
                SET status='GENERATING', updated_at=CURRENT_TIMESTAMP(3), updated_by=?,
-                   version=CASE WHEN status='DRAFT' THEN version+1 ELSE version END
-             WHERE public_id=? AND status IN ('DRAFT','GENERATING')
-               AND formal_report_public_id IS NULL
+                   version=CASE WHEN status IN ('DRAFT','CORRECTING') THEN version+1 ELSE version END
+             WHERE public_id=? AND status IN ('DRAFT','CORRECTING','GENERATING')
             """,
             actor,
             draftPublicId);
@@ -817,6 +884,8 @@ public class AuditReportService {
       long draftId,
       String draftPublicId,
       String draftStatus,
+      String formalReportId,
+      String correctionReason,
       long snapshotId,
       String snapshotPublicId,
       String billingPointCode,

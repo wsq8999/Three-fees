@@ -23,13 +23,6 @@
             ExpectedStartMode = 'Manual'
             ListenPort = 0
         }
-        Ai = @{
-            Name = 'three-fees-ai'
-            ExpectedState = 'Running'
-            ExpectedStartMode = 'Auto'
-            HealthUri = 'http://127.0.0.1:8100/health'
-            ListenPort = 8100
-        }
     }
 
     Database = @{

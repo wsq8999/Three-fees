@@ -218,10 +218,10 @@ public class AiServiceClient {
 
   private void requireConfigured() {
     if (!enabled) {
-      throw new AiServiceException("AI_SERVICE_DISABLED", "AI 助手尚未启用", false);
+      throw new AiServiceException("AI_ASSISTANT_DISABLED", "AI 助手尚未启用", false);
     }
     if (apiKey == null || apiKey.isBlank() || "not-configured-placeholder".equals(apiKey)) {
-      throw new AiServiceException("AI_SERVICE_NOT_CONFIGURED", "请通过 KIMI_API_KEY 配置模型密钥", false);
+      throw new AiServiceException("AI_ASSISTANT_NOT_CONFIGURED", "请通过 KIMI_API_KEY 配置模型密钥", false);
     }
   }
 

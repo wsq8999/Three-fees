@@ -38,6 +38,8 @@ ai-service/htmlcov/
 *.py[cod]
 
 # Runtime state must live outside the repository
+.runtime/
+outputs/
 data/
 files/
 storage/
@@ -49,4 +51,3 @@ temp/
 
 # Office temporary files
 ~$*
-

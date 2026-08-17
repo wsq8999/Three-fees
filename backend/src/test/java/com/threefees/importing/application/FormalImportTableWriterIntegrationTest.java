@@ -6,6 +6,7 @@ import com.threefees.ThreeFeesApplication;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -59,6 +60,46 @@ class FormalImportTableWriterIntegrationTest {
                 "2026-06",
                 "BP-002"))
         .isEqualTo("报账点二");
+  }
+
+  @Test
+  void billingPointImportAggregatesMultipleSourceRowsIntoOneSnapshot() {
+    ImportBatch batch = batch(DatasetType.BILLING_POINT, "2026-09", "320100");
+
+    writer.replace(
+        batch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-MULTI",
+                "多资源报账点",
+                null,
+                null,
+                billingPointJsonWithResource(
+                    "BP-MULTI", "多资源报账点", "南京市", "玄武区", "RES-1", "资源一", "M-1")),
+            row(
+                3,
+                "320100",
+                "BP-MULTI",
+                "多资源报账点",
+                null,
+                null,
+                billingPointJsonWithResource(
+                    "BP-MULTI", "多资源报账点", "南京市", "玄武区", "RES-2", "资源二", "M-2"))));
+
+    assertThat(countByPoint("billing_point_snapshot", "2026-09", "320100", "BP-MULTI"))
+        .isEqualTo(1);
+    String dataJson =
+        jdbcTemplate.queryForObject(
+            "SELECT data_json FROM billing_point_snapshot WHERE city_code=? AND data_period=? AND billing_point_code=?",
+            String.class,
+            "320100",
+            "2026-09",
+            "BP-MULTI");
+    assertThat(dataJson).contains("\"关联资源编码\":\"RES-1、RES-2\"");
+    assertThat(dataJson).contains("\"关联资源名称\":\"资源一、资源二\"");
+    assertThat(dataJson).contains("\"关联电表编码\":\"M-1、M-2\"");
   }
 
   @Test
@@ -134,6 +175,12 @@ class FormalImportTableWriterIntegrationTest {
 
     assertThat(count("billing_point_snapshot", "2026-08", "320100")).isEqualTo(1);
     assertThat(count("billing_point_snapshot", "2026-08", "321200")).isEqualTo(1);
+    assertThat(
+            jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM billing_point_master WHERE billing_point_code=?",
+                Integer.class,
+                "BP-SAME"))
+        .isEqualTo(2);
   }
 
   private int count(String table, String period, String cityCode) {
@@ -165,6 +212,8 @@ class FormalImportTableWriterIntegrationTest {
         "batch-" + type.name() + "-" + period + "-" + cityCode,
         type,
         period,
+        LocalDate.parse(period + "-01"),
+        LocalDate.parse(period + "-28"),
         cityCode,
         ImportBatchStatus.PROCESSING,
         1,
@@ -217,6 +266,25 @@ class FormalImportTableWriterIntegrationTest {
         + ","
         + jsonPair("最后报账期止", "2026-06-30")
         + "}";
+  }
+
+  private String billingPointJsonWithResource(
+      String code,
+      String name,
+      String cityName,
+      String districtName,
+      String resourceCode,
+      String resourceName,
+      String meterCode) {
+    return billingPointJson(code, name, cityName, districtName).replace(
+        "}",
+        ","
+            + jsonPair("关联资源编码", resourceCode)
+            + ","
+            + jsonPair("关联资源名称", resourceName)
+            + ","
+            + jsonPair("关联电表编码", meterCode)
+            + "}");
   }
 
   private String paymentJson(String code, String name, String paymentCode, String amount) {

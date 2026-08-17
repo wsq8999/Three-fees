@@ -5,9 +5,7 @@ param(
     [string]$OutputDirectory,
     [string]$Version = (Get-Date -Format 'yyyyMMdd.HHmmss'),
     [string]$PnpmExe = 'corepack.cmd',
-    [string]$PythonExe = 'python',
-    [switch]$SkipBuild,
-    [switch]$SkipAiTests
+    [switch]$SkipBuild
 )
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
@@ -138,9 +136,8 @@ Assert-SafeVersion -Version $Version
 
 $backendRoot = Join-Path $repository 'backend'
 $frontendRoot = Join-Path $repository 'frontend'
-$aiRoot = Join-Path $repository 'ai-service'
 $deployRoot = Join-Path $repository 'deploy\windows'
-foreach ($requiredDirectory in @($backendRoot, $frontendRoot, $aiRoot, $deployRoot)) {
+foreach ($requiredDirectory in @($backendRoot, $frontendRoot, $deployRoot)) {
     if (-not (Test-Path -LiteralPath $requiredDirectory -PathType Container)) {
         throw "Required project directory is missing: $requiredDirectory"
     }
@@ -156,11 +153,6 @@ if (-not $SkipBuild) {
     $resolvedPnpm = Resolve-BuildExecutable -Candidate $PnpmExe -Label 'pnpm/Corepack executable'
     Invoke-ReleasePnpm -Executable $resolvedPnpm -Arguments @('install', '--frozen-lockfile') -WorkingDirectory $frontendRoot
     Invoke-ReleasePnpm -Executable $resolvedPnpm -Arguments @('run', 'build') -WorkingDirectory $frontendRoot
-
-    if (-not $SkipAiTests -and (Test-Path -LiteralPath (Join-Path $aiRoot 'tests') -PathType Container)) {
-        $resolvedPython = Resolve-BuildExecutable -Candidate $PythonExe -Label 'Python executable'
-        Invoke-CheckedProcess -FilePath $resolvedPython -ArgumentList @('-m', 'pytest', '-q') -WorkingDirectory $aiRoot
-    }
 }
 
 $jarCandidates = @(
@@ -192,21 +184,6 @@ try {
     Copy-DirectoryContent -Source $frontendDist -Destination (Join-Path $stagingRoot 'frontend') -ExcludedPatterns @('\.map$')
     Copy-Item -LiteralPath (Join-Path $deployRoot 'config\iis\web.config') -Destination (Join-Path $stagingRoot 'frontend\web.config')
 
-    $aiExclusions = @(
-        '(^|\\)\.env($|\.)',
-        '(^|\\)\.venv(\\|$)',
-        '(^|\\)node_modules(\\|$)',
-        '(^|\\)__pycache__(\\|$)',
-        '(^|\\)\.pytest_cache(\\|$)',
-        '(^|\\)\.ruff_cache(\\|$)',
-        '(^|\\)\.mypy_cache(\\|$)',
-        '(^|\\)htmlcov(\\|$)',
-        '(^|\\)tests(\\|$)',
-        '(^|\\)data(\\|$)',
-        '(^|\\)\.coverage$',
-        '\.pyc$'
-    )
-    Copy-DirectoryContent -Source $aiRoot -Destination (Join-Path $stagingRoot 'ai-service') -ExcludedPatterns $aiExclusions
     $deploymentExclusions = @(
         '(^|\\)Test-[^\\]+\.ps1$'
     )

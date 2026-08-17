@@ -14,9 +14,12 @@ export interface HttpClient {
     options?: RequestOptions,
   ): Promise<unknown>;
   put(path: string, body: unknown, options?: RequestOptions): Promise<unknown>;
-  getBlob(path: string): Promise<Blob>;
-  getBlobResponse(path: string): Promise<{ blob: Blob; fileName?: string }>;
-  delete(path: string, options?: RequestOptions): Promise<unknown>;
+  getBlob(path: string, options?: RequestOptions): Promise<Blob>;
+  getBlobResponse(
+    path: string,
+    options?: RequestOptions,
+  ): Promise<{ blob: Blob; fileName?: string }>;
+  delete(path: string, options?: RequestOptions): Promise<void>;
   setUnauthorizedHandler(handler: () => void): void;
 }
 
@@ -63,14 +66,11 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     requestOptions: RequestOptions = {},
   ) {
     const controller = new AbortController();
-    const requestTimeoutMs =
-      requestOptions.timeoutMs !== undefined && requestOptions.timeoutMs > 0
-        ? requestOptions.timeoutMs
-        : options.timeoutMs;
-    const timeoutId = globalThis.setTimeout(
-      () => controller.abort(),
-      requestTimeoutMs,
-    );
+    const timeoutMs = requestOptions.timeoutMs ?? options.timeoutMs;
+    const timeoutId =
+      timeoutMs > 0
+        ? globalThis.setTimeout(() => controller.abort(), timeoutMs)
+        : undefined;
     const headers = new Headers({ Accept: "application/json" });
     if (body !== undefined && !(body instanceof FormData)) {
       headers.set("Content-Type", "application/json");
@@ -130,7 +130,9 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
     } catch (error) {
       throw toApiProblem(error);
     } finally {
-      globalThis.clearTimeout(timeoutId);
+      if (timeoutId !== undefined) {
+        globalThis.clearTimeout(timeoutId);
+      }
     }
   }
 
@@ -141,22 +143,22 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
       request("POST", path, body, "json", options),
     patch: (path, body, options) =>
       request("PATCH", path, body, "json", options),
-    put: (path, body, requestOptions) =>
-      request("PUT", path, body, "json", requestOptions),
-    getBlob: async (path) =>
+    put: (path, body, options) => request("PUT", path, body, "json", options),
+    getBlob: async (path, options) =>
       (
-        (await request("GET", path, undefined, "blob")) as {
+        (await request("GET", path, undefined, "blob", options)) as {
           blob: Blob;
           fileName?: string;
         }
       ).blob,
-    getBlobResponse: (path) =>
-      request("GET", path, undefined, "blob") as Promise<{
+    getBlobResponse: (path, options) =>
+      request("GET", path, undefined, "blob", options) as Promise<{
         blob: Blob;
         fileName?: string;
       }>,
-    delete: (path, requestOptions) =>
-      request("DELETE", path, undefined, "json", requestOptions),
+    delete: async (path, options) => {
+      await request("DELETE", path, undefined, "json", options);
+    },
     setUnauthorizedHandler: (handler) => {
       handleUnauthorized = handler;
     },

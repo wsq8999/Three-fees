@@ -121,7 +121,7 @@ public class ReportGenerationService {
   @Transactional(readOnly = true)
   public AnalyzeImageResult analyzeImages(AnalyzeImageCommand command, CurrentUser actor) {
     if (!aiEnabled) {
-      throw new BusinessRuleException("AI_SERVICE_DISABLED", "AI 服务暂不可用，请先人工编辑报告。");
+      throw new BusinessRuleException("AI_ASSISTANT_DISABLED", "AI 助手暂不可用，请先人工编辑报告。");
     }
     GenerationSource source = source(command.billingPointCode(), command.period(), actor, false);
     String contentHtml = command.contentHtml() == null ? "" : command.contentHtml();

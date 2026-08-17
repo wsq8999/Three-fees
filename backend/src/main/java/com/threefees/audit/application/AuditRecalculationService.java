@@ -8,6 +8,9 @@ import java.math.BigDecimal;
 import java.math.MathContext;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,6 +65,39 @@ public class AuditRecalculationService {
     }
   }
 
+  @Transactional
+  public void recalculate(String period, String cityCode, Collection<String> billingPointCodes) {
+    var affectedCodes = new LinkedHashSet<String>();
+    for (String billingPointCode : billingPointCodes) {
+      if (billingPointCode != null && !billingPointCode.isBlank()) {
+        affectedCodes.add(billingPointCode);
+      }
+    }
+    if (affectedCodes.isEmpty()) {
+      return;
+    }
+    String placeholders =
+        String.join(",", java.util.Collections.nCopies(affectedCodes.size(), "?"));
+    var arguments = new java.util.ArrayList<Object>();
+    arguments.add(period);
+    arguments.add(cityCode);
+    arguments.addAll(affectedCodes);
+    List<String> existingCodes =
+        jdbcTemplate.queryForList(
+            """
+            SELECT s.billing_point_code
+              FROM billing_point_snapshot s
+             WHERE s.data_period = ? AND s.city_code = ? AND s.billing_point_code IN (
+            """
+                + placeholders
+                + ") ORDER BY s.billing_point_code",
+            String.class,
+            arguments.toArray());
+    for (String billingPointCode : existingCodes) {
+      recalculateOne(YearMonth.parse(period), cityCode, billingPointCode);
+    }
+  }
+
   private void recalculateOne(YearMonth period, String cityCode, String billingPointCode) {
     SnapshotInfo snapshot = loadSnapshot(period, cityCode, billingPointCode);
     EnergyAndPayment current = loadActual(period, cityCode, billingPointCode);
@@ -69,13 +105,14 @@ public class AuditRecalculationService {
     AuditCalculationInput.ReferencePeriod yoy =
         reference(period.minusYears(1), cityCode, billingPointCode);
     AuditCalculationInput.ReferencePeriod mom =
-        reference(period.minusMonths(1), cityCode, billingPointCode);
+        previousApprovedPaymentReference(period, cityCode, billingPointCode);
     AuditCalculationResult result =
         calculator.calculate(
             new AuditCalculationInput(
                 period,
                 current.paymentEligible(),
                 current.actualEnergy(),
+                current.paymentDaysOr(period.lengthOfMonth()),
                 benchmarkTotal,
                 yoy,
                 mom));
@@ -86,6 +123,7 @@ public class AuditRecalculationService {
             current.paymentEligible(),
             current.actualEnergy(),
             current.actualAmount(),
+            current.paymentDaysOr(period.lengthOfMonth()),
             benchmarkTotal,
             yoy,
             mom,
@@ -125,7 +163,37 @@ public class AuditRecalculationService {
         period,
         actual.paymentEligible(),
         actual.actualEnergy(),
+        actual.paymentDaysOr(period.lengthOfMonth()),
         loadBenchmarkTotal(period, cityCode, billingPointCode));
+  }
+
+  private AuditCalculationInput.ReferencePeriod previousApprovedPaymentReference(
+      YearMonth currentPeriod, String cityCode, String billingPointCode) {
+    List<String> periods =
+        jdbcTemplate.queryForList(
+            """
+            SELECT DISTINCT data_period
+              FROM payment_detail
+             WHERE city_code = ? AND billing_point_code = ? AND data_period < ?
+             ORDER BY data_period DESC
+            """,
+            String.class,
+            cityCode,
+            billingPointCode,
+            currentPeriod.toString());
+    for (String periodText : periods) {
+      YearMonth period = YearMonth.parse(periodText);
+      EnergyAndPayment actual = loadActual(period, cityCode, billingPointCode);
+      if (actual.paymentEligible()) {
+        return new AuditCalculationInput.ReferencePeriod(
+            period,
+            true,
+            actual.actualEnergy(),
+            actual.paymentDaysOr(period.lengthOfMonth()),
+            loadBenchmarkTotal(period, cityCode, billingPointCode));
+      }
+    }
+    return null;
   }
 
   private EnergyAndPayment loadActual(YearMonth period, String cityCode, String billingPointCode) {
@@ -155,24 +223,36 @@ public class AuditRecalculationService {
     List<PaymentStatusAndAmount> payments =
         jdbcTemplate.query(
             """
-            SELECT audit_status, actual_report_amount
+            SELECT audit_status, actual_report_amount, payment_start, payment_end
               FROM payment_detail
              WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
             """,
             (resultSet, rowNumber) ->
                 new PaymentStatusAndAmount(
                     resultSet.getString("audit_status"),
-                    resultSet.getBigDecimal("actual_report_amount")),
+                    resultSet.getBigDecimal("actual_report_amount"),
+                    resultSet.getObject("payment_start", LocalDate.class),
+                    resultSet.getObject("payment_end", LocalDate.class)),
             period.toString(),
             cityCode,
             billingPointCode);
     boolean hasPayments = !payments.isEmpty();
     boolean eligible = hasPayments;
     BigDecimal actualAmount = BigDecimal.ZERO;
+    LocalDate paymentStart = null;
+    LocalDate paymentEnd = null;
     for (PaymentStatusAndAmount payment : payments) {
       eligible &= isApproved(payment.auditStatus());
       if (payment.actualAmount() != null) {
         actualAmount = actualAmount.add(payment.actualAmount());
+      }
+      if (payment.paymentStart() != null
+          && (paymentStart == null || payment.paymentStart().isBefore(paymentStart))) {
+        paymentStart = payment.paymentStart();
+      }
+      if (payment.paymentEnd() != null
+          && (paymentEnd == null || payment.paymentEnd().isAfter(paymentEnd))) {
+        paymentEnd = payment.paymentEnd();
       }
     }
     return new EnergyAndPayment(
@@ -180,7 +260,8 @@ public class AuditRecalculationService {
         hasPayments ? actualAmount : null,
         payments.size(),
         hasPayments,
-        eligible);
+        eligible,
+        paymentDays(paymentStart, paymentEnd));
   }
 
   private BigDecimal loadBenchmarkTotal(
@@ -260,9 +341,12 @@ public class AuditRecalculationService {
             referenceEnd(evidence.yoyReference()),
             referenceEnergy(evidence.yoyReference()),
             referenceDaily(evidence.yoyReference()),
-            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
             referenceBenchmarkAverage(evidence.yoyReference()),
-            factorK(evidence.currentBenchmarkTotal(), period, evidence.yoyReference()),
+            factorK(
+                evidence.currentBenchmarkTotal(),
+                evidence.currentPaymentDays(),
+                evidence.yoyReference()),
             result.yoy().threshold(),
             result.yoy().ratioPercent(),
             metricStatus(result.yoy()),
@@ -273,16 +357,19 @@ public class AuditRecalculationService {
             referenceEnd(evidence.momReference()),
             referenceEnergy(evidence.momReference()),
             referenceDaily(evidence.momReference()),
-            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
             referenceBenchmarkAverage(evidence.momReference()),
-            factorK(evidence.currentBenchmarkTotal(), period, evidence.momReference()),
+            factorK(
+                evidence.currentBenchmarkTotal(),
+                evidence.currentPaymentDays(),
+                evidence.momReference()),
             result.mom().threshold(),
             result.mom().ratioPercent(),
             metricStatus(result.mom()),
             result.rated().applicable(),
             notApplicableReason(result.rated()),
             evidence.currentBenchmarkTotal(),
-            benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+            benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
             result.rated().ratioPercent(),
             metricStatus(result.rated()),
             result.status().name(),
@@ -351,9 +438,12 @@ public class AuditRecalculationService {
           referenceEnd(evidence.yoyReference()),
           referenceEnergy(evidence.yoyReference()),
           referenceDaily(evidence.yoyReference()),
-          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
           referenceBenchmarkAverage(evidence.yoyReference()),
-          factorK(evidence.currentBenchmarkTotal(), period, evidence.yoyReference()),
+          factorK(
+              evidence.currentBenchmarkTotal(),
+              evidence.currentPaymentDays(),
+              evidence.yoyReference()),
           result.yoy().threshold(),
           result.yoy().ratioPercent(),
           metricStatus(result.yoy()),
@@ -364,16 +454,19 @@ public class AuditRecalculationService {
           referenceEnd(evidence.momReference()),
           referenceEnergy(evidence.momReference()),
           referenceDaily(evidence.momReference()),
-          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
           referenceBenchmarkAverage(evidence.momReference()),
-          factorK(evidence.currentBenchmarkTotal(), period, evidence.momReference()),
+          factorK(
+              evidence.currentBenchmarkTotal(),
+              evidence.currentPaymentDays(),
+              evidence.momReference()),
           result.mom().threshold(),
           result.mom().ratioPercent(),
           metricStatus(result.mom()),
           result.rated().applicable(),
           notApplicableReason(result.rated()),
           evidence.currentBenchmarkTotal(),
-          benchmarkAverage(evidence.currentBenchmarkTotal(), period),
+          benchmarkAverage(evidence.currentBenchmarkTotal(), evidence.currentPaymentDays()),
           result.rated().ratioPercent(),
           metricStatus(result.rated()),
           result.status().name(),
@@ -430,29 +523,36 @@ public class AuditRecalculationService {
   private BigDecimal referenceDaily(AuditCalculationInput.ReferencePeriod reference) {
     return reference == null
         ? null
-        : divide(reference.actualEnergy(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
+        : divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()));
   }
 
-  private BigDecimal benchmarkAverage(BigDecimal benchmarkTotal, YearMonth period) {
-    return divide(benchmarkTotal, BigDecimal.valueOf(period.lengthOfMonth()));
+  private BigDecimal benchmarkAverage(BigDecimal benchmarkTotal, int paymentDays) {
+    return divide(benchmarkTotal, BigDecimal.valueOf(paymentDays));
   }
 
   private BigDecimal referenceBenchmarkAverage(AuditCalculationInput.ReferencePeriod reference) {
     return reference == null
         ? null
-        : divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
+        : divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
   }
 
   private BigDecimal factorK(
       BigDecimal currentBenchmarkTotal,
-      YearMonth currentPeriod,
+      int currentPaymentDays,
       AuditCalculationInput.ReferencePeriod reference) {
-    BigDecimal currentAverage = benchmarkAverage(currentBenchmarkTotal, currentPeriod);
+    BigDecimal currentAverage = benchmarkAverage(currentBenchmarkTotal, currentPaymentDays);
     BigDecimal referenceAverage = referenceBenchmarkAverage(reference);
     if (currentAverage == null || referenceAverage == null || referenceAverage.signum() <= 0) {
       return null;
     }
     return currentAverage.divide(referenceAverage, MathContext.DECIMAL128).max(BigDecimal.ONE);
+  }
+
+  private Integer paymentDays(LocalDate start, LocalDate end) {
+    if (start == null || end == null || start.isAfter(end)) {
+      return null;
+    }
+    return Math.toIntExact(ChronoUnit.DAYS.between(start, end) + 1);
   }
 
   private BigDecimal divide(BigDecimal numerator, BigDecimal denominator) {
@@ -485,9 +585,15 @@ public class AuditRecalculationService {
       return false;
     }
     String normalized = status.trim();
-    return (normalized.contains("通过") || normalized.equalsIgnoreCase("APPROVED"))
-        && !normalized.contains("未")
-        && !normalized.contains("不通过");
+    String upper = normalized.toUpperCase(java.util.Locale.ROOT);
+    boolean approved = normalized.contains("通过") || upper.equals("APPROVED");
+    boolean rejected =
+        normalized.contains("未")
+            || normalized.contains("不通过")
+            || normalized.contains("驳回")
+            || normalized.contains("退回")
+            || upper.equals("REJECTED");
+    return approved && !rejected;
   }
 
   private record EnergyAndPayment(
@@ -495,9 +601,16 @@ public class AuditRecalculationService {
       BigDecimal actualAmount,
       int paymentCount,
       boolean hasPayments,
-      boolean paymentEligible) {}
+      boolean paymentEligible,
+      Integer paymentDays) {
 
-  private record PaymentStatusAndAmount(String auditStatus, BigDecimal actualAmount) {}
+    int paymentDaysOr(int fallback) {
+      return paymentDays == null || paymentDays <= 0 ? fallback : paymentDays;
+    }
+  }
+
+  private record PaymentStatusAndAmount(
+      String auditStatus, BigDecimal actualAmount, LocalDate paymentStart, LocalDate paymentEnd) {}
 
   private record SnapshotInfo(
       String billingPointCode,
@@ -515,6 +628,7 @@ public class AuditRecalculationService {
       boolean currentPaymentEligible,
       BigDecimal currentActualEnergy,
       BigDecimal currentActualAmount,
+      int currentPaymentDays,
       BigDecimal currentBenchmarkTotal,
       AuditCalculationInput.ReferencePeriod yoyReference,
       AuditCalculationInput.ReferencePeriod momReference,

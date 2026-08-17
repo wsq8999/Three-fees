@@ -126,6 +126,7 @@ async function load(): Promise<void> {
 async function initialize(candidate: ReportGenerationCandidate): Promise<void> {
   if (isCorrection.value) return;
   initializing.value = true;
+  errorMessage.value = "";
   try {
     const draft = await businessApi.drafts.createOrResume(candidate.billingPointPeriodId);
     suppressLeaveConfirm.value = true;
@@ -137,7 +138,9 @@ async function initialize(candidate: ReportGenerationCandidate): Promise<void> {
       },
     });
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "报告初始化失败");
+    const message = error instanceof Error ? error.message : "报告初始化失败";
+    errorMessage.value = message;
+    ElMessage.error(message);
   } finally {
     initializing.value = false;
   }
@@ -452,7 +455,7 @@ onMounted(load);
       </ElEmpty>
     </section>
 
-    <footer class="generation-actions">
+    <footer v-if="isCorrection" class="generation-actions">
       <ElButton :icon="ArrowLeft" @click="goBack">返回</ElButton>
       <ElButton
         type="primary"

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('all', 'repository', 'backend', 'frontend', 'ai')]
+    [ValidateSet('all', 'repository', 'backend', 'frontend')]
     [string]$Scope = 'all',
 
     [switch]$InstallDependencies
@@ -81,37 +81,6 @@ try {
         }
     }
 
-    if (Test-Scope 'ai') {
-        $aiPath = Join-Path $repositoryRoot 'ai-service'
-        if (-not (Test-Path -LiteralPath (Join-Path $aiPath 'pyproject.toml'))) {
-            throw "AI sidecar pyproject.toml not found: $aiPath"
-        }
-
-        $venvPython = Join-Path $aiPath '.venv\Scripts\python.exe'
-        $pythonCommand = if ($env:AI_PYTHON) {
-            $env:AI_PYTHON
-        }
-        elseif (Test-Path -LiteralPath $venvPython) {
-            $venvPython
-        }
-        else {
-            'python'
-        }
-
-        Push-Location $aiPath
-        try {
-            if ($InstallDependencies) {
-                Invoke-Checked 'AI dependency installation' {
-                    & $pythonCommand -m pip install -e '.[dev]'
-                }
-            }
-            Invoke-Checked 'AI tests' { & $pythonCommand -m pytest }
-            Invoke-Checked 'AI lint' { & $pythonCommand -m ruff check . }
-        }
-        finally {
-            Pop-Location
-        }
-    }
 }
 finally {
     Pop-Location

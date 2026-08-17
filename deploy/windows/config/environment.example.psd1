@@ -7,8 +7,10 @@
         DB_PASSWORD           = ''
         APP_FILE_ROOT         = 'C:\ProgramData\ThreeFees\shared\files'
         REPORT_FONT_PATH      = 'C:\Windows\Fonts\simhei.ttf'
-        AI_SERVICE_BASE_URL   = 'http://127.0.0.1:8100'
-        AI_SERVICE_TOKEN      = ''
+        AI_ENABLED            = 'false'
+        KIMI_API_KEY          = ''
+        KIMI_BASE_URL         = 'https://api.moonshot.cn/v1'
+        KIMI_MODEL            = 'kimi-k3'
     }
 
     Api = @{
@@ -28,13 +30,4 @@
         THREE_FEES_PROCESS_ROLE       = 'worker'
     }
 
-    Ai = @{
-        AI_BIND_HOST       = '127.0.0.1'
-        AI_BIND_PORT       = '8100'
-        AI_SERVICE_TOKEN   = ''
-        AI_MODEL_PROVIDER  = 'fake'
-        KIMI_API_KEY       = ''
-        KIMI_BASE_URL      = 'https://api.moonshot.cn/v1'
-        KIMI_MODEL         = ''
-    }
 }
