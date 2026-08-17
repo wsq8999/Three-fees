@@ -15,6 +15,8 @@ export interface ImportBatch {
   id: string;
   datasetType: DatasetType;
   period: string;
+  periodStart?: string | null;
+  periodEnd?: string | null;
   cityCode?: string;
   taskId?: string;
   fileName: string;
@@ -203,6 +205,7 @@ export interface DashboardData {
   overLimitTypeCounts: Array<{ name: string; count: number }>;
   pendingTasks: Array<{
     id: string;
+    billingPointPeriodId?: string;
     title: string;
     description: string;
     target: string;
@@ -217,7 +220,7 @@ export interface DashboardData {
   }>;
 }
 
-export type DraftIntent = "AUTO" | "ASK" | "EDIT" | "IMAGE_ANALYSIS";
+export type DraftIntent = "AUTO" | "ASK" | "EDIT" | "CORRECTION" | "IMAGE_ANALYSIS";
 
 export interface DraftBlock {
   id: string;
@@ -236,15 +239,6 @@ export interface DraftMessage {
   createdAt: string;
 }
 
-export interface DraftVersion {
-  id: string;
-  version: number;
-  reason: "INITIAL" | "EDIT" | "IMAGE_ANALYSIS" | "RESTORE";
-  summary: string;
-  createdAt: string;
-  blocks: DraftBlock[];
-}
-
 export interface ReportDraft {
   id: string;
   billingPointId: string;
@@ -252,10 +246,12 @@ export interface ReportDraft {
   billingPointName: string;
   city?: BusinessCity | null;
   period: string;
+  overLimitType?: string | null;
+  maxExceedRatio?: string | null;
   status: "EDITING" | "GENERATING" | "FINALIZED";
   blocks: DraftBlock[];
+  imageFileIds: string[];
   messages: DraftMessage[];
-  versions: DraftVersion[];
   updatedAt: string;
   formalReportId: string | null;
   entityVersion: number;
@@ -302,6 +298,7 @@ export interface ReportSummary {
 }
 
 export interface ReportGenerationCandidate {
+  billingPointPeriodId: string;
   billingPointCode: string;
   billingPointName: string;
   cityCode: string;

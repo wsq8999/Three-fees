@@ -1,5 +1,6 @@
 package com.threefees.importing.domain;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -8,6 +9,8 @@ public record ImportBatch(
     String publicId,
     DatasetType datasetType,
     String period,
+    LocalDate periodStart,
+    LocalDate periodEnd,
     String cityCode,
     ImportBatchStatus status,
     long sourceFileId,

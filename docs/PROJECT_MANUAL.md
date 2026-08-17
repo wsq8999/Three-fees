@@ -51,8 +51,7 @@
 ```text
 backend/          Java 21 / Spring Boot 模块化单体
 frontend/         Vue 3 / TypeScript 单页管理端
-ai-service/       无状态、内网可见的 Python AI 原子能力
-contracts/        OpenAPI、AI JSON Schema、导入字段元数据
+contracts/        OpenAPI、导入字段元数据
 deploy/windows/   IIS、WinSW、PowerShell 部署与备份脚本
 docs/             手册、ADR、角色报告与运行说明
 ```
@@ -80,10 +79,8 @@ docs/             手册、ADR、角色报告与运行说明
 ### 5.5 AI 边界
 
 - Java/MySQL 是唯一业务事实源，负责用户、权限、任务、审计、报告和状态机。
-- Python sidecar 不访问 MySQL，只提供文档解析、事实提取、原因判断、报告组织和纠错理解等原子能力。
-- Python 运行基线为 3.12；`pyproject.toml` 允许 3.12–3.14，但未在某版本完成全套验证前不得把它写成生产基线。
-- 内部接口绑定回环地址，使用服务令牌；请求包含契约版本、工作流版本、任务 ID、幂等键、输入摘要和 trace ID。
-- 外部模型仅接收最小必要、脱敏/假名化的数据；当前默认使用假模型验证，不调用真实付费 API。
+- 生成报告助手由 Java 后端通过 Spring AI 直接调用 Kimi OpenAI 兼容接口，不再启动独立 Python sidecar。
+- 外部模型仅接收最小必要、脱敏/假名化的数据；模型密钥只通过本机环境变量或私有配置注入，不写入源码。
 
 ### 5.6 业务口径
 
@@ -95,9 +92,7 @@ docs/             手册、ADR、角色报告与运行说明
 
 ### 5.7 Windows 服务当前状态
 
-- `three-fees-api` 与 `three-fees-ai` 配置为自动启动；AI 仅绑定 `127.0.0.1:8100`。
-- `three-fees-worker` 的进程角色与部署模板已建立，但第一阶段尚无持久任务消费者/常驻循环，因此固定为 `Manual` 且安装时不启动，避免正常退出后被反复拉起。
-- 只有 durable task consumer、租约、重试和重启恢复测试完成后，Commander 才能批准 worker 改为自动启动。
+- `three-fees-api` 与 `three-fees-worker` 配置为自动启动；对外只通过 IIS 访问 API。
 
 ### 5.8 备份与恢复当前状态
 
@@ -179,8 +174,7 @@ docs/             手册、ADR、角色报告与运行说明
 | 名称 | 用途 | 环境变量 | 存储位置 | 状态 |
 |---|---|---|---|---|
 | MySQL 凭据 | 业务数据库 | `DB_USERNAME` / `DB_PASSWORD` | Windows 服务环境变量或本地未跟踪配置 | 值不入库 |
-| AI 服务令牌 | Java 调用 Python | `AI_SERVICE_TOKEN` | Windows 服务环境变量 | 待生成，值不入库 |
-| Kimi API 密钥 | 外部模型调用 | `KIMI_API_KEY` | Windows 服务环境变量 | DEMO 中旧值视为已暴露，使用前必须轮换 |
+| Kimi API 密钥 | 生成报告助手调用外部模型 | `KIMI_API_KEY` | Windows 服务环境变量或本地未跟踪配置 | 值不入库 |
 | 会话 Cookie 密钥材料 | 会话安全 | 平台相关环境变量 | Windows 安全存储 | 值不入库 |
 
 ## 12. Commander 阶段状态与下一派单

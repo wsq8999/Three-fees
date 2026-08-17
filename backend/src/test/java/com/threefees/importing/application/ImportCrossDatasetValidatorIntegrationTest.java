@@ -7,6 +7,7 @@ import com.threefees.ThreeFeesApplication;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -155,6 +156,8 @@ class ImportCrossDatasetValidatorIntegrationTest {
         "batch-" + type.name() + "-" + period + "-" + cityCode,
         type,
         period,
+        LocalDate.parse(period + "-01"),
+        LocalDate.parse(period + "-28"),
         cityCode,
         ImportBatchStatus.PROCESSING,
         1,

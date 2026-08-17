@@ -3,6 +3,7 @@ package com.threefees.importing.application;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportError;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
@@ -12,6 +13,8 @@ public interface ImportBatchRepository {
       String publicId,
       DatasetType datasetType,
       String period,
+      LocalDate periodStart,
+      LocalDate periodEnd,
       String cityCode,
       long sourceFileId,
       String taskPublicId,

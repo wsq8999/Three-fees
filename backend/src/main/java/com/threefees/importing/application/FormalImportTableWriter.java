@@ -35,13 +35,16 @@ public class FormalImportTableWriter {
   private static final String BILLING_POINT_TYPE = "报账点类型";
   private static final String BILLING_POINT_STATUS = "报账点状态";
   private static final String LAST_PERIOD_START = "最后报账期始";
-  private static final String LAST_PERIOD_END = "最后报账期止";
+  private static final String LAST_PERIOD_END = "最后报账期终";
   private static final String PERIOD_START = "缴费期始";
   private static final String PERIOD_END = "缴费期终";
   private static final String ACTUAL_AMOUNT = "实际报账金额";
   private static final String METER_ACCOUNT_NO = "电表户号";
   private static final String METER_MULTIPLIER = "电表倍率";
   private static final String ALLOCATED_ENERGY = "分摊后度数";
+  private static final String RESOURCE_CODE = "关联资源编码";
+  private static final String RESOURCE_NAME = "关联资源名称";
+  private static final String METER_CODE = "关联电表编码";
   private static final String YEAR = "年份";
   private static final String MONTH = "月份";
   private static final String MONTHLY_BENCHMARK = "月总标杆";
@@ -65,6 +68,7 @@ public class FormalImportTableWriter {
   }
 
   private void replaceBillingPoints(ImportBatch batch, List<ImportRow> rows) {
+    List<ImportRow> aggregatedRows = aggregateBillingPointRows(rows);
     jdbcTemplate.batchUpdate(
         """
         INSERT INTO billing_point_snapshot
@@ -76,6 +80,8 @@ public class FormalImportTableWriter {
         ON DUPLICATE KEY UPDATE
           public_id = VALUES(public_id),
           data_period = VALUES(data_period),
+          period_start = VALUES(period_start),
+          period_end = VALUES(period_end),
           city_code = VALUES(city_code),
           district_code = VALUES(district_code),
           source_import_job_id = VALUES(source_import_job_id),
@@ -91,7 +97,7 @@ public class FormalImportTableWriter {
           last_reimbursement_end = VALUES(last_reimbursement_end),
           data_json = VALUES(data_json)
         """,
-        new RowSetter(rows) {
+        new RowSetter(aggregatedRows) {
           @Override
           protected void setRow(PreparedStatement ps, ImportRow row, Map<String, String> values)
               throws SQLException {
@@ -124,7 +130,46 @@ public class FormalImportTableWriter {
             ps.setString(19, row.valuesJson());
           }
         });
-    syncBillingPointMaster(batch, rows);
+    syncBillingPointMaster(batch, aggregatedRows);
+  }
+
+  private List<ImportRow> aggregateBillingPointRows(List<ImportRow> rows) {
+    var grouped = new LinkedHashMap<String, List<ImportRow>>();
+    for (ImportRow row : rows) {
+      grouped.computeIfAbsent(row.billingPointCode(), ignored -> new java.util.ArrayList<>()).add(row);
+    }
+    var aggregated = new java.util.ArrayList<ImportRow>();
+    for (List<ImportRow> group : grouped.values()) {
+      ImportRow first = group.getFirst();
+      Map<String, String> merged = new LinkedHashMap<>(readMap(first.valuesJson()));
+      mergeMultiValue(merged, group, RESOURCE_CODE);
+      mergeMultiValue(merged, group, RESOURCE_NAME);
+      mergeMultiValue(merged, group, METER_CODE);
+      aggregated.add(
+          new ImportRow(
+              first.sourceRow(),
+              first.cityCode(),
+              first.billingPointCode(),
+              first.billingPointName(),
+              first.paymentCode(),
+              first.meterCode(),
+              first.businessKey(),
+              writeJson(merged)));
+    }
+    return List.copyOf(aggregated);
+  }
+
+  private void mergeMultiValue(Map<String, String> target, List<ImportRow> rows, String column) {
+    var values = new LinkedHashSet<String>();
+    for (ImportRow row : rows) {
+      String value = value(readMap(row.valuesJson()), column);
+      if (value != null && !value.isBlank()) {
+        values.add(value);
+      }
+    }
+    if (!values.isEmpty()) {
+      target.put(column, String.join("、", values));
+    }
   }
 
   private void syncBillingPointMaster(ImportBatch batch, List<ImportRow> rows) {
@@ -372,6 +417,14 @@ public class FormalImportTableWriter {
       return objectMapper.readValue(json, STRING_MAP);
     } catch (JacksonException exception) {
       throw new IllegalStateException("Import row JSON is invalid", exception);
+    }
+  }
+
+  private String writeJson(Map<String, String> values) {
+    try {
+      return objectMapper.writeValueAsString(values);
+    } catch (JacksonException exception) {
+      throw new IllegalStateException("Import row JSON could not be serialized", exception);
     }
   }
 

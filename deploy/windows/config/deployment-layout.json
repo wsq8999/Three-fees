@@ -13,12 +13,6 @@
       "startMode": "Automatic",
       "bindAddress": null,
       "port": null
-    },
-    {
-      "id": "three-fees-ai",
-      "startMode": "Automatic",
-      "bindAddress": "127.0.0.1",
-      "port": 8100
     }
   ],
   "iis": {

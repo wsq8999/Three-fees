@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
 
 import { businessApi, formatPercent } from "@/api/business-api";
@@ -9,6 +9,7 @@ import { useSessionStore } from "@/stores/session";
 import type { DashboardData } from "@/types/business";
 
 const router = useRouter();
+const route = useRoute();
 const session = useSessionStore();
 const dashboard = ref<DashboardData | null>(null);
 const loading = ref(true);
@@ -99,13 +100,17 @@ async function changePeriod(): Promise<void> {
 }
 
 async function openTask(task: DashboardData["pendingTasks"][number]): Promise<void> {
+  if (task.billingPointPeriodId) {
+    const draft = await businessApi.drafts.createOrResume(task.billingPointPeriodId);
+    await router.push({
+      name: "report-draft",
+      params: { draftId: draft.id },
+      query: { from: route.fullPath },
+    });
+    return;
+  }
   await router.push({
-    path: "/reports/generate",
-    query: {
-      billingPointCode: task.billingPointCode,
-      billingPointName: task.billingPointName,
-      period: task.period,
-    },
+    path: task.target,
   });
 }
 

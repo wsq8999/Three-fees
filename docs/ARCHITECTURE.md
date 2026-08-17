@@ -134,8 +134,6 @@ sequenceDiagram
 | IIS Site | `443` | HTTPS、SPA、压缩、缓存、`/api` 反代 | 公开 |
 | `three-fees-api` | 回环 Java 端口 | REST 与认证 | 仅 IIS |
 | `three-fees-worker` | 无公开端口 | 持久任务消费 | 不公开 |
-| `three-fees-ai` | `127.0.0.1:8100` | AI 原子能力 | 仅 Java |
 | MySQL | `3306` | 业务数据库 | 仅受控主机/网段 |
 
 首期为单机可试运行部署。Redis、外部 MQ、对象存储、微服务和 Kubernetes 均不是当前依赖。
-

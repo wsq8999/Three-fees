@@ -1,8 +1,12 @@
 package com.threefees.report.application;
 
 import com.threefees.ai.application.AiServiceClient;
+import com.threefees.ai.application.AiServiceClient.AgentContext;
 import com.threefees.ai.application.AiServiceClient.AiImage;
+import com.threefees.ai.application.AiServiceClient.ConversationTurn;
 import com.threefees.ai.application.AiServiceClient.Fact;
+import com.threefees.ai.application.AiServiceClient.ImageAnalysis;
+import com.threefees.ai.application.AiServiceClient.Reference;
 import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.ai.application.AiServiceException;
 import com.threefees.file.application.StoredFileService;
@@ -17,13 +21,18 @@ import com.threefees.task.domain.TaskType;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.security.access.AccessDeniedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -34,6 +43,7 @@ import tools.jackson.databind.ObjectMapper;
 @Service
 public class ReportDraftService {
 
+  private static final Logger LOGGER = LoggerFactory.getLogger(ReportDraftService.class);
   private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
 
   private final JdbcTemplate jdbcTemplate;
@@ -41,18 +51,26 @@ public class ReportDraftService {
   private final AiServiceClient aiServiceClient;
   private final StoredFileService storedFileService;
   private final BusinessTaskRepository taskRepository;
+  private final int maxHistoryCases;
+  private final int maxCrossCityCases;
 
   public ReportDraftService(
       JdbcTemplate jdbcTemplate,
       ObjectMapper objectMapper,
       AiServiceClient aiServiceClient,
       StoredFileService storedFileService,
-      BusinessTaskRepository taskRepository) {
+      BusinessTaskRepository taskRepository,
+      @org.springframework.beans.factory.annotation.Value("${app.ai.max-history-cases:30}")
+          int maxHistoryCases,
+      @org.springframework.beans.factory.annotation.Value("${app.ai.max-cross-city-cases:5}")
+          int maxCrossCityCases) {
     this.jdbcTemplate = jdbcTemplate;
     this.objectMapper = objectMapper;
     this.aiServiceClient = aiServiceClient;
     this.storedFileService = storedFileService;
     this.taskRepository = taskRepository;
+    this.maxHistoryCases = Math.max(1, Math.min(maxHistoryCases, 100));
+    this.maxCrossCityCases = Math.max(0, Math.min(maxCrossCityCases, 20));
   }
 
   @Transactional
@@ -72,10 +90,14 @@ public class ReportDraftService {
     String publicId = UUID.randomUUID().toString();
     ReportSections sections =
         new ReportSections(
-            snapshot.billingPointName() + "物业电费稽核报告",
-            "账期：" + snapshot.period() + "；报账点：" + snapshot.billingPointCode() + "。",
-            "系统稽核结果为超标，需结合业务凭证和现场证据进一步排查。",
-            "请复核计量、合同、缴费依据并形成闭环整改记录。");
+            "《" + snapshot.billingPointName() + "电费稽核说明》",
+            "报账点编码为"
+                + snapshot.billingPointCode()
+                + "，账期为"
+                + snapshot.period()
+                + "，系统稽核结果为超标。",
+            "当前证据不足，需结合现场设备运行、设备变化、计量和相关系统数据进一步排查。",
+            "当前尚未形成有证据支撑的最终原因，待完成现场材料核验后确定整改结论。");
     var keyHolder = new GeneratedKeyHolder();
     try {
       jdbcTemplate.update(
@@ -93,7 +115,112 @@ public class ReportDraftService {
     if (key == null) {
       throw new IllegalStateException("Draft key was not generated");
     }
+    saveVersion(key.longValue(), 0, "INITIAL", sections, List.of(), actor.username());
+    if (aiServiceClient.isAvailable()) {
+      try {
+        Draft initialDraft = loadDraft(publicId);
+        var generated =
+            aiServiceClient.assist(
+                UUID.randomUUID().toString(),
+                "EDIT",
+                "请严格依据系统事实生成第一版完整电费稽核说明。证据不足时明确列出待核查事项，不能猜测具体原因。",
+                initialDraft.sections(),
+                facts(initialDraft),
+                List.of(),
+                agentContext(initialDraft),
+                UUID.randomUUID().toString());
+        if (generated.updatedSections() == null) {
+          throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整初始报告", true);
+        }
+        updateDraft(
+            key.longValue(),
+            generated.updatedSections(),
+            List.of(),
+            1,
+            generated.initialReason(),
+            generated.finalReason(),
+            actor.username(),
+            0);
+        saveVersion(
+            key.longValue(),
+            1,
+            "AI_INITIAL",
+            generated.updatedSections(),
+            List.of(),
+            actor.username());
+      } catch (AiServiceException exception) {
+        LOGGER.warn(
+            "Initial AI draft generation failed; keeping default draft. draftId={}, code={}",
+            publicId,
+            exception.code());
+      }
+    }
     return find(publicId, actor);
+  }
+
+  @Transactional
+  public Draft createCorrection(String reportId, String reason, CurrentUser actor) {
+    String safeReason = reason == null ? "" : reason.trim();
+    if (safeReason.isBlank()) {
+      throw new BusinessRuleException("CORRECTION_REASON_REQUIRED", "请填写更正原因");
+    }
+    SourceReport source = sourceReport(reportId);
+    requireScope(actor, source.cityCode());
+    ReportSections sections = reportSections(source);
+    List<String> imageIds = extractInlineImages(source.html(), actor.username());
+    Draft existing = findBySnapshotId(source.snapshotId());
+    if (existing == null) {
+      String publicId = UUID.randomUUID().toString();
+      var keyHolder = new GeneratedKeyHolder();
+      jdbcTemplate.update(
+          connection ->
+              insertCorrectionDraft(
+                  connection,
+                  publicId,
+                  source.snapshotId(),
+                  reportId,
+                  sections,
+                  imageIds,
+                  safeReason,
+                  actor.username()),
+          keyHolder);
+      Number key = keyHolder.getKey();
+      if (key == null) {
+        throw new IllegalStateException("Correction draft key was not generated");
+      }
+      bindImages(key.longValue(), imageIds, List.of(), actor.username());
+      saveVersion(key.longValue(), 0, "CORRECTION", sections, imageIds, actor.username());
+      return find(publicId, actor);
+    }
+    if ("GENERATING".equals(existing.status())) {
+      throw new ResourceConflictException("DRAFT_GENERATING", "工作稿正在生成报告，请稍后再试");
+    }
+    int nextVersion = existing.currentVersion() + 1;
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET status = 'CORRECTING',
+               title = ?, situation = ?, analysis = ?, rectification = ?,
+               current_image_file_ids_json = ?,
+               current_version_no = ?,
+               formal_report_public_id = ?,
+               ai_final_reason = ?,
+               updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
+         WHERE id = ?
+        """,
+        sections.title(),
+        sections.situation(),
+        sections.analysis(),
+        sections.rectification(),
+        writeJson(imageIds),
+        nextVersion,
+        reportId,
+        safeReason,
+        actor.username(),
+        existing.id());
+    bindImages(existing.id(), imageIds, List.of(), actor.username());
+    saveVersion(existing.id(), nextVersion, "CORRECTION", sections, imageIds, actor.username());
+    return find(existing.publicId(), actor);
   }
 
   @Transactional(readOnly = true)
@@ -117,20 +244,30 @@ public class ReportDraftService {
     requireExpectedVersion(draft, expectedVersion);
     String safeInstruction = requireInstruction(instruction);
     String normalizedIntent = classifyIntent(intent, safeInstruction);
-    List<String> safeImageIds = imageFileIds == null ? List.of() : List.copyOf(imageFileIds);
-    if (!"IMAGE_ANALYSIS".equals(normalizedIntent) && !safeImageIds.isEmpty()) {
+    List<String> requestedImageIds = imageFileIds == null ? List.of() : List.copyOf(imageFileIds);
+    if (!"IMAGE_ANALYSIS".equals(normalizedIntent) && !requestedImageIds.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_NOT_ALLOWED", "仅图片分析可以携带图片");
     }
-    if ("IMAGE_ANALYSIS".equals(normalizedIntent) && safeImageIds.isEmpty()) {
-      throw new BusinessRuleException("AI_IMAGES_REQUIRED", "图片分析至少需要一张图片");
-    }
-    if (safeImageIds.size() > 10
-        || safeImageIds.stream().distinct().count() != safeImageIds.size()) {
+    if (requestedImageIds.size() > 10
+        || requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
       throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    }
+    List<String> reportImageIds =
+        "IMAGE_ANALYSIS".equals(normalizedIntent)
+            ? Stream.concat(draft.currentImageFileIds().stream(), requestedImageIds.stream())
+                .distinct()
+                .toList()
+            : draft.currentImageFileIds();
+    if ("IMAGE_ANALYSIS".equals(normalizedIntent) && reportImageIds.isEmpty()) {
+      throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告排查分析中粘贴至少一张图片");
+    }
+    if (reportImageIds.size() > 10) {
+      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "当前报告最多支持 10 张分析图片");
     }
     long totalImageBytes = 0;
     var images = new java.util.ArrayList<AiImage>();
-    for (String imageId : safeImageIds) {
+    List<String> modelImageIds = "ASK".equals(normalizedIntent) ? List.of() : reportImageIds;
+    for (String imageId : modelImageIds) {
       var file = storedFileService.find(imageId);
       requireFileOwner(actor, file.createdBy());
       if (!("image/png".equals(file.mediaType()) || "image/jpeg".equals(file.mediaType()))) {
@@ -146,12 +283,7 @@ public class ReportDraftService {
       images.add(
           new AiImage(file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
     }
-    List<Fact> facts =
-        List.of(
-            new Fact("billingPointCode", draft.billingPointCode()),
-            new Fact("billingPointName", draft.billingPointName()),
-            new Fact("period", draft.period()),
-            new Fact("auditStatus", draft.auditStatus()));
+    List<Fact> facts = facts(draft);
     ReportSections updated;
     String answer;
     var result =
@@ -162,6 +294,7 @@ public class ReportDraftService {
             draft.sections(),
             facts,
             images,
+            agentContext(draft),
             traceId);
     updated = result.updatedSections();
     answer = result.answer();
@@ -172,20 +305,38 @@ public class ReportDraftService {
     if (changed && updated == null) {
       throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整报告正文", false);
     }
+    if ("CORRECTION".equals(normalizedIntent)
+        && (result.finalReason() == null || result.finalReason().isBlank())) {
+      throw new AiServiceException(
+          "AI_CORRECTION_REASON_MISSING", "AI 未能提取用户确认的最终原因，请换一种说法后重试", false);
+    }
     int version = draft.currentVersion();
     if (changed) {
       version++;
-      List<String> nextImages =
-          "IMAGE_ANALYSIS".equals(normalizedIntent)
-              ? java.util.stream.Stream.concat(
-                      draft.currentImageFileIds().stream(), safeImageIds.stream())
-                  .distinct()
-                  .toList()
-              : draft.currentImageFileIds();
-      updateDraft(draft.id(), updated, nextImages, version, actor.username(), expectedVersion);
+      updateDraft(
+          draft.id(),
+          updated,
+          reportImageIds,
+          version,
+          result.initialReason(),
+          result.finalReason(),
+          actor.username(),
+          expectedVersion);
+      bindImages(draft.id(), reportImageIds, result.imageAnalyses(), actor.username());
+      saveVersion(draft.id(), version, normalizedIntent, updated, reportImageIds, actor.username());
     } else {
       lockVersion(draft.id(), expectedVersion);
     }
+    saveMessage(
+        draft,
+        normalizedIntent,
+        safeInstruction,
+        answer,
+        changed,
+        reportImageIds,
+        result.initialReason(),
+        result.finalReason(),
+        actor.username());
     return find(publicId, actor);
   }
 
@@ -219,21 +370,36 @@ public class ReportDraftService {
     if (updated != 1) {
       throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
     }
+    saveVersion(
+        draft.id(), nextVersion, "MANUAL", sections, draft.currentImageFileIds(), actor.username());
     return find(publicId, actor);
   }
 
   @Transactional(readOnly = true)
   public List<DraftVersion> versions(String publicId, CurrentUser actor) {
     Draft draft = find(publicId, actor);
-    return List.of(
-        new DraftVersion(
-            draft.publicId(),
-            draft.currentVersion(),
-            "CURRENT",
-            draft.sections(),
-            draft.currentImageFileIds(),
-            draft.updatedAt(),
-            actor.username()));
+    return jdbcTemplate.query(
+        """
+        SELECT public_id, version_no, change_type, title, situation, analysis,
+               rectification, image_file_ids_json, created_at, created_by
+          FROM report_draft_version
+         WHERE draft_id = ?
+         ORDER BY version_no, id
+        """,
+        (rs, row) ->
+            new DraftVersion(
+                rs.getString("public_id"),
+                rs.getInt("version_no"),
+                rs.getString("change_type"),
+                new ReportSections(
+                    rs.getString("title"),
+                    rs.getString("situation"),
+                    rs.getString("analysis"),
+                    rs.getString("rectification")),
+                readStringList(rs.getString("image_file_ids_json")),
+                rs.getObject("created_at", LocalDateTime.class),
+                rs.getString("created_by")),
+        draft.id());
   }
 
   @Transactional
@@ -242,23 +408,169 @@ public class ReportDraftService {
     Draft draft = find(publicId, actor);
     ensureEditable(draft);
     requireExpectedVersion(draft, expectedVersion);
-    if (!draft.publicId().equals(versionPublicId)) {
-      throw new ResourceNotFoundException("草稿版本不存在");
-    }
-    return draft;
+    DraftVersion source =
+        jdbcTemplate
+            .query(
+                """
+                SELECT public_id, version_no, change_type, title, situation, analysis,
+                       rectification, image_file_ids_json, created_at, created_by
+                  FROM report_draft_version
+                 WHERE draft_id = ? AND public_id = ?
+                """,
+                (rs, row) ->
+                    new DraftVersion(
+                        rs.getString("public_id"),
+                        rs.getInt("version_no"),
+                        rs.getString("change_type"),
+                        new ReportSections(
+                            rs.getString("title"),
+                            rs.getString("situation"),
+                            rs.getString("analysis"),
+                            rs.getString("rectification")),
+                        readStringList(rs.getString("image_file_ids_json")),
+                        rs.getObject("created_at", LocalDateTime.class),
+                        rs.getString("created_by")),
+                draft.id(),
+                versionPublicId)
+            .stream()
+            .findFirst()
+            .orElseThrow(() -> new ResourceNotFoundException("草稿版本不存在"));
+    int nextVersion = draft.currentVersion() + 1;
+    updateDraft(
+        draft.id(),
+        source.sections(),
+        source.imageFileIds(),
+        nextVersion,
+        "",
+        "",
+        actor.username(),
+        expectedVersion);
+    saveVersion(
+        draft.id(),
+        nextVersion,
+        "RESTORE",
+        source.sections(),
+        source.imageFileIds(),
+        actor.username());
+    return find(publicId, actor);
   }
 
-  public String uploadImage(String publicId, MultipartFile image, CurrentUser actor) {
-    find(publicId, actor);
-    return storedFileService
-        .storeUpload(image, java.util.Set.of("png", "jpg", "jpeg"), "DRAFT_IMAGE", actor.username())
-        .publicId();
+  @Transactional
+  public UploadedImage uploadImage(String publicId, MultipartFile image, CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    ensureEditable(draft);
+    if (draft.currentImageFileIds().size() >= 10) {
+      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "一份报告最多包含 10 张图片");
+    }
+    var stored =
+        storedFileService.storeUpload(
+            image, java.util.Set.of("png", "jpg", "jpeg"), "DRAFT_IMAGE", actor.username());
+    List<String> nextImages =
+        Stream.concat(draft.currentImageFileIds().stream(), Stream.of(stored.publicId()))
+            .distinct()
+            .toList();
+    try {
+      int updated =
+          jdbcTemplate.update(
+              """
+              UPDATE report_draft
+                 SET current_image_file_ids_json=?, updated_at=CURRENT_TIMESTAMP(3),
+                     updated_by=?, version=version+1
+               WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+              """,
+              writeJson(nextImages),
+              actor.username(),
+              draft.id(),
+              draft.entityVersion());
+      if (updated != 1) {
+        throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
+      }
+      bindImages(draft.id(), nextImages, List.of(), actor.username());
+      return new UploadedImage(stored.publicId(), draft.entityVersion() + 1);
+    } catch (RuntimeException exception) {
+      storedFileService.deleteGenerated(stored);
+      throw exception;
+    }
+  }
+
+  @Transactional
+  public Draft removeImage(
+      String publicId, String imageFileId, long expectedVersion, CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    ensureEditable(draft);
+    requireExpectedVersion(draft, expectedVersion);
+    if (!draft.currentImageFileIds().contains(imageFileId)) {
+      throw new ResourceNotFoundException("报告图片不存在");
+    }
+    List<String> nextImages =
+        draft.currentImageFileIds().stream().filter(id -> !id.equals(imageFileId)).toList();
+    int nextVersion = draft.currentVersion() + 1;
+    int updated =
+        jdbcTemplate.update(
+            """
+            UPDATE report_draft
+               SET current_image_file_ids_json=?, current_version_no=?,
+                   updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
+             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+            """,
+            writeJson(nextImages),
+            nextVersion,
+            actor.username(),
+            draft.id(),
+            expectedVersion);
+    if (updated != 1) {
+      throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
+    }
+    var file = storedFileService.find(imageFileId);
+    jdbcTemplate.update(
+        "DELETE FROM report_draft_image WHERE draft_id=? AND file_id=?", draft.id(), file.id());
+    saveVersion(draft.id(), nextVersion, "MANUAL", draft.sections(), nextImages, actor.username());
+    return find(publicId, actor);
+  }
+
+  @Transactional
+  public Draft reorderImages(
+      String publicId, List<String> orderedIds, long expectedVersion, CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    ensureEditable(draft);
+    requireExpectedVersion(draft, expectedVersion);
+    List<String> safeIds = orderedIds == null ? List.of() : List.copyOf(orderedIds);
+    if (safeIds.size() != draft.currentImageFileIds().size()
+        || safeIds.stream().distinct().count() != safeIds.size()
+        || !new java.util.HashSet<>(safeIds)
+            .equals(new java.util.HashSet<>(draft.currentImageFileIds()))) {
+      throw new BusinessRuleException("REPORT_IMAGE_ORDER_INVALID", "图片顺序必须包含当前报告的全部图片");
+    }
+    int nextVersion = draft.currentVersion() + 1;
+    int updated =
+        jdbcTemplate.update(
+            """
+            UPDATE report_draft
+               SET current_image_file_ids_json=?, current_version_no=?,
+                   updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
+             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+            """,
+            writeJson(safeIds),
+            nextVersion,
+            actor.username(),
+            draft.id(),
+            expectedVersion);
+    if (updated != 1) {
+      throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
+    }
+    bindImages(draft.id(), safeIds, List.of(), actor.username());
+    saveVersion(
+        draft.id(), nextVersion, "MANUAL", draft.sections(), safeIds, actor.username());
+    return find(publicId, actor);
   }
 
   @Transactional
   public BusinessTask submitFormal(String publicId, long expectedVersion, CurrentUser actor) {
     Draft draft = find(publicId, actor);
-    String businessKey = "FORMAL_REPORT:" + draft.billingPointPeriodId();
+    String businessKey =
+        draft.formalReportId() == null
+            ? "FORMAL_REPORT:" + draft.billingPointPeriodId()
+            : "FORMAL_REPORT_CORRECTION:" + draft.formalReportId();
     var existing = taskRepository.findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey);
     if (existing.isPresent()) {
       return existing.orElseThrow();
@@ -268,10 +580,12 @@ public class ReportDraftService {
     int transitioned =
         jdbcTemplate.update(
             """
-        UPDATE report_draft SET status = 'GENERATING', updated_at = CURRENT_TIMESTAMP(3),
+        UPDATE report_draft SET status = 'GENERATING', confirmed_at = CURRENT_TIMESTAMP(3),
+               confirmed_by = ?, updated_at = CURRENT_TIMESTAMP(3),
                updated_by = ?, version = version + 1
          WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
         """,
+            actor.username(),
             actor.username(),
             draft.id(),
             expectedVersion);
@@ -289,6 +603,319 @@ public class ReportDraftService {
       return taskRepository
           .findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey)
           .orElseThrow(() -> exception);
+    }
+  }
+
+  private List<Fact> facts(Draft draft) {
+    return jdbcTemplate
+        .query(
+            """
+            SELECT c.name AS city_name, s.district_name,
+                   a.audit_status, a.over_limit_type, a.max_ratio,
+                   COALESCE(a.actual_total_kwh, a.actual_energy) AS actual_energy,
+                   a.current_daily_avg_kwh,
+                   COALESCE(a.actual_report_amount, a.actual_amount) AS actual_amount,
+                   a.yoy_result, a.yoy_reference_period, a.yoy_reference_total_kwh,
+                   COALESCE(a.yoy_exceed_ratio, a.yoy_ratio) AS yoy_ratio,
+                   a.mom_result, a.mom_reference_period, a.mom_reference_total_kwh,
+                   COALESCE(a.mom_exceed_ratio, a.mom_ratio) AS mom_ratio,
+                   a.rated_result, COALESCE(a.rated_total_kwh, a.rated_benchmark_energy) AS rated_energy,
+                   COALESCE(a.rated_exceed_ratio, a.rated_ratio) AS rated_ratio,
+                   a.payment_count, a.payment_eligibility_reason, a.aggregated_payment_days,
+                   s.data_json, a.detail_json
+              FROM billing_point_snapshot s
+              JOIN city c ON c.code = s.city_code
+              LEFT JOIN audit_result a
+                ON a.billing_point_code = s.billing_point_code
+               AND a.data_period = s.data_period
+               AND a.city_code = s.city_code
+             WHERE s.public_id = ?
+            """,
+            (rs, row) -> {
+              var values = new java.util.ArrayList<Fact>();
+              values.add(new Fact("报账点编码", draft.billingPointCode()));
+              values.add(new Fact("报账点名称", draft.billingPointName()));
+              values.add(new Fact("所属城市", value(rs.getString("city_name"))));
+              values.add(new Fact("所属区县", value(rs.getString("district_name"))));
+              values.add(new Fact("账期", draft.period()));
+              values.add(new Fact("稽核状态", value(rs.getString("audit_status"))));
+              values.add(new Fact("超标类型", value(rs.getString("over_limit_type"))));
+              values.add(new Fact("最大超标比例", value(rs.getBigDecimal("max_ratio"))));
+              values.add(new Fact("实际总用电量", value(rs.getBigDecimal("actual_energy"))));
+              values.add(new Fact("日均用电量", value(rs.getBigDecimal("current_daily_avg_kwh"))));
+              values.add(new Fact("实际报账金额", value(rs.getBigDecimal("actual_amount"))));
+              values.add(new Fact("同比结果", value(rs.getString("yoy_result"))));
+              values.add(new Fact("同比参考账期", value(rs.getString("yoy_reference_period"))));
+              values.add(new Fact("同比参考电量", value(rs.getBigDecimal("yoy_reference_total_kwh"))));
+              values.add(new Fact("同比超标比例", value(rs.getBigDecimal("yoy_ratio"))));
+              values.add(new Fact("环比结果", value(rs.getString("mom_result"))));
+              values.add(new Fact("环比参考账期", value(rs.getString("mom_reference_period"))));
+              values.add(new Fact("环比参考电量", value(rs.getBigDecimal("mom_reference_total_kwh"))));
+              values.add(new Fact("环比超标比例", value(rs.getBigDecimal("mom_ratio"))));
+              values.add(new Fact("额定标杆结果", value(rs.getString("rated_result"))));
+              values.add(new Fact("额定标杆电量", value(rs.getBigDecimal("rated_energy"))));
+              values.add(new Fact("额定标杆超标比例", value(rs.getBigDecimal("rated_ratio"))));
+              values.add(new Fact("缴费记录数", Integer.toString(rs.getInt("payment_count"))));
+              values.add(new Fact("缴费核验说明", value(rs.getString("payment_eligibility_reason"))));
+              values.add(new Fact("汇总缴费天数", value(rs.getObject("aggregated_payment_days"))));
+              values.add(new Fact("报账点完整业务快照", compact(rs.getString("data_json"), 12_000)));
+              values.add(new Fact("稽核计算明细", compact(rs.getString("detail_json"), 12_000)));
+              return List.copyOf(values);
+            },
+            draft.billingPointPeriodId())
+        .stream()
+        .findFirst()
+        .orElseGet(
+            () ->
+                List.of(
+                    new Fact("报账点编码", draft.billingPointCode()),
+                    new Fact("报账点名称", draft.billingPointName()),
+                    new Fact("账期", draft.period())));
+  }
+
+  private AgentContext agentContext(Draft draft) {
+    List<Reference> samePoint =
+        reportReferences(
+            "s.city_code = ? AND s.billing_point_code = ? AND s.data_period <> ?",
+            maxHistoryCases,
+            draft.cityCode(),
+            draft.billingPointCode(),
+            draft.period());
+    var cityReferences = new java.util.ArrayList<Reference>();
+    cityReferences.addAll(cityMemoryReferences(draft.cityCode()));
+    if (cityReferences.size() < maxHistoryCases) {
+      cityReferences.addAll(
+          reportReferences(
+              "s.city_code = ? AND s.billing_point_code <> ?",
+              maxHistoryCases - cityReferences.size(),
+              draft.cityCode(),
+              draft.billingPointCode()));
+    }
+    List<Reference> crossCity =
+        maxCrossCityCases == 0
+            ? List.of()
+            : reportReferences(
+                "s.city_code <> ? AND (a.over_limit_type = ? OR ? IS NULL)",
+                maxCrossCityCases,
+                draft.cityCode(),
+                auditType(draft),
+                auditType(draft));
+    List<ConversationTurn> messages =
+        jdbcTemplate
+            .query(
+                """
+            SELECT user_content, assistant_content
+              FROM report_draft_message
+             WHERE draft_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 10
+            """,
+                (rs, row) ->
+                    List.of(
+                        new ConversationTurn("用户", compact(rs.getString("user_content"), 2000)),
+                        new ConversationTurn(
+                            "AI", compact(rs.getString("assistant_content"), 3000))),
+                draft.id())
+            .stream()
+            .flatMap(List::stream)
+            .toList();
+    return new AgentContext(samePoint, List.copyOf(cityReferences), crossCity, messages);
+  }
+
+  List<Reference> cityMemoryReferences(String cityCode) {
+    return jdbcTemplate.query(
+        """
+        SELECT public_id, final_reason, user_correction, evidence_summary, trust_level
+          FROM ai_city_memory
+         WHERE city_code = ? AND active = TRUE
+         ORDER BY CASE trust_level WHEN 'CONFIRMED_REPORT' THEN 1 WHEN 'USER_CONFIRMED' THEN 2 ELSE 3 END,
+                  confirmed_at DESC, id DESC
+         LIMIT ?
+        """,
+        (rs, row) ->
+            new Reference(
+                "MEM-" + rs.getString("public_id"),
+                compact(
+                    "可信度="
+                        + rs.getString("trust_level")
+                        + "；最终原因="
+                        + value(rs.getString("final_reason"))
+                        + "；用户纠正="
+                        + value(rs.getString("user_correction"))
+                        + "；证据="
+                        + value(rs.getString("evidence_summary")),
+                    3000)),
+        cityCode,
+        maxHistoryCases);
+  }
+
+  private List<Reference> reportReferences(String predicate, int limit, Object... args) {
+    if (limit <= 0) {
+      return List.of();
+    }
+    var parameters = new java.util.ArrayList<>(List.of(args));
+    parameters.add(limit);
+    return jdbcTemplate.query(
+        """
+        SELECT r.public_id, s.city_code, s.billing_point_code, s.data_period,
+               r.title, r.situation, r.analysis, r.rectification,
+               a.over_limit_type, hc.image_count, hc.image_analysis_status,
+               hc.image_analysis_text
+          FROM audit_report r
+          JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
+          LEFT JOIN historical_audit_case hc ON hc.report_id = r.id
+          LEFT JOIN audit_result a
+            ON a.billing_point_code = s.billing_point_code
+           AND a.data_period = s.data_period
+           AND a.city_code = s.city_code
+         WHERE
+        """
+            + predicate
+            + " ORDER BY r.generated_at DESC, r.id DESC LIMIT ?",
+        (rs, row) ->
+            new Reference(
+                "CASE-" + rs.getString("public_id"),
+                compact(
+                    "城市="
+                        + rs.getString("city_code")
+                        + "；报账点="
+                        + rs.getString("billing_point_code")
+                        + "；账期="
+                        + rs.getString("data_period")
+                        + "；超标类型="
+                        + value(rs.getString("over_limit_type"))
+                        + "；标题="
+                        + value(rs.getString("title"))
+                        + "；情况="
+                        + value(rs.getString("situation"))
+                        + "；分析="
+                        + value(rs.getString("analysis"))
+                        + "；整改="
+                        + value(rs.getString("rectification")),
+                    6000)
+                    + compact(
+                        "；历史图片数="
+                            + rs.getInt("image_count")
+                            + "；历史图片分析状态="
+                            + value(rs.getString("image_analysis_status"))
+                            + "；历史图片证据="
+                            + value(rs.getString("image_analysis_text")),
+                    6000)),
+        parameters.toArray());
+  }
+
+  private String auditType(Draft draft) {
+    List<String> values =
+        jdbcTemplate.queryForList(
+            """
+            SELECT a.over_limit_type
+              FROM billing_point_snapshot s
+              LEFT JOIN audit_result a
+                ON a.billing_point_code=s.billing_point_code
+               AND a.data_period=s.data_period
+               AND a.city_code=s.city_code
+             WHERE s.public_id=?
+            """,
+            String.class,
+            draft.billingPointPeriodId());
+    return values.isEmpty() ? null : values.getFirst();
+  }
+
+  private void saveMessage(
+      Draft draft,
+      String intent,
+      String userContent,
+      String assistantContent,
+      boolean changed,
+      List<String> imageIds,
+      String initialReason,
+      String finalReason,
+      String actor) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO report_draft_message
+          (public_id, draft_id, city_code, intent, user_content, assistant_content,
+           changed_draft, image_file_ids_json, initial_reason, final_reason, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        UUID.randomUUID().toString(),
+        draft.id(),
+        draft.cityCode(),
+        intent,
+        userContent,
+        assistantContent,
+        changed,
+        writeJson(imageIds),
+        blankToNull(initialReason),
+        blankToNull(finalReason),
+        actor);
+    jdbcTemplate.update(
+        """
+        INSERT INTO ai_analysis_run
+          (public_id, draft_id, city_code, billing_point_code, model_name,
+           prompt_version, image_count, status, completed_at)
+        VALUES (?, ?, ?, ?, ?, 'three-fees-agent-v2', ?, 'SUCCEEDED', CURRENT_TIMESTAMP(3))
+        """,
+        UUID.randomUUID().toString(),
+        draft.id(),
+        draft.cityCode(),
+        draft.billingPointCode(),
+        aiServiceClient.modelName(),
+        imageIds.size());
+  }
+
+  private void saveVersion(
+      long draftId,
+      int version,
+      String changeType,
+      ReportSections sections,
+      List<String> imageIds,
+      String actor) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO report_draft_version
+          (public_id, draft_id, version_no, change_type, title, situation, analysis,
+           rectification, image_file_ids_json, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        UUID.randomUUID().toString(),
+        draftId,
+        version,
+        changeType,
+        sections.title(),
+        sections.situation(),
+        sections.analysis(),
+        sections.rectification(),
+        writeJson(imageIds),
+        actor);
+  }
+
+  private void bindImages(
+      long draftId, List<String> imageIds, List<ImageAnalysis> analyses, String actor) {
+    for (int index = 0; index < imageIds.size(); index++) {
+      var file = storedFileService.find(imageIds.get(index));
+      int imageNumber = index + 1;
+      ImageAnalysis analysis =
+          analyses == null
+              ? null
+              : analyses.stream()
+                  .filter(value -> ("IMG-" + imageNumber).equals(value.imageId()))
+                  .findFirst()
+                  .orElse(null);
+      jdbcTemplate.update(
+          """
+          INSERT INTO report_draft_image
+            (public_id, draft_id, file_id, sort_no, source_type, analysis_json, created_by)
+          VALUES (?, ?, ?, ?, 'PASTE', ?, ?)
+          ON DUPLICATE KEY UPDATE sort_no=VALUES(sort_no),
+                                  analysis_json=COALESCE(VALUES(analysis_json), analysis_json)
+          """,
+          UUID.randomUUID().toString(),
+          draftId,
+          file.id(),
+          index,
+          analysis == null ? null : writeJson(analysis),
+          actor);
     }
   }
 
@@ -319,11 +946,47 @@ public class ReportDraftService {
     return statement;
   }
 
+  private PreparedStatement insertCorrectionDraft(
+      java.sql.Connection connection,
+      String publicId,
+      long snapshotId,
+      String reportId,
+      ReportSections sections,
+      List<String> imageIds,
+      String reason,
+      String actor)
+      throws SQLException {
+    PreparedStatement statement =
+        connection.prepareStatement(
+            """
+            INSERT INTO report_draft
+              (public_id, billing_point_snapshot_id, status, title, situation, analysis,
+               rectification, current_version_no, formal_report_public_id, ai_final_reason,
+               current_image_file_ids_json, created_by, updated_by)
+            VALUES (?, ?, 'CORRECTING', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            """,
+            new String[] {"id"});
+    statement.setString(1, publicId);
+    statement.setLong(2, snapshotId);
+    statement.setString(3, sections.title());
+    statement.setString(4, sections.situation());
+    statement.setString(5, sections.analysis());
+    statement.setString(6, sections.rectification());
+    statement.setString(7, reportId);
+    statement.setString(8, reason);
+    statement.setString(9, writeJson(imageIds));
+    statement.setString(10, actor);
+    statement.setString(11, actor);
+    return statement;
+  }
+
   private void updateDraft(
       long draftId,
       ReportSections sections,
       List<String> imageFileIds,
       int version,
+      String initialReason,
+      String finalReason,
       String actor,
       long expectedEntityVersion) {
     requireSections(sections);
@@ -333,6 +996,8 @@ public class ReportDraftService {
         UPDATE report_draft
            SET title = ?, situation = ?, analysis = ?, rectification = ?,
                current_image_file_ids_json = ?, current_version_no = ?,
+               ai_initial_reason = COALESCE(NULLIF(?, ''), ai_initial_reason),
+               ai_final_reason = COALESCE(NULLIF(?, ''), ai_final_reason),
                updated_at = CURRENT_TIMESTAMP(3),
                updated_by = ?, version = version + 1
          WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
@@ -343,6 +1008,8 @@ public class ReportDraftService {
             sections.rectification(),
             writeJson(imageFileIds),
             version,
+            initialReason,
+            finalReason,
             actor,
             draftId,
             expectedEntityVersion);
@@ -360,10 +1027,13 @@ public class ReportDraftService {
                    d.current_image_file_ids_json,
                    d.created_at, d.updated_at, d.version,
                    s.public_id AS snapshot_public_id, s.billing_point_code,
-                   s.billing_point_name, s.city_code, s.data_period,
-                   COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status
+                   s.billing_point_name, s.city_code, c.name AS city_name, s.district_name,
+                   s.data_period,
+                   COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status,
+                   a.over_limit_type, a.max_ratio
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
+              JOIN city c ON c.code = s.city_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
@@ -376,8 +1046,12 @@ public class ReportDraftService {
                     resultSet.getString("billing_point_code"),
                     resultSet.getString("billing_point_name"),
                     resultSet.getString("city_code"),
+                    resultSet.getString("city_name"),
+                    resultSet.getString("district_name"),
                     resultSet.getString("data_period"),
                     resultSet.getString("audit_status"),
+                    resultSet.getString("over_limit_type"),
+                    resultSet.getBigDecimal("max_ratio"),
                     resultSet.getString("status"),
                     new ReportSections(
                         resultSet.getString("title"),
@@ -387,7 +1061,7 @@ public class ReportDraftService {
                     resultSet.getInt("current_version_no"),
                     readStringList(resultSet.getString("current_image_file_ids_json")),
                     resultSet.getString("formal_report_public_id"),
-                    List.of(),
+                    loadMessages(resultSet.getLong("id")),
                     resultSet.getObject("created_at", LocalDateTime.class),
                     resultSet.getObject("updated_at", LocalDateTime.class),
                     resultSet.getLong("version")),
@@ -424,6 +1098,31 @@ public class ReportDraftService {
         .stream()
         .findFirst()
         .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
+  }
+
+  private SourceReport sourceReport(String publicId) {
+    return jdbcTemplate
+        .query(
+            """
+            SELECT r.public_id, r.title, r.situation, r.analysis, r.rectification,
+                   s.id AS snapshot_id, s.city_code
+              FROM audit_report r
+              JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
+             WHERE r.public_id = ?
+            """,
+            (rs, row) ->
+                new SourceReport(
+                    rs.getString("public_id"),
+                    rs.getLong("snapshot_id"),
+                    rs.getString("city_code"),
+                    nonBlank(rs.getString("title"), "电费稽核报告"),
+                    nonBlank(rs.getString("situation"), ""),
+                    nonBlank(rs.getString("analysis"), ""),
+                    nonBlank(rs.getString("rectification"), "")),
+            publicId)
+        .stream()
+        .findFirst()
+        .orElseThrow(() -> new ResourceNotFoundException("正式报告"));
   }
 
   private Draft findBySnapshotId(long snapshotId) {
@@ -475,6 +1174,13 @@ public class ReportDraftService {
     if ("ASK".equals(requested) || "IMAGE_ANALYSIS".equals(requested)) {
       return requested;
     }
+    if ("CORRECTION".equals(requested)
+        || ("AUTO".equals(requested)
+            && java.util.regex.Pattern.compile("(错了|不对|不是|并非|实际是|真实原因|应为|已完成)")
+                .matcher(instruction)
+                .find())) {
+      return "CORRECTION";
+    }
     if ("EDIT".equals(requested)
         || ("AUTO".equals(requested)
             && java.util.regex.Pattern.compile("(修改|补充|优化|重写|改成|替换)")
@@ -523,11 +1229,131 @@ public class ReportDraftService {
   }
 
   private List<String> readStringList(String json) {
+    String payload = json == null || json.isBlank() ? "[]" : json;
     try {
-      return objectMapper.readValue(json, STRING_LIST);
+      return objectMapper.readValue(payload, STRING_LIST);
     } catch (JacksonException exception) {
-      throw new IllegalStateException("Persisted draft images are invalid JSON", exception);
+      // H2 exposes a JSON value inserted through JDBC as a quoted JSON string, while MySQL
+      // exposes the array directly. Accept both representations so version recovery behaves the
+      // same in tests and production.
+      try {
+        String unwrapped = objectMapper.readValue(payload, String.class);
+        return objectMapper.readValue(unwrapped, STRING_LIST);
+      } catch (JacksonException nestedException) {
+        throw new IllegalStateException("Persisted draft images are invalid JSON", exception);
+      }
     }
+  }
+
+  private List<DraftMessage> loadMessages(long draftId) {
+    return jdbcTemplate.query(
+        """
+        SELECT public_id, intent, user_content, assistant_content, changed_draft,
+               image_file_ids_json, created_at
+          FROM report_draft_message
+         WHERE draft_id = ?
+         ORDER BY created_at, id
+        """,
+        (rs, row) ->
+            new DraftMessage(
+                rs.getString("public_id"),
+                rs.getString("intent"),
+                rs.getString("user_content"),
+                rs.getString("assistant_content"),
+                rs.getBoolean("changed_draft"),
+                readStringList(rs.getString("image_file_ids_json")),
+                rs.getObject("created_at", LocalDateTime.class)),
+        draftId);
+  }
+
+  private String compact(String value, int maxLength) {
+    if (value == null || value.isBlank()) {
+      return "";
+    }
+    String normalized = value.replaceAll("(?is)data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[历史图片]");
+    return normalized.length() <= maxLength ? normalized : normalized.substring(0, maxLength) + "…";
+  }
+
+  private String value(Object value) {
+    return value == null ? "" : value.toString();
+  }
+
+  private String blankToNull(String value) {
+    return value == null || value.isBlank() ? null : value;
+  }
+
+  private String nonBlank(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
+  private ReportSections reportSections(SourceReport source) {
+    String html = source.html();
+    if (looksLikeHtml(html)) {
+      return new ReportSections(
+          cleanReportText(firstMatch(html, "(?is)<h1[^>]*>(.*?)</h1>", source.title())),
+          html,
+          nonBlank(cleanReportText(source.analysis()), "请在此补充更正后的排查分析。"),
+          nonBlank(cleanReportText(source.rectification()), "请在此补充更正后的整改建议。"));
+    }
+    String title = cleanReportText(source.title());
+    String situation = cleanReportText(source.situation());
+    String analysis = cleanReportText(source.analysis());
+    String rectification = cleanReportText(source.rectification());
+    return new ReportSections(
+        nonBlank(title, source.title()),
+        nonBlank(situation, "原报告正文待补充。"),
+        nonBlank(analysis, "请在此补充更正后的排查分析。"),
+        nonBlank(rectification, "请在此补充更正后的整改建议。"));
+  }
+
+  private boolean looksLikeHtml(String value) {
+    return value != null
+        && Pattern.compile("(?is)</?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\\b")
+            .matcher(value)
+            .find();
+  }
+
+  private String firstMatch(String value, String pattern, String fallback) {
+    var matcher = Pattern.compile(pattern).matcher(value == null ? "" : value);
+    return matcher.find() ? matcher.group(1) : fallback;
+  }
+
+  private List<String> extractInlineImages(String html, String actor) {
+    if (html == null || html.isBlank()) {
+      return List.of();
+    }
+    var imageIds = new java.util.ArrayList<String>();
+    var matcher =
+        Pattern.compile("(?is)<img[^>]+src=[\"']data:image/(png|jpe?g);base64,([^\"']+)[\"'][^>]*>")
+            .matcher(html);
+    int index = 1;
+    while (matcher.find() && imageIds.size() < 10) {
+      String extension = "png".equalsIgnoreCase(matcher.group(1)) ? "png" : "jpg";
+      String mediaType = "png".equals(extension) ? "image/png" : "image/jpeg";
+      byte[] bytes = Base64.getMimeDecoder().decode(matcher.group(2));
+      var stored =
+          storedFileService.storeGenerated(
+              bytes, "更正报告图片-" + index + "." + extension, mediaType, "DRAFT_IMAGE", actor);
+      imageIds.add(stored.publicId());
+      index++;
+    }
+    return List.copyOf(imageIds);
+  }
+
+  private String cleanReportText(String value) {
+    return value
+        .replaceAll("(?i)<br\\s*/?>", "\n")
+        .replaceAll("(?i)</(p|div|section|article|h[1-6]|li|tr)>", "\n")
+        .replaceAll("<[^>]+>", "")
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .replaceAll("(?m)^\\s+", "")
+        .replaceAll("\\n{3,}", "\n\n")
+        .trim();
   }
 
   public record Draft(
@@ -537,8 +1363,12 @@ public class ReportDraftService {
       String billingPointCode,
       String billingPointName,
       String cityCode,
+      String cityName,
+      String district,
       String period,
       String auditStatus,
+      String overLimitType,
+      java.math.BigDecimal maxExceedRatio,
       String status,
       ReportSections sections,
       int currentVersion,
@@ -567,6 +1397,8 @@ public class ReportDraftService {
       LocalDateTime createdAt,
       String createdBy) {}
 
+  public record UploadedImage(String fileId, long entityVersion) {}
+
   private record Snapshot(
       long id,
       String publicId,
@@ -576,4 +1408,17 @@ public class ReportDraftService {
       String period,
       String auditStatus,
       String reportId) {}
+
+  private record SourceReport(
+      String publicId,
+      long snapshotId,
+      String cityCode,
+      String title,
+      String html,
+      String analysis,
+      String rectification) {
+    String situation() {
+      return html;
+    }
+  }
 }

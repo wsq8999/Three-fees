@@ -150,16 +150,14 @@ async function beginCorrection(): Promise<void> {
   }
   if (report.value === null) return;
   correctionVisible.value = false;
+  const draft = await businessApi.drafts.createCorrection(
+    report.value.id,
+    correctionForm.reason.trim(),
+  );
   await router.push({
-    name: "reports-generate",
-    query: {
-      reportId: report.value.id,
-      correction: "1",
-      reason: correctionForm.reason.trim(),
-      billingPointCode: report.value.billingPointCode,
-      period: report.value.period,
-      from: route.fullPath,
-    },
+    name: "report-draft",
+    params: { draftId: draft.id },
+    query: { from: route.fullPath },
   });
 }
 

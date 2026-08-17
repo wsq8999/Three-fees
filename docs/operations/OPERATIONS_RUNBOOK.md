@@ -4,7 +4,7 @@
 
 本手册承接 `docs/deployment/WINDOWS_SERVER_RUNBOOK.md` 的单机 Windows Server 形态，覆盖：
 
-- `three-fees-api`、`three-fees-ai` 与当前保持 Manual/Stopped 的 `three-fees-worker` 健康巡检。
+- `three-fees-api` 与 `three-fees-worker` 健康巡检。
 - 结构化日志、疑似秘密、磁盘余量和最新备份新鲜度检查。
 - MySQL 逻辑快照与 `shared\files` 的一致时间窗备份。
 - 最新 7 个日备 + 4 个周备的独立保留。

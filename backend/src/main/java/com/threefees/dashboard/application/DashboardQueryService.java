@@ -325,9 +325,10 @@ public class DashboardQueryService {
     String ratioText = ratio == null ? "—" : ratio.multiply(BigDecimal.valueOf(100)).stripTrailingZeros() + "%";
     return new DashboardSummary.PendingReportTask(
         rs.getString("public_id"),
+        rs.getString("public_id"),
         code + " " + name,
         "稽核超标，需生成报告并人工确认",
-        "/reports/generate",
+        "/reports/drafts",
         ratio != null && ratio.compareTo(BigDecimal.valueOf(0.3)) >= 0 ? "DANGER" : "WARNING",
         code,
         name,

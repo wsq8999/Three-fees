@@ -36,7 +36,12 @@ set "DB_PASSWORD=<你的数据库密码>"
 set "INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=true"
 set "INITIAL_ACCOUNT_PASSWORD=123456"
 set "APP_FILE_ROOT=D:\Three-fees\runtime\files"
-set "AI_SERVICE_ENABLED=false"
+set "AI_ENABLED=false"
+set "KIMI_BASE_URL=https://api.moonshot.cn/v1"
+set "KIMI_MODEL=kimi-k3"
+rem 如需启用生成报告 AI 助手，再设置：
+rem set "AI_ENABLED=true"
+rem set "KIMI_API_KEY=你的Kimi密钥"
 
 mvnw.cmd spring-boot:run
 ```

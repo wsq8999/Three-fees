@@ -40,10 +40,13 @@ public class FormalReportTaskProcessor implements TaskProcessor {
   public String process(BusinessTask task) {
     String draftId = payload(task).draftId();
     AuditReportService.GenerationInput input = reportService.generationInput(draftId);
-    String existing = reportService.existingReportForSnapshot(input.snapshotId());
-    if (existing != null) {
-      reportService.reconcileDraftWithExistingReport(input.draftId(), existing, task.createdBy());
-      return result(existing);
+    boolean correction = input.formalReportId() != null && !input.formalReportId().isBlank();
+    if (!correction) {
+      String existing = reportService.existingReportForSnapshot(input.snapshotId());
+      if (existing != null) {
+        reportService.reconcileDraftWithExistingReport(input.draftId(), existing, task.createdBy());
+        return result(existing);
+      }
     }
     reportService.beginOrResumeGeneration(draftId, task.createdBy());
     StoredFile word = null;
@@ -61,9 +64,13 @@ public class FormalReportTaskProcessor implements TaskProcessor {
                 file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
       }
       var generated = documentGenerator.generate(input.sections(), images);
+      byte[] wordBytes =
+          correction && looksLikeHtml(input.sections().situation())
+              ? documentGenerator.generateWordFromHtml(input.sections().situation())
+              : generated.word();
       word =
           storedFileService.storeGenerated(
-              generated.word(),
+              wordBytes,
               input.billingPointCode() + "-" + input.period() + "-电费稽核报告.docx",
               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
               "FORMAL_REPORT_WORD",
@@ -76,7 +83,9 @@ public class FormalReportTaskProcessor implements TaskProcessor {
               "FORMAL_REPORT_PDF",
               task.createdBy());
       var finalization =
-          reportService.finalizeSystemReport(input, word.id(), pdf.id(), task.createdBy());
+          correction
+              ? reportService.finalizeCorrectionReport(input, word.id(), pdf.id(), task.createdBy())
+              : reportService.finalizeSystemReport(input, word.id(), pdf.id(), task.createdBy());
       finalized = finalization.created();
       if (!finalization.created()) {
         storedFileService.deleteGenerated(pdf);
@@ -117,6 +126,14 @@ public class FormalReportTaskProcessor implements TaskProcessor {
       throw new IllegalStateException(
           "Formal report task result could not be serialized", exception);
     }
+  }
+
+  private boolean looksLikeHtml(String value) {
+    return value != null
+        && java.util.regex.Pattern.compile(
+                "(?is)</?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\\b")
+            .matcher(value)
+            .find();
   }
 
   private void compensate(StoredFile pdf, StoredFile word, boolean finalized) {

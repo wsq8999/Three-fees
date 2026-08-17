@@ -622,16 +622,11 @@ async function goBack(): Promise<void> {
 
 async function openGenerateReport(): Promise<void> {
   if (detail.value === null) return;
+  const draft = await businessApi.drafts.createOrResume(detail.value.summary.id);
   await router.push({
-    name: "reports-generate",
-    query: {
-      from: route.fullPath,
-      billingPointCode: detail.value.summary.code,
-      billingPointName: detail.value.summary.name,
-      period: detail.value.summary.period,
-      periodStart: detail.value.summary.periodStart ?? "",
-      periodEnd: detail.value.summary.periodEnd ?? "",
-    },
+    name: "report-draft",
+    params: { draftId: draft.id },
+    query: { from: route.fullPath },
   });
 }
 

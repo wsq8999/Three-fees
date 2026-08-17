@@ -70,7 +70,7 @@ public class ImportTaskProcessor implements TaskProcessor {
           tabularFileReader.read(
               storedFileService.readBytes(storedFile), storedFile.originalName());
       var rows =
-          importRowMapper.mapAuto(batch.datasetType(), null, batch.period(), data).stream()
+          importRowMapper.mapAuto(batch.datasetType(), null, null, data).stream()
               .filter(
                   group ->
                       group.cityCode().equals(batch.cityCode())

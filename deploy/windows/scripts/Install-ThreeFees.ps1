@@ -13,9 +13,7 @@ param(
 
     [string]$DeploymentRoot = 'C:\ProgramData\ThreeFees',
     [string]$JavaExe = 'C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe',
-    [string]$PythonExe = 'C:\Program Files\Python312\python.exe',
     [string]$ReportFontPath = 'C:\Windows\Fonts\simhei.ttf',
-    [string]$Wheelhouse,
     [string]$SiteName = 'ThreeFees',
     [string]$AppPoolName = 'ThreeFees',
     [string]$HostName = 'three-fees.local',
@@ -148,7 +146,6 @@ $root = Resolve-SafeAbsolutePath -Path $DeploymentRoot -Label 'DeploymentRoot'
 $archivePath = [System.IO.Path]::GetFullPath($ReleaseArchive)
 $wrapperPath = [System.IO.Path]::GetFullPath($WinSWExecutable)
 $javaPath = [System.IO.Path]::GetFullPath($JavaExe)
-$pythonPath = [System.IO.Path]::GetFullPath($PythonExe)
 $reportFont = Resolve-ReadableReportFont -ReportFontPath $ReportFontPath
 
 $manifest = Test-ReleaseArchive -ArchivePath $archivePath
@@ -161,9 +158,6 @@ if ($wrapperHash -ne $WinSWExpectedSha256.ToUpperInvariant()) {
 }
 if (-not (Test-Path -LiteralPath $javaPath -PathType Leaf)) {
     throw "Java executable does not exist: $javaPath"
-}
-if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-    throw "Python executable does not exist: $pythonPath"
 }
 if (-not $AllowHttp -and [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     throw 'HTTPS is the default. Provide -CertificateThumbprint or explicitly use -AllowHttp for an isolated trial environment.'
@@ -207,10 +201,8 @@ foreach ($directory in @(
     (Join-Path $root 'shared\files'),
     (Join-Path $root 'shared\logs\api'),
     (Join-Path $root 'shared\logs\worker'),
-    (Join-Path $root 'shared\logs\ai'),
     (Join-Path $root 'shared\tmp\api'),
-    (Join-Path $root 'shared\tmp\worker'),
-    (Join-Path $root 'shared\tmp\ai')
+    (Join-Path $root 'shared\tmp\worker')
 )) {
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
 }
@@ -220,7 +212,6 @@ Assert-PathInside -ParentPath (Join-Path $root 'staging') -ChildPath $stagingPat
 try {
     Expand-VerifiedReleaseArchive -ArchivePath $archivePath -DestinationPath $stagingPath | Out-Null
     Move-Item -LiteralPath $stagingPath -Destination $releasePath
-    Initialize-AiVirtualEnvironment -ReleasePath $releasePath -PythonExe $pythonPath -Wheelhouse $Wheelhouse
     Write-ReleaseReadyMarker -ReleasePath $releasePath
 }
 finally {

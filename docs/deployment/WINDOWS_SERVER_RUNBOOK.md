@@ -7,7 +7,6 @@
 - IIS：HTTPS、Vue SPA、静态压缩和反向代理。
 - `three-fees-api`：Java API，监听 `127.0.0.1:8080`。
 - `three-fees-worker`：Java/MySQL 持久任务工作进程，不开放端口；与 API 分进程运行并自动启动，负责租约、重试和重启恢复。
-- `three-fees-ai`：无状态 Python sidecar，监听 `127.0.0.1:8100`。
 - MySQL：生产目标 8.4 LTS，业务事实源；数据库安装与备份由数据库/运维流程负责。
 
 不使用 Docker、Kubernetes、外部消息队列、对象存储或付费部署服务。本仓库中的脚本默认只预检；只有显式增加 `-Apply` 才会修改部署目录、ACL、IIS、服务或注册表。
@@ -18,10 +17,10 @@
 
 1. 发布 ZIP 的根目录包含 `manifest.json`，所有清单文件的长度与 SHA-256 一致，且没有路径穿越条目。
 2. WinSW 二进制来自批准的官方发行版，安装时传入独立渠道核对的 64 位 SHA-256；仓库不携带二进制。
-3. 三个服务 ID 精确为 `three-fees-api`、`three-fees-worker`、`three-fees-ai`，以低权限 `NetworkService` 运行。
-4. API 与 AI 只监听回环地址；防火墙不得新增 8080/8100 入站规则。
+3. 两个服务 ID 精确为 `three-fees-api`、`three-fees-worker`，以低权限 `NetworkService` 运行。
+4. API 只监听回环地址；防火墙不得新增 8080 入站规则。
 5. IIS 只代理 `/api/*` 与 `/actuator/health`，阻断 `/internal/*` 和其他 Actuator 路径。
-6. 数据库口令、AI 内部令牌、Kimi 密钥和证书私钥均不在 Git、Markdown、命令历史或发布 ZIP 中。
+6. 数据库口令、Kimi 密钥和证书私钥均不在 Git、Markdown、命令历史或发布 ZIP 中。
 7. 升级前已完成数据库与文件备份；迁移保持向后兼容，否则不得依赖二进制回滚。
 8. 静态基线测试与行为测试全部通过。
 
@@ -34,7 +33,6 @@
 - IIS（Static Content、Default Document、HTTP Errors、Static Content Compression；Dynamic Content Compression 可按 CPU 基线启用）。
 - IIS URL Rewrite 2.x 与 Application Request Routing（ARR），并启用代理功能。
 - Java 21 x64，仅需 JRE/JDK 运行时。
-- Python 3.12 x64，安装时为每个发布版本建立独立 `.venv`。sidecar 契约允许 3.12–3.14，但当前只把完成全套验证的 3.12 作为生产基线。
 - PDFBox 可直接加载并覆盖中文字符的 TrueType/OpenType 字体文件。默认 `C:\Windows\Fonts\simhei.ttf`；安装预检会实际以只读方式打开。未经 Backend 专项验证不得用 `.ttc` 集合字体替代。
 - WinSW x64 2.12.0。模板使用该稳定版的 `domain`/`user` 服务账号语法；WinSW 3 当前为预发行迁移线，升级前必须单独做服务安装、停止、失败重启和日志轮转验收。
 - 可连接的 MySQL 8.4 LTS；试运行期间 SQL 需兼容 8.0.31。
@@ -59,16 +57,14 @@ C:\ProgramData\ThreeFees\
     backend\three-fees-api.jar
     frontend\index.html
     frontend\web.config
-    ai-service\.venv\...
     deployment\windows\...
   services\
     three-fees-api\three-fees-api.exe|xml
     three-fees-worker\three-fees-worker.exe|xml
-    three-fees-ai\three-fees-ai.exe|xml
   shared\
     files\
-    logs\api|worker|ai\
-    tmp\api|worker|ai\
+    logs\api|worker\
+    tmp\api|worker\
   staging\
 ```
 
@@ -85,11 +81,10 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\deploy\windows\scripts\Test-DeploymentScripts.ps1
 .\deploy\windows\scripts\Build-Release.ps1 `
   -Version '0.1.0' `
-  -PnpmExe 'C:\Program Files\nodejs\corepack.cmd' `
-  -PythonExe 'D:\ApprovedRuntime\Python312\python.exe'
+  -PnpmExe 'C:\Program Files\nodejs\corepack.cmd'
 ```
 
-`Build-Release.ps1` 会执行 Maven `verify`，通过显式 `PnpmExe` 使用 `packageManager` 锁定的 pnpm 版本完成冻结安装与生产构建，并通过显式 `PythonExe` 执行 AI pytest。`PnpmExe` 可以是 Corepack 或经批准的 pnpm 可执行文件。发布包只复制一个可运行 JAR、前端 `dist`、脱敏后的 AI 运行源码、部署工具与运行手册；排除 `.env`、虚拟环境、依赖目录、测试脚本/数据、运行时目录、上传/备份、日志、缓存和 DEMO 材料。脚本扫描高置信疑似秘密并生成逐文件 SHA-256 清单。
+`Build-Release.ps1` 会执行 Maven `verify`，通过显式 `PnpmExe` 使用 `packageManager` 锁定的 pnpm 版本完成冻结安装与生产构建。发布包只复制一个可运行 JAR、前端 `dist`、部署工具与运行手册；排除 `.env`、依赖目录、测试脚本/数据、运行时目录、上传/备份、日志、缓存和 DEMO 材料。脚本扫描高置信疑似秘密并生成逐文件 SHA-256 清单。
 
 将以下内容作为同一发布审批记录保存，但不要写入 Git：
 
@@ -113,7 +108,6 @@ $certificateThumbprint = '<local-machine-certificate-thumbprint>'
   -WinSWExecutable 'D:\Release\WinSW-x64.exe' `
   -WinSWExpectedSha256 $approvedWinSwHash `
   -JavaExe 'C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe' `
-  -PythonExe 'C:\Program Files\Python312\python.exe' `
   -ReportFontPath 'C:\Windows\Fonts\simhei.ttf' `
   -HostName 'property.example.internal' `
   -CertificateThumbprint $certificateThumbprint
@@ -126,13 +120,11 @@ $certificateThumbprint = '<local-machine-certificate-thumbprint>'
 确认预检结果后，在提升权限的 PowerShell 中重复同一命令并加 `-Apply`。安装流程会：
 
 1. 安全解压并复核清单/SHA-256。
-2. 建立版本目录及版本专属 Python `.venv`。
+2. 建立版本目录。
 3. 写入 `release-state.json` 后创建 `current` Junction。
 4. 为 `NetworkService`、IIS 授予最小目录权限。
-5. 渲染并安装三个 WinSW 服务，但不启动。
+5. 渲染并安装两个 WinSW 服务，但不启动。
 6. 建立 IIS 站点、证书绑定并启用 ARR 代理。
-
-若生产网络禁止在线安装 Python 包，准备内部、已查毒并锁定哈希的 wheelhouse，然后增加 `-Wheelhouse 'D:\ApprovedWheelhouse'`。正式发布优先提交 `requirements.lock`；只有 `requirements.txt`/`pyproject.toml` 时脚本会警告可重复性降低。
 
 ## 7. 安全注入环境变量
 
@@ -146,11 +138,12 @@ $certificateThumbprint = '<local-machine-certificate-thumbprint>'
 .\Set-ServiceEnvironment.ps1 -ServiceId three-fees-worker `
   -DatabaseUsername 'three_fees_app' -ReportFontPath 'C:\Windows\Fonts\simhei.ttf' -Apply
 
-.\Set-ServiceEnvironment.ps1 -ServiceId three-fees-ai `
-  -AiProvider fake -Apply
+.\Set-ServiceEnvironment.ps1 -ServiceId three-fees-api `
+  -DatabaseUsername 'three_fees_app' -ReportFontPath 'C:\Windows\Fonts\simhei.ttf' `
+  -AiEnabled $true -KimiModel 'kimi-k3' -Apply
 ```
 
-三次输入的 `AI_SERVICE_TOKEN` 必须是同一高熵随机值。`DB_PASSWORD` 只提供给 API/worker；`KIMI_API_KEY` 只提供给 AI。AI 默认 `fake`，切换 `kimi` 前必须轮换 DEMO 中已暴露的旧密钥，并明确传入 `-AiProvider kimi -KimiModel '<approved-model>'`。
+启用生成报告 AI 助手时，`KIMI_API_KEY` 只通过交互式安全输入或本地私有配置提供；脚本不会回显值。
 
 首次 API 启动还会交互输入用户指定的临时初始账号口令，但口令值不出现在命令、文档或仓库。确认账号已生成后，再以 `-InitialAccountBootstrapEnabled $false` 重跑 API 环境脚本并重启 API，使注册表中不再保留 `INITIAL_ACCOUNT_PASSWORD`。worker 始终写入 `INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=false`。
 
@@ -166,38 +159,35 @@ $certificateThumbprint = '<local-machine-certificate-thumbprint>'
 | `DB_USERNAME`/`DB_PASSWORD` | API、worker | 是 | 最小权限数据库账号 |
 | `APP_FILE_ROOT` | API、worker | 否 | 仓库外业务文件根；导入、导出、报告 Word/PDF 与历史文件均由真实文件模块使用 |
 | `REPORT_FONT_PATH` | API、worker | 否 | PDFBox 中文报告字体的绝对 `.ttf`/`.otf` 路径；安装和环境注入均检查可读 |
-| `AI_SERVICE_BASE_URL` | API、worker | 否 | 固定回环 AI 地址 |
-| `AI_SERVICE_TOKEN` | 三个服务 | 是 | Java/Python 内部认证共享值 |
+| `AI_ENABLED` | API、worker | 否 | 是否启用生成报告 AI 助手 |
 | `SESSION_COOKIE_SECURE` | API | 否 | 生产固定 `true`，仅通过 HTTPS 发送会话 Cookie |
 | `INITIAL_ACCOUNT_BOOTSTRAP_ENABLED` | API、worker | 否 | API 首次启用后关闭；worker 固定关闭 |
 | `INITIAL_ACCOUNT_PASSWORD` | API 首次启动 | 是 | 仅首次建号，完成后从服务环境移除 |
-| `AI_MODEL_PROVIDER` | AI | 否 | `fake` 或经批准的 `kimi`；默认固定 deterministic fake |
-| `KIMI_BASE_URL`/`KIMI_MODEL` | AI | 否 | 供应商端点与模型名 |
-| `KIMI_API_KEY` | AI | 是 | 已轮换的模型密钥 |
+| `KIMI_BASE_URL`/`KIMI_MODEL` | API、worker | 否 | 供应商端点与模型名 |
+| `KIMI_API_KEY` | API、worker | 是 | 模型密钥 |
 
 WinSW XML 固定注入 `SPRING_PROFILES_ACTIVE`、回环监听和进程角色，不包含秘密。
 
 ## 8. 启动与验证
 
-首次部署按 AI → API → worker 的顺序启动。API 完成 Flyway/首次账号初始化后，worker 才开始领取持久任务；worker 不启动 Web，也不执行账号初始化：
+首次部署按 API → worker 的顺序启动。API 完成 Flyway/首次账号初始化后，worker 才开始领取持久任务；worker 不启动 Web，也不执行账号初始化：
 
 ```powershell
-Start-Service three-fees-ai
 Start-Service three-fees-api
 Invoke-RestMethod 'http://127.0.0.1:8080/actuator/health'
 Start-Service three-fees-worker
 
-Get-Service three-fees-api, three-fees-worker, three-fees-ai
+Get-Service three-fees-api, three-fees-worker
 Invoke-WebRequest 'https://property.example.internal/actuator/health' -UseBasicParsing
 ```
 
 验证清单：
 
-- 三个服务状态均为 `Running`，Windows Event Log 无连续重启；worker 日志出现轮询就绪且没有“处理器缺失”循环错误。
+- 两个服务状态均为 `Running`，Windows Event Log 无连续重启；worker 日志出现轮询就绪且没有“处理器缺失”循环错误。
 - API 健康返回 HTTP 200；外部 HTTPS 健康返回 200。
 - 浏览器刷新任意 SPA 路由仍返回 `index.html`。
 - `/internal/v1/...` 与 `/actuator/env` 从 IIS 返回 404。
-- `netstat -ano` 显示 8080、8100 只绑定 `127.0.0.1`。
+- `netstat -ano` 显示 8080 只绑定 `127.0.0.1`。
 - 100 MB 以上上传在 IIS 层拒绝；应用层仍需执行自身大小、MIME、签名和压缩炸弹校验。
 - IIS 与 WinSW 日志中没有口令、令牌、模型原始敏感输入。
 
@@ -207,17 +197,16 @@ Invoke-WebRequest 'https://property.example.internal/actuator/health' -UseBasicP
 
 ```powershell
 .\Upgrade-ThreeFees.ps1 `
-  -ReleaseArchive 'D:\Release\three-fees-0.2.0.zip' `
-  -PythonExe 'C:\Program Files\Python312\python.exe'
+  -ReleaseArchive 'D:\Release\three-fees-0.2.0.zip'
 ```
 
-确认后加 `-Apply`。脚本准备完整新版本并写 ready marker，随后停止三个服务、切换 `current` Junction，只恢复切换前实际处于运行状态的服务，并等待 API 健康。正常运行集合是 AI、API、worker；新版本不健康时自动恢复旧 Junction 和原运行服务，失败版本目录保留用于取证。
+确认后加 `-Apply`。脚本准备完整新版本并写 ready marker，随后停止两个服务、切换 `current` Junction，只恢复切换前实际处于运行状态的服务，并等待 API 健康。正常运行集合是 API、worker；新版本不健康时自动恢复旧 Junction 和原运行服务，失败版本目录保留用于取证。
 
 升级脚本不会自动覆盖已安装的 WinSW XML。若发布包内 `deployment\windows\config\winsw` 与 `services\*\*.xml` 有差异，必须单独评审、备份旧 XML，并在预生产验证 WinSW `refresh`/重启后再变更正式环境。这样可避免二进制升级意外改变服务账号或启动策略。
 
 ## 10. 回滚
 
-仅可回滚到 `releases` 下具有有效 manifest、SHA-256、ready marker 和 Python 运行时的版本：
+仅可回滚到 `releases` 下具有有效 manifest、SHA-256 和 ready marker 的版本：
 
 ```powershell
 .\Rollback-ThreeFees.ps1 -Version '0.1.0'
@@ -246,7 +235,7 @@ Backend Agent 已确认：
 - Spring 生产配置已确认读取 `DB_URL`、`DB_USERNAME`、`DB_PASSWORD`、`SESSION_COOKIE_SECURE`、`INITIAL_ACCOUNT_BOOTSTRAP_ENABLED`、`INITIAL_ACCOUNT_PASSWORD`。
 - `APP_FILE_ROOT` 是真实文件模块根目录；只存业务文件，数据库记录元数据、SHA-256 和关联。任何版本升级都不得把它迁入 `releases`。
 - `REPORT_FONT_PATH` 必须在 API/worker 两个服务中一致，且是可读的 `.ttf`/`.otf` 中文字体；不得依赖 Helvetica 显示中文。
-- Python ASGI 入口按 `app.main:app`、`AI_SERVICE_TOKEN` 与 `127.0.0.1:8100` 实施，不访问 MySQL；最终构建仍需以实际 sidecar 测试确认。
+- 生成报告 AI 助手由 Java 后端直接调用 Kimi；最终构建需确认 `AI_ENABLED`、`KIMI_BASE_URL`、`KIMI_MODEL` 与密钥注入策略符合环境要求。
 - AI 健康不从 IIS 公开；Java/API 健康必须覆盖 sidecar 依赖状态但不得泄露细节。
 
 worker 已作为 durable task consumer 常驻，WinSW `startmode` 为 `Automatic` 并延迟启动。API 只提交/查询任务，worker 独立领取、续租、成功、失败和重试；两者不得合并为生产单进程。`THREE_FEES_PROCESS_ROLE=all` 只允许 `dev/e2e/test` 临时环境。

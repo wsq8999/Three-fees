@@ -37,7 +37,6 @@ $requiredFiles = @(
     'config\iis\web.config',
     'config\winsw\three-fees-api.xml',
     'config\winsw\three-fees-worker.xml',
-    'config\winsw\three-fees-ai.xml',
     'scripts\Build-Release.ps1',
     'scripts\Install-ThreeFees.ps1',
     'scripts\Set-ServiceEnvironment.ps1',
@@ -80,7 +79,7 @@ foreach ($jsonFile in Get-ChildItem -LiteralPath (Join-Path $root 'config') -Fil
 try {
     $environmentExample = Import-PowerShellDataFile -LiteralPath (Join-Path $root 'config\environment.example.psd1')
     Add-CheckResult -Name 'environment-example:parse' -Passed $true
-    foreach ($secretName in @('DB_PASSWORD', 'AI_SERVICE_TOKEN', 'KIMI_API_KEY', 'INITIAL_ACCOUNT_PASSWORD')) {
+    foreach ($secretName in @('DB_PASSWORD', 'KIMI_API_KEY', 'INITIAL_ACCOUNT_PASSWORD')) {
         $values = @()
         foreach ($section in $environmentExample.Values) {
             if ($section -is [hashtable] -and $section.ContainsKey($secretName)) {
@@ -94,7 +93,7 @@ catch {
     Add-CheckResult -Name 'environment-example:parse' -Passed $false -Detail $_.Exception.Message
 }
 
-$expectedServiceIds = @('three-fees-api', 'three-fees-worker', 'three-fees-ai')
+$expectedServiceIds = @('three-fees-api', 'three-fees-worker')
 $actualServiceIds = @()
 foreach ($serviceId in $expectedServiceIds) {
     $xmlPath = Join-Path $root ("config\winsw\$serviceId.xml")
@@ -117,14 +116,10 @@ $serviceIdDifferences = @(Compare-Object $expectedServiceIds $actualServiceIds)
 Add-CheckResult -Name 'winsw:service-id-set' -Passed ($serviceIdDifferences.Count -eq 0)
 
 [xml]$apiXml = Get-Content -LiteralPath (Join-Path $root 'config\winsw\three-fees-api.xml') -Raw -Encoding UTF8
-[xml]$aiXml = Get-Content -LiteralPath (Join-Path $root 'config\winsw\three-fees-ai.xml') -Raw -Encoding UTF8
 [xml]$workerXml = Get-Content -LiteralPath (Join-Path $root 'config\winsw\three-fees-worker.xml') -Raw -Encoding UTF8
 $apiXmlText = $apiXml.OuterXml
-$aiXmlText = $aiXml.OuterXml
 Add-CheckResult -Name 'api:loopback-8080' -Passed ($apiXmlText.Contains('127.0.0.1') -and $apiXmlText.Contains('8080'))
-Add-CheckResult -Name 'ai:loopback-8100' -Passed ($aiXmlText.Contains('--host 127.0.0.1') -and $aiXmlText.Contains('--port 8100'))
-Add-CheckResult -Name 'ai:not-wildcard-bound' -Passed (-not $aiXmlText.Contains('0.0.0.0'))
-Add-CheckResult -Name 'winsw:v2-no-hidewindow' -Passed (-not ($apiXmlText.Contains('hidewindow') -or $aiXmlText.Contains('hidewindow')))
+Add-CheckResult -Name 'winsw:v2-no-hidewindow' -Passed (-not $apiXmlText.Contains('hidewindow'))
 Add-CheckResult -Name 'worker:automatic-durable-consumer' -Passed (
     [string]$workerXml.service.startmode -eq 'Automatic' -and
     $null -ne $workerXml.service.delayedAutoStart
@@ -141,7 +136,7 @@ Add-CheckResult -Name 'iis:api-loopback-proxy' -Passed ($iisText.Contains('http:
 Add-CheckResult -Name 'iis:health-loopback-proxy' -Passed ($iisText.Contains('http://127.0.0.1:8080/actuator/health'))
 Add-CheckResult -Name 'iis:no-ai-port-proxy' -Passed (-not $iisText.Contains(':8100'))
 Add-CheckResult -Name 'iis:internal-block-rule' -Passed ($iisText.Contains('Block internal AI routes'))
-Add-CheckResult -Name 'iis:upload-limit-100mb' -Passed ($iisText.Contains('maxAllowedContentLength="104857600"'))
+Add-CheckResult -Name 'iis:upload-limit-max' -Passed ($iisText.Contains('maxAllowedContentLength="4294967295"'))
 
 foreach ($mutatingScript in @('Install-ThreeFees.ps1', 'Set-ServiceEnvironment.ps1', 'Upgrade-ThreeFees.ps1', 'Rollback-ThreeFees.ps1')) {
     $scriptText = Get-Content -LiteralPath (Join-Path $root ("scripts\$mutatingScript")) -Raw -Encoding UTF8
@@ -150,12 +145,12 @@ foreach ($mutatingScript in @('Install-ThreeFees.ps1', 'Set-ServiceEnvironment.p
 
 $buildScriptText = Get-Content -LiteralPath (Join-Path $root 'scripts\Build-Release.ps1') -Raw -Encoding UTF8
 Add-CheckResult -Name 'build:explicit-pnpm-exe' -Passed ($buildScriptText.Contains('[string]$PnpmExe'))
-Add-CheckResult -Name 'build:explicit-python-exe' -Passed ($buildScriptText.Contains('[string]$PythonExe'))
+Add-CheckResult -Name 'build:no-python-sidecar' -Passed (-not $buildScriptText.Contains('[string]$PythonExe'))
 Add-CheckResult -Name 'build:forbidden-runtime-content-gate' -Passed ($buildScriptText.Contains('Assert-NoForbiddenReleaseContent'))
 
 $environmentScriptText = Get-Content -LiteralPath (Join-Path $root 'scripts\Set-ServiceEnvironment.ps1') -Raw -Encoding UTF8
 Add-CheckResult -Name 'environment:report-font-contract' -Passed ($environmentScriptText.Contains('REPORT_FONT_PATH') -and $environmentScriptText.Contains('Resolve-ReadableReportFont'))
-Add-CheckResult -Name 'environment:ai-provider-contract' -Passed ($environmentScriptText.Contains('AI_MODEL_PROVIDER'))
+Add-CheckResult -Name 'environment:kimi-contract' -Passed ($environmentScriptText.Contains('AI_ENABLED') -and $environmentScriptText.Contains('KIMI_API_KEY'))
 
 $configTextFiles = Get-ChildItem -LiteralPath (Join-Path $root 'config') -File -Recurse
 $secretAssignmentPattern = '(?i)(api[_-]?key|client[_-]?secret|password|private[_-]?key|token)\s*[:=]\s*["'']?[A-Za-z0-9_\-./+=]{16,}'

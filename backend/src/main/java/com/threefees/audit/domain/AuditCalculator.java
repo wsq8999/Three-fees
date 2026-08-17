@@ -27,11 +27,11 @@ public class AuditCalculator {
     }
 
     BigDecimal currentDaily =
-        divide(input.actualEnergy(), BigDecimal.valueOf(input.period().lengthOfMonth()));
+        divide(input.actualEnergy(), BigDecimal.valueOf(input.currentPaymentDays()));
     MetricResult yoy =
         historicalMetric(
             currentDaily,
-            input.period(),
+            input.currentPaymentDays(),
             input.currentPaymentEligible(),
             input.currentBenchmarkTotal(),
             input.yoyReference(),
@@ -39,7 +39,7 @@ public class AuditCalculator {
     MetricResult mom =
         historicalMetric(
             currentDaily,
-            input.period(),
+            input.currentPaymentDays(),
             input.currentPaymentEligible(),
             input.currentBenchmarkTotal(),
             input.momReference(),
@@ -86,7 +86,7 @@ public class AuditCalculator {
 
   private MetricResult historicalMetric(
       BigDecimal currentDaily,
-      java.time.YearMonth currentPeriod,
+      int currentPaymentDays,
       boolean currentPaymentEligible,
       BigDecimal currentBenchmarkTotal,
       AuditCalculationInput.ReferencePeriod reference,
@@ -101,20 +101,21 @@ public class AuditCalculator {
         || reference.benchmarkTotal() == null) {
       return MetricResult.notApplicable(label + "所需 A、B、C 或审核资格缺失");
     }
-    BigDecimal a = divide(currentBenchmarkTotal, BigDecimal.valueOf(currentPeriod.lengthOfMonth()));
-    BigDecimal b =
-        divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
-    if (b.signum() <= 0) {
-      return MetricResult.notApplicable(label + "参考月标杆日均 B 小于等于 0");
+    if (currentPaymentDays <= 0 || reference.paymentDays() <= 0) {
+      return MetricResult.notApplicable(label + "缴费时间缺失");
     }
-    BigDecimal c =
-        divide(reference.actualEnergy(), BigDecimal.valueOf(reference.period().lengthOfMonth()));
+    BigDecimal a = divide(currentBenchmarkTotal, BigDecimal.valueOf(currentPaymentDays));
+    BigDecimal b = divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
+    if (b.signum() <= 0) {
+      return MetricResult.notApplicable(label + "参考缴费额定日均 B 小于等于 0");
+    }
+    BigDecimal c = divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()));
     BigDecimal k = a.divide(b, INTERNAL_CONTEXT).max(BigDecimal.ONE);
     BigDecimal threshold =
         c.multiply(k, INTERNAL_CONTEXT).multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT);
     boolean overLimit = currentDaily.compareTo(threshold) > 0;
     BigDecimal ratio = overLimit ? ratio(currentDaily, threshold) : BigDecimal.ZERO;
-    String note = label + "阈值 = 参考日均 C × max(1, A/B) × 1.20";
+    String note = label + "阈值 = 参考日均 C * max(1, A/B) * 1.20";
     if (threshold.signum() == 0 && overLimit) {
       ratio = null;
       note += "；阈值为 0，比例不定义";

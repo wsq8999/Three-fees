@@ -7,6 +7,7 @@ import com.threefees.report.application.ReportDraftService;
 import com.threefees.report.application.ReportDraftService.Draft;
 import com.threefees.report.application.ReportDraftService.DraftMessage;
 import com.threefees.report.application.ReportDraftService.DraftVersion;
+import com.threefees.report.application.ReportDraftService.UploadedImage;
 import com.threefees.task.domain.BusinessTask;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -20,10 +21,12 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -46,6 +49,17 @@ public class ReportDraftController {
   public ResponseEntity<DraftResponse> createOrResume(
       @Valid @RequestBody CreateDraftRequest request, @AuthenticationPrincipal CurrentUser actor) {
     Draft draft = service.createOrResume(request.billingPointPeriodId(), actor);
+    return draftResponse(draft)
+        .location(URI.create("/api/v1/report-drafts/" + draft.publicId()))
+        .body(DraftResponse.from(draft));
+  }
+
+  @PostMapping("/corrections/{reportId}")
+  public ResponseEntity<DraftResponse> createCorrection(
+      @PathVariable String reportId,
+      @Valid @RequestBody CreateCorrectionDraftRequest request,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.createCorrection(reportId, request.reason(), actor);
     return draftResponse(draft)
         .location(URI.create("/api/v1/report-drafts/" + draft.publicId()))
         .body(DraftResponse.from(draft));
@@ -92,9 +106,30 @@ public class ReportDraftController {
       @PathVariable String publicId,
       @RequestParam("file") MultipartFile file,
       @AuthenticationPrincipal CurrentUser actor) {
-    String fileId = service.uploadImage(publicId, file, actor);
-    return ResponseEntity.created(URI.create("/api/v1/files/" + fileId))
-        .body(new ImageUploadResponse(fileId));
+    UploadedImage uploaded = service.uploadImage(publicId, file, actor);
+    return ResponseEntity.created(URI.create("/api/v1/files/" + uploaded.fileId()))
+        .body(new ImageUploadResponse(uploaded.fileId(), uploaded.entityVersion()));
+  }
+
+  @DeleteMapping("/{publicId}/images/{fileId}")
+  public ResponseEntity<DraftResponse> removeImage(
+      @PathVariable String publicId,
+      @PathVariable String fileId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft = service.removeImage(publicId, fileId, parseVersion(ifMatch), actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
+  }
+
+  @PutMapping("/{publicId}/images/order")
+  public ResponseEntity<DraftResponse> reorderImages(
+      @PathVariable String publicId,
+      @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
+      @Valid @RequestBody ImageOrderRequest request,
+      @AuthenticationPrincipal CurrentUser actor) {
+    Draft draft =
+        service.reorderImages(publicId, request.imageFileIds(), parseVersion(ifMatch), actor);
+    return draftResponse(draft).body(DraftResponse.from(draft));
   }
 
   @GetMapping("/{publicId}/versions")
@@ -145,6 +180,8 @@ public class ReportDraftController {
 
   public record CreateDraftRequest(@NotBlank String billingPointPeriodId) {}
 
+  public record CreateCorrectionDraftRequest(@NotBlank @Size(max = 1_000) String reason) {}
+
   public record UpdateDraftRequest(
       @NotBlank @Size(max = 500) String title,
       @NotBlank @Size(max = 100_000) String situation,
@@ -161,7 +198,9 @@ public class ReportDraftController {
       @NotBlank @Size(max = 4_000) String content,
       @NotNull @Size(max = 10) List<String> imageFileIds) {}
 
-  public record ImageUploadResponse(String fileId) {}
+  public record ImageUploadResponse(String fileId, long entityVersion) {}
+
+  public record ImageOrderRequest(@NotNull @Size(max = 10) List<String> imageFileIds) {}
 
   public record TaskAcceptedResponse(String taskId, String type, String status) {}
 
@@ -171,8 +210,12 @@ public class ReportDraftController {
       String billingPointCode,
       String billingPointName,
       String cityCode,
+      String cityName,
+      String district,
       String period,
       String auditStatus,
+      String overLimitType,
+      java.math.BigDecimal maxExceedRatio,
       String status,
       ReportSections sections,
       int currentVersion,
@@ -190,8 +233,12 @@ public class ReportDraftController {
           draft.billingPointCode(),
           draft.billingPointName(),
           draft.cityCode(),
+          draft.cityName(),
+          draft.district(),
           draft.period(),
           draft.auditStatus(),
+          draft.overLimitType(),
+          draft.maxExceedRatio(),
           draft.status(),
           draft.sections(),
           draft.currentVersion(),

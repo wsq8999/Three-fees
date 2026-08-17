@@ -214,7 +214,8 @@ public class ApiExceptionHandler {
     LOGGER.error(
         "Unhandled request failure traceId={} exceptionType={}",
         traceId,
-        exception.getClass().getName());
+        exception.getClass().getName(),
+        exception);
     return problem(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "internal-error",

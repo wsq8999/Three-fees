@@ -3,8 +3,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:ThreeFeesServiceIds = @(
     'three-fees-api',
-    'three-fees-worker',
-    'three-fees-ai'
+    'three-fees-worker'
 )
 
 function Assert-Administrator {
@@ -136,17 +135,6 @@ function Test-ReleaseDirectory {
         if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
             throw "Required release file is missing: $requiredFile"
         }
-    }
-
-    $hasAiDependencyFile = @(
-        @(
-            'ai-service\requirements.lock',
-            'ai-service\requirements.txt',
-            'ai-service\pyproject.toml'
-        ) | Where-Object { Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf }
-    )
-    if ($hasAiDependencyFile.Count -eq 0) {
-        throw 'AI service dependency metadata is missing.'
     }
 
     foreach ($entry in $manifest.files) {
@@ -364,10 +352,6 @@ function Test-ReleaseReady {
     if ([string]$marker.manifestSha256 -ne $manifestHash) {
         throw "Release ready marker hash does not match manifest: $ReleasePath"
     }
-    $aiPython = Join-Path $ReleasePath 'ai-service\.venv\Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $aiPython -PathType Leaf)) {
-        throw "Prepared AI runtime is missing: $aiPython"
-    }
     return $manifest
 }
 
@@ -499,10 +483,10 @@ function Stop-ThreeFeesServices {
 
 function Start-ThreeFeesServices {
     param(
-        [string[]]$ServiceIds = @('three-fees-ai', 'three-fees-api', 'three-fees-worker')
+        [string[]]$ServiceIds = @('three-fees-api', 'three-fees-worker')
     )
 
-    foreach ($serviceId in @('three-fees-ai', 'three-fees-api', 'three-fees-worker')) {
+    foreach ($serviceId in @('three-fees-api', 'three-fees-worker')) {
         if ($serviceId -notin $ServiceIds) {
             continue
         }
@@ -561,59 +545,6 @@ function Wait-ThreeFeesHealth {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     throw "API health check did not become ready within $TimeoutSeconds seconds: $HealthUri"
-}
-
-function Initialize-AiVirtualEnvironment {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ReleasePath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$PythonExe,
-
-        [string]$Wheelhouse
-    )
-
-    $aiRoot = Join-Path $ReleasePath 'ai-service'
-    $venvRoot = Join-Path $aiRoot '.venv'
-    if (Test-Path -LiteralPath $venvRoot) {
-        throw "AI virtual environment already exists: $venvRoot"
-    }
-
-    Invoke-CheckedProcess -FilePath $PythonExe -ArgumentList @('-m', 'venv', $venvRoot)
-    $venvPython = Join-Path $venvRoot 'Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        throw "AI virtual environment was not created: $venvPython"
-    }
-
-    $installArguments = @('-m', 'pip', 'install', '--disable-pip-version-check', '--require-virtualenv')
-    if ($Wheelhouse) {
-        $wheelhousePath = Resolve-SafeAbsolutePath -Path $Wheelhouse -Label 'Wheelhouse'
-        if (-not (Test-Path -LiteralPath $wheelhousePath -PathType Container)) {
-            throw "Wheelhouse directory does not exist: $wheelhousePath"
-        }
-        $installArguments += @('--no-index', '--find-links', $wheelhousePath)
-    }
-
-    $lockFile = Join-Path $aiRoot 'requirements.lock'
-    $requirementsFile = Join-Path $aiRoot 'requirements.txt'
-    if (Test-Path -LiteralPath $lockFile -PathType Leaf) {
-        $installArguments += @('-r', $lockFile)
-    }
-    elseif (Test-Path -LiteralPath $requirementsFile -PathType Leaf) {
-        Write-Warning 'AI dependencies are not in requirements.lock; release reproducibility is reduced.'
-        $installArguments += @('-r', $requirementsFile)
-    }
-    elseif (Test-Path -LiteralPath (Join-Path $aiRoot 'pyproject.toml') -PathType Leaf) {
-        Write-Warning 'AI dependencies are resolved from pyproject.toml; use a locked requirements file before production.'
-        $installArguments += @($aiRoot)
-    }
-    else {
-        throw 'No supported AI dependency metadata was found.'
-    }
-
-    Invoke-CheckedProcess -FilePath $venvPython -ArgumentList $installArguments -WorkingDirectory $aiRoot
-    Invoke-CheckedProcess -FilePath $venvPython -ArgumentList @('-c', 'import app.main; import uvicorn') -WorkingDirectory $aiRoot
 }
 
 function Convert-SecureStringToPlainText {

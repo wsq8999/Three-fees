@@ -39,8 +39,7 @@ try {
     $releaseRoot = Join-Path $testRoot 'release'
     foreach ($directory in @(
         (Join-Path $releaseRoot 'backend'),
-        (Join-Path $releaseRoot 'frontend'),
-        (Join-Path $releaseRoot 'ai-service')
+        (Join-Path $releaseRoot 'frontend')
     )) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
@@ -48,7 +47,6 @@ try {
     'fixture jar' | Set-Content -LiteralPath (Join-Path $releaseRoot 'backend\three-fees-api.jar') -Encoding ASCII
     '<!doctype html><title>fixture</title>' | Set-Content -LiteralPath (Join-Path $releaseRoot 'frontend\index.html') -Encoding ASCII
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\config\iis\web.config') -Destination (Join-Path $releaseRoot 'frontend\web.config')
-    '# fixture only' | Set-Content -LiteralPath (Join-Path $releaseRoot 'ai-service\requirements.txt') -Encoding ASCII
 
     $files = @()
     foreach ($file in Get-ChildItem -LiteralPath $releaseRoot -File -Recurse | Sort-Object FullName) {
@@ -132,14 +130,7 @@ try {
     }
 
     $java = Get-Command 'java.exe' -ErrorAction SilentlyContinue
-    $python = Get-Command 'python.exe' -ErrorAction SilentlyContinue
-    if ($null -eq $python) {
-        $repositoryPython = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\ai-service\.venv\Scripts\python.exe'))
-        if (Test-Path -LiteralPath $repositoryPython -PathType Leaf) {
-            $python = [pscustomobject]@{ Source = $repositoryPython }
-        }
-    }
-    if ($null -ne $java -and $null -ne $python) {
+    if ($null -ne $java) {
         $fakeWrapper = Join-Path $testRoot 'winsw-fixture.exe'
         'fixture wrapper' | Set-Content -LiteralPath $fakeWrapper -Encoding ASCII
         $wrapperHash = (Get-FileHash -LiteralPath $fakeWrapper -Algorithm SHA256).Hash
@@ -150,12 +141,11 @@ try {
             -WinSWExpectedSha256 $wrapperHash `
             -DeploymentRoot $dryRunTarget `
             -JavaExe $java.Source `
-            -PythonExe $python.Source `
             -AllowHttp | Out-Null
         Assert-Test -Condition (-not (Test-Path -LiteralPath $dryRunTarget)) -Name 'install preflight performs no filesystem mutation'
     }
     else {
-        Write-Warning 'Java or Python was unavailable; install preflight no-mutation test was skipped.'
+        Write-Warning 'Java was unavailable; install preflight no-mutation test was skipped.'
     }
 
     foreach ($pass in $passes) {

@@ -5,7 +5,9 @@ import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
 import com.threefees.importing.domain.ImportError;
+import java.sql.Date;
 import java.sql.PreparedStatement;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -34,6 +36,8 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
       String publicId,
       DatasetType datasetType,
       String period,
+      LocalDate periodStart,
+      LocalDate periodEnd,
       String cityCode,
       long sourceFileId,
       String taskPublicId,
@@ -45,19 +49,21 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
               connection.prepareStatement(
                   """
                   INSERT INTO import_job
-                    (public_id, dataset_type, data_period, city_code, status, source_file_id,
+                    (public_id, dataset_type, data_period, period_start, period_end, city_code, status, source_file_id,
                      task_public_id, row_count, error_count, errors_json, created_by, updated_by)
-                  VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, 0, 0, '[]', ?, ?)
+                  VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, 0, 0, '[]', ?, ?)
                   """,
                   new String[] {"id"});
           statement.setString(1, publicId);
           statement.setString(2, datasetType.name());
           statement.setString(3, period);
-          statement.setString(4, cityCode);
-          statement.setLong(5, sourceFileId);
-          statement.setString(6, taskPublicId);
-          statement.setString(7, actor);
-          statement.setString(8, actor);
+          statement.setDate(4, periodStart == null ? null : Date.valueOf(periodStart));
+          statement.setDate(5, periodEnd == null ? null : Date.valueOf(periodEnd));
+          statement.setString(6, cityCode);
+          statement.setLong(7, sourceFileId);
+          statement.setString(8, taskPublicId);
+          statement.setString(9, actor);
+          statement.setString(10, actor);
           return statement;
         },
         keyHolder);
@@ -267,7 +273,7 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   private List<ImportBatch> query(String predicate, Object... arguments) {
     return jdbcTemplate.query(
         """
-        SELECT id, public_id, dataset_type, data_period, city_code, status, source_file_id,
+        SELECT id, public_id, dataset_type, data_period, period_start, period_end, city_code, status, source_file_id,
                task_public_id, row_count, error_count, errors_json, completed_at,
                created_at, created_by, updated_at, version
           FROM import_job
@@ -279,6 +285,8 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
                 resultSet.getString("public_id"),
                 DatasetType.valueOf(resultSet.getString("dataset_type")),
                 resultSet.getString("data_period"),
+                resultSet.getObject("period_start", LocalDate.class),
+                resultSet.getObject("period_end", LocalDate.class),
                 resultSet.getString("city_code"),
                 ImportBatchStatus.valueOf(resultSet.getString("status")),
                 resultSet.getLong("source_file_id"),
@@ -340,5 +348,6 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
       throw new IllegalStateException("Persisted import job errors are invalid", exception);
     }
   }
+
 }
 

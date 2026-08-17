@@ -8,7 +8,6 @@ import type {
   CreateImportInput,
   DashboardData,
   DraftBlock,
-  DraftVersion,
   ExportJob,
   HistoricalReportBillingPoint,
   HistoricalReportCandidate,
@@ -28,6 +27,8 @@ import type {
   ReportStatus,
   SendDraftMessageInput,
 } from "@/types/business";
+
+const LONG_RUNNING_REQUEST = { timeoutMs: 0 };
 
 function asResult<T>(value: unknown): T {
   return value as T;
@@ -147,22 +148,12 @@ interface ReportSections {
 
 interface BackendDraftMessage {
   id: string;
-  intent: "ASK" | "EDIT" | "IMAGE_ANALYSIS";
+  intent: "ASK" | "EDIT" | "CORRECTION" | "IMAGE_ANALYSIS";
   userContent: string;
   assistantContent: string;
   changedDraft: boolean;
   imageFileIds: string[];
   createdAt: string;
-}
-
-interface BackendDraftVersion {
-  id: string;
-  version: number;
-  changeType: "INITIAL" | "EDIT" | "IMAGE_ANALYSIS" | "RESTORE" | "MANUAL";
-  sections: ReportSections;
-  imageFileIds: string[];
-  createdAt: string;
-  createdBy: string;
 }
 
 interface BackendReportDraft {
@@ -171,8 +162,12 @@ interface BackendReportDraft {
   billingPointCode: string;
   billingPointName: string;
   cityCode: string;
+  cityName: string;
+  district: string | null;
   period: string;
   auditStatus: string;
+  overLimitType: string | null;
+  maxExceedRatio: string | null;
   status: "DRAFT" | "CORRECTING" | "GENERATING" | "FORMALIZED";
   sections: ReportSections;
   currentVersion: number;
@@ -391,25 +386,25 @@ function sectionsToBlocks(sections: ReportSections): DraftBlock[] {
       id: "title",
       type: "HEADING",
       title: "报告标题",
-      content: sections.title,
+      content: cleanDraftText(sections.title),
     },
     {
       id: "situation",
       type: "SITUATION",
       title: "情况说明",
-      content: sections.situation,
+      content: looksLikeHtml(sections.situation) ? sections.situation : cleanDraftText(sections.situation),
     },
     {
       id: "analysis",
       type: "ANALYSIS",
       title: "审计分析",
-      content: sections.analysis,
+      content: looksLikeHtml(sections.analysis) ? sections.analysis : cleanDraftText(sections.analysis),
     },
     {
       id: "rectification",
       type: "RECTIFICATION",
       title: "整改建议",
-      content: sections.rectification,
+      content: looksLikeHtml(sections.rectification) ? sections.rectification : cleanDraftText(sections.rectification),
     },
   ];
 }
@@ -427,28 +422,16 @@ function blocksToSections(blocks: DraftBlock[]): ReportSections {
   };
 }
 
-function mapDraftVersion(version: BackendDraftVersion): DraftVersion {
-  return {
-    id: version.id,
-    version: version.version,
-    reason: version.changeType === "MANUAL" ? "EDIT" : version.changeType,
-    summary: version.changeType,
-    createdAt: version.createdAt,
-    blocks: sectionsToBlocks(version.sections),
-  };
-}
-
-function mapDraft(
-  item: BackendReportDraft,
-  versions: DraftVersion[] = [],
-): ReportDraft {
+function mapDraft(item: BackendReportDraft): ReportDraft {
   return {
     id: item.id,
     billingPointId: item.billingPointPeriodId,
     billingPointCode: item.billingPointCode,
     billingPointName: item.billingPointName,
-    city: { code: item.cityCode, name: item.cityCode },
+    city: { code: item.cityCode, name: item.cityName ?? item.cityCode },
     period: item.period,
+    overLimitType: overLimitTypeLabel(item.overLimitType),
+    maxExceedRatio: item.maxExceedRatio,
     status:
       item.status === "GENERATING"
         ? "GENERATING"
@@ -456,6 +439,7 @@ function mapDraft(
           ? "FINALIZED"
           : "EDITING",
     blocks: sectionsToBlocks(item.sections),
+    imageFileIds: item.currentImageFileIds ?? [],
     messages: (item.messages ?? []).flatMap((message) => [
       {
         id: `${message.id}-user`,
@@ -474,7 +458,6 @@ function mapDraft(
         createdAt: message.createdAt,
       },
     ]),
-    versions,
     updatedAt: item.updatedAt,
     formalReportId: item.formalReportId,
     entityVersion: item.version,
@@ -534,6 +517,22 @@ function mapReport(item: BackendReportSummary): ReportSummary {
         ]
       : [],
   };
+}
+
+function cleanDraftText(value: string | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  return value
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|section|article|h[1-6]|li|tr)>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function cleanReportPart(value: string | null | undefined): string {
@@ -638,7 +637,11 @@ export const businessApi = {
         form.set("period", input.period);
       }
       form.set("file", file);
-      const response = await httpClient.postForm("/api/v1/import-batches", form);
+      const response = await httpClient.postForm(
+        "/api/v1/import-batches",
+        form,
+        LONG_RUNNING_REQUEST,
+      );
       const result = asResult<
         ImportBatch | { items?: ImportBatch[]; batches?: ImportBatch[] }
       >(response);
@@ -679,7 +682,7 @@ export const businessApi = {
       if (job.downloadUrl === null) {
         throw new Error("导出任务尚未生成下载文件");
       }
-      return httpClient.getBlob(job.downloadUrl);
+      return httpClient.getBlob(job.downloadUrl, LONG_RUNNING_REQUEST);
     },
   },
   billingPoints: {
@@ -722,23 +725,22 @@ export const businessApi = {
           billingPointPeriodId,
         }),
       );
-      const versions = asResult<BackendDraftVersion[]>(
-        await httpClient.get(
-          `/api/v1/report-drafts/${encodeURIComponent(raw.id)}/versions`,
+      return mapDraft(raw);
+    },
+    async createCorrection(reportId: string, reason: string): Promise<ReportDraft> {
+      const raw = asResult<BackendReportDraft>(
+        await httpClient.post(
+          `/api/v1/report-drafts/corrections/${encodeURIComponent(reportId)}`,
+          { reason },
         ),
-      ).map(mapDraftVersion);
-      return mapDraft(raw, versions);
+      );
+      return mapDraft(raw);
     },
     async get(id: string): Promise<ReportDraft | undefined> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.get(`/api/v1/report-drafts/${encodeURIComponent(id)}`),
       );
-      const versions = asResult<BackendDraftVersion[]>(
-        await httpClient.get(
-          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
-        ),
-      ).map(mapDraftVersion);
-      return mapDraft(raw, versions);
+      return mapDraft(raw);
     },
     async save(id: string, draft: ReportDraft): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
@@ -748,23 +750,21 @@ export const businessApi = {
           { headers: { "If-Match": String(draft.entityVersion) } },
         ),
       );
-      const versions = asResult<BackendDraftVersion[]>(
-        await httpClient.get(
-          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
-        ),
-      ).map(mapDraftVersion);
-      return mapDraft(raw, versions);
+      return mapDraft(raw);
     },
-    async uploadImage(id: string, file: File): Promise<string> {
+    async uploadImage(
+      id: string,
+      file: File,
+    ): Promise<{ fileId: string; entityVersion: number }> {
       const form = new FormData();
       form.set("file", file);
-      const response = asResult<{ fileId: string }>(
+      const response = asResult<{ fileId: string; entityVersion: number }>(
         await httpClient.postForm(
           `/api/v1/report-drafts/${encodeURIComponent(id)}/images`,
           form,
         ),
       );
-      return response.fileId;
+      return response;
     },
     async sendMessage(
       id: string,
@@ -779,31 +779,36 @@ export const businessApi = {
             content: input.content,
             imageFileIds: input.imageFileIds ?? [],
           },
-          { headers: { "If-Match": String(version ?? 0) } },
+          {
+            headers: { "If-Match": String(version ?? 0) },
+            timeoutMs: 600_000,
+          },
         ),
       );
-      const versions = asResult<BackendDraftVersion[]>(
-        await httpClient.get(
-          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
-        ),
-      ).map(mapDraftVersion);
-      return mapDraft(raw, versions);
+      return mapDraft(raw);
     },
-    async restore(id: string, versionId: string): Promise<ReportDraft> {
-      const current = await this.get(id);
+    async removeImage(id: string, fileId: string, version: number): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
-        await httpClient.post(
-          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions/${encodeURIComponent(versionId)}/restorations`,
-          {},
-          { headers: { "If-Match": String(current?.entityVersion ?? 0) } },
+        await httpClient.delete(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/images/${encodeURIComponent(fileId)}`,
+          { headers: { "If-Match": String(version) } },
         ),
       );
-      const versions = asResult<BackendDraftVersion[]>(
-        await httpClient.get(
-          `/api/v1/report-drafts/${encodeURIComponent(id)}/versions`,
+      return mapDraft(raw);
+    },
+    async reorderImages(
+      id: string,
+      imageFileIds: string[],
+      version: number,
+    ): Promise<ReportDraft> {
+      const raw = asResult<BackendReportDraft>(
+        await httpClient.put(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/images/order`,
+          { imageFileIds },
+          { headers: { "If-Match": String(version) } },
         ),
-      ).map(mapDraftVersion);
-      return mapDraft(raw, versions);
+      );
+      return mapDraft(raw);
     },
     async generate(id: string): Promise<ReportSummary> {
       const current = await this.get(id);

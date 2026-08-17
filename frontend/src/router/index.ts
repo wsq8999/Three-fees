@@ -64,7 +64,7 @@ export const router = createRouter({
         {
           path: "reports",
           name: "reports-compat",
-          redirect: "/reports/generate",
+          redirect: "/reports/history",
           meta: { title: "稽核报告管理", requiresAuth: true },
         },
         {

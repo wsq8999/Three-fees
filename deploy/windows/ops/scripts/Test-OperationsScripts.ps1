@@ -50,12 +50,11 @@ try {
     $logRoot = Join-Path $deploymentRoot 'shared\logs'
     $backupRoot = Join-Path $testRoot 'backups'
     $restoreRoot = Join-Path $testRoot 'restore-drills'
-    foreach ($directory in @($fileRoot, (Join-Path $logRoot 'api'), (Join-Path $logRoot 'ai'), (Join-Path $logRoot 'worker'))) {
+    foreach ($directory in @($fileRoot, (Join-Path $logRoot 'api'), (Join-Path $logRoot 'worker'))) {
         [void](New-Item -ItemType Directory -Path $directory -Force)
     }
     [IO.File]::WriteAllText((Join-Path $fileRoot 'sample-business-file.txt'), 'immutable test payload', (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText((Join-Path $logRoot 'api\api.log'), 'INFO traceId=test ready', (New-Object Text.UTF8Encoding($false)))
-    [IO.File]::WriteAllText((Join-Path $logRoot 'ai\ai.log'), 'INFO traceId=test ready', (New-Object Text.UTF8Encoding($false)))
 
     $fakeSource = @'
 using System;
@@ -100,10 +99,9 @@ public static class FakeMySqlClient {
         BackupRoot = $(ConvertTo-TestPsd1String $backupRoot)
         RestoreDrillRoot = $(ConvertTo-TestPsd1String $restoreRoot)
     }
-    Services = @{
+        Services = @{
         Api = @{ Name='three-fees-api'; ExpectedState='Running'; ExpectedStartMode='Auto'; HealthUri='http://127.0.0.1:8080/actuator/health'; ListenPort=8080 }
         Worker = @{ Name='three-fees-worker'; ExpectedState='Stopped'; ExpectedStartMode='Manual'; ListenPort=0 }
-        Ai = @{ Name='three-fees-ai'; ExpectedState='Running'; ExpectedStartMode='Auto'; HealthUri='http://127.0.0.1:8100/health'; ListenPort=8100 }
     }
     Database = @{
         Host='127.0.0.1'; Port=3306; Name='three_fees'

@@ -73,7 +73,8 @@ public class ReportGenerationService {
     }
     return jdbcTemplate.query(
         """
-        SELECT s.billing_point_code, s.billing_point_name, s.city_code, c.name AS city_name,
+        SELECT s.public_id AS billing_point_period_id,
+               s.billing_point_code, s.billing_point_name, s.city_code, c.name AS city_name,
                s.district_name, s.data_period, a.over_limit_type, a.max_ratio
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
@@ -87,6 +88,7 @@ public class ReportGenerationService {
             + " ORDER BY a.max_ratio DESC, s.billing_point_code, s.data_period DESC LIMIT 500",
         (rs, row) ->
             new Candidate(
+                rs.getString("billing_point_period_id"),
                 rs.getString("billing_point_code"),
                 rs.getString("billing_point_name"),
                 rs.getString("city_code"),
@@ -121,7 +123,7 @@ public class ReportGenerationService {
   @Transactional(readOnly = true)
   public AnalyzeImageResult analyzeImages(AnalyzeImageCommand command, CurrentUser actor) {
     if (!aiEnabled) {
-      throw new BusinessRuleException("AI_SERVICE_DISABLED", "AI 服务暂不可用，请先人工编辑报告。");
+      throw new BusinessRuleException("AI_ASSISTANT_DISABLED", "AI 助手暂不可用，请先人工编辑报告。");
     }
     GenerationSource source = source(command.billingPointCode(), command.period(), actor, false);
     String contentHtml = command.contentHtml() == null ? "" : command.contentHtml();
@@ -466,6 +468,7 @@ public class ReportGenerationService {
 
   private Candidate candidate(GenerationSource source) {
     return new Candidate(
+        source.snapshotPublicId(),
         source.billingPointCode(),
         source.billingPointName(),
         source.cityCode(),
@@ -608,6 +611,7 @@ public class ReportGenerationService {
   }
 
   public record Candidate(
+      String billingPointPeriodId,
       String billingPointCode,
       String billingPointName,
       String cityCode,
