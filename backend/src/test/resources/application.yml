@@ -27,6 +27,10 @@ server:
       cookie:
         secure: false
 
+app:
+  ai:
+    enabled: false
+
 logging:
   level:
     root: WARN

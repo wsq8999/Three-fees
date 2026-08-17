@@ -63,10 +63,9 @@ app:
     poll-delay: 500
     lease-seconds: 30
   ai:
-    enabled: ${AI_ENABLED:false}
+    enabled: ${AI_ENABLED:true}
     model: ${KIMI_MODEL:kimi-k3}
     max-history-cases: ${AI_MAX_HISTORY_CASES:30}
-    max-cross-city-cases: ${AI_MAX_CROSS_CITY_CASES:5}
   report:
     font-path: ${REPORT_FONT_PATH:}
 

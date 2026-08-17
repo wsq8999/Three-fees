@@ -22,6 +22,7 @@ public class CityMemoryService {
     if (source.finalReason() == null || source.finalReason().isBlank()) {
       return;
     }
+    deactivateDraftCorrections(draftPublicId);
     Integer exists =
         jdbcTemplate.queryForObject(
             "SELECT COUNT(*) FROM ai_city_memory WHERE source_report_id = ?",
@@ -54,17 +55,81 @@ public class CityMemoryService {
   }
 
   @Transactional
+  public void rememberUserCorrection(
+      long draftId,
+      long messageId,
+      String userCorrection,
+      String initialReason,
+      String finalReason,
+      String evidenceSummary,
+      String rectificationSummary,
+      String actor) {
+    if (finalReason == null || finalReason.isBlank()) {
+      return;
+    }
+    CorrectionMemorySource source =
+        jdbcTemplate
+            .query(
+                """
+                SELECT s.city_code, s.billing_point_code, a.over_limit_type
+                  FROM report_draft d
+                  JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
+                  LEFT JOIN audit_result a
+                    ON a.billing_point_code = s.billing_point_code
+                   AND a.data_period = s.data_period
+                   AND a.city_code = s.city_code
+                 WHERE d.id = ?
+                """,
+                (rs, row) ->
+                    new CorrectionMemorySource(
+                        rs.getString("city_code"),
+                        rs.getString("billing_point_code"),
+                        rs.getString("over_limit_type")),
+                draftId)
+            .stream()
+            .findFirst()
+            .orElseThrow(
+                () -> new IllegalStateException("Report draft does not exist: " + draftId));
+    jdbcTemplate.update(
+        """
+        UPDATE ai_city_memory
+           SET active = FALSE
+         WHERE trust_level = 'USER_CONFIRMED'
+           AND source_message_id IN (
+             SELECT id FROM report_draft_message WHERE draft_id = ? AND id <> ?
+           )
+        """,
+        draftId,
+        messageId);
+    jdbcTemplate.update(
+        """
+        INSERT INTO ai_city_memory
+          (public_id, city_code, billing_point_code, over_limit_type,
+           initial_reason, user_correction, final_reason, evidence_summary,
+           rectification_summary, trust_level, source_message_id, confirmed_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'USER_CONFIRMED', ?, ?)
+        """,
+        UUID.randomUUID().toString(),
+        source.cityCode(),
+        source.billingPointCode(),
+        source.overLimitType(),
+        blankToNull(initialReason),
+        compact(userCorrection, 2000),
+        finalReason,
+        compact(evidenceSummary, 12_000),
+        compact(rectificationSummary, 8000),
+        messageId,
+        actor);
+  }
+
+  @Transactional
   public void indexHistoricalReport(String reportPublicId) {
     upsertHistoricalCase(source(reportPublicId, null), "IMPORTED_REPORT");
   }
 
   @Transactional
   public void updateHistoricalImageAnalysis(
-      String reportPublicId,
-      int imageCount,
-      String status,
-      String analysisText,
-      String errorCode) {
+      String reportPublicId, int imageCount, String status, String analysisText, String errorCode) {
     jdbcTemplate.update(
         """
         UPDATE historical_audit_case
@@ -109,6 +174,22 @@ public class CityMemoryService {
         blankToNull(source.finalReason()),
         summary,
         trustLevel);
+  }
+
+  private void deactivateDraftCorrections(String draftPublicId) {
+    jdbcTemplate.update(
+        """
+        UPDATE ai_city_memory
+           SET active = FALSE
+         WHERE trust_level = 'USER_CONFIRMED'
+           AND source_message_id IN (
+             SELECT m.id
+               FROM report_draft_message m
+               JOIN report_draft d ON d.id = m.draft_id
+              WHERE d.public_id = ?
+           )
+        """,
+        draftPublicId);
   }
 
   private ReportMemorySource source(String reportPublicId, String draftPublicId) {
@@ -190,4 +271,7 @@ public class CityMemoryService {
       String finalReason,
       Long messageId,
       String userCorrection) {}
+
+  private record CorrectionMemorySource(
+      String cityCode, String billingPointCode, String overLimitType) {}
 }

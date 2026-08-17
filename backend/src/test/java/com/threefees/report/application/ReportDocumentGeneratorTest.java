@@ -3,9 +3,13 @@ package com.threefees.report.application;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.threefees.ai.application.AiServiceClient.ReportSections;
+import com.threefees.report.application.ReportDocumentGenerator.ReportImage;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Method;
 import java.util.List;
+import javax.imageio.ImageIO;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
@@ -41,6 +45,38 @@ class ReportDocumentGeneratorTest {
     var text = generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
 
     assertThat(text).contains("历史报告", "情况正文", "排查正文", "整改正文");
+  }
+
+  @Test
+  void keepsInlineEditedTextAndImageInGeneratedWord() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    String imageId = "inline-image-1";
+    var sections =
+        new ReportSections(
+            "内嵌图片报告",
+            "<div>情况可以编辑</div>",
+            "<div>图片前文字</div><figure data-file-id=\""
+                + imageId
+                + "\"><img data-file-id=\""
+                + imageId
+                + "\" src=\"/api/v1/files/inline-image-1?inline=true\"></figure>"
+                + "<div>图片后文字</div>",
+            "<div>整改内容</div>");
+    var imageBytes = new ByteArrayOutputStream();
+    ImageIO.write(new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", imageBytes);
+
+    var generated =
+        generator.generate(
+            sections,
+            List.of(new ReportImage(imageId, "evidence.png", "image/png", imageBytes.toByteArray())));
+
+    try (var word = new XWPFDocument(new ByteArrayInputStream(generated.word()));
+        var extractor = new XWPFWordExtractor(word)) {
+      assertThat(extractor.getText())
+          .contains("情况可以编辑", "图片前文字", "图片后文字", "整改内容")
+          .doesNotContain("<figure", "data-file-id");
+      assertThat(word.getAllPictures()).hasSize(1);
+    }
   }
 
   @Test

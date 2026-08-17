@@ -66,12 +66,15 @@ public class FormalReportTaskProcessor implements TaskProcessor {
         }
         images.add(
             new ReportImage(
-                file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
+                fileId,
+                file.originalName(),
+                file.mediaType(),
+                storedFileService.readBytes(file)));
       }
       var generated = documentGenerator.generate(input.sections(), images);
       byte[] wordBytes =
           correction && looksLikeHtml(input.sections().situation())
-              ? documentGenerator.generateWordFromHtml(input.sections().situation())
+              ? documentGenerator.generateWordFromHtml(input.sections().situation(), images)
               : generated.word();
       word =
           storedFileService.storeGenerated(

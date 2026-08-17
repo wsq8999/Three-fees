@@ -12,7 +12,11 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.poi.extractor.ExtractorFactory;
@@ -68,6 +72,9 @@ public class ReportDocumentGenerator {
   private static final Pattern RAW_URL = Pattern.compile("(?is)https?://\\S+");
   private static final Pattern WORD_FIELD_REMAINDER =
       Pattern.compile("(?i)\\b(?:MERGEFORMATINET|MERGEFORMAT|INCLUDEPICTURE|HYPERLINK)\\b");
+  private static final Pattern HTML_TAG = Pattern.compile("(?is)<[a-z][^>]*>");
+  private static final Pattern INLINE_FILE_ID =
+      Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
 
   private final String configuredFontPath;
 
@@ -94,17 +101,16 @@ public class ReportDocumentGenerator {
   }
 
   public byte[] generateWordFromHtml(String contentHtml) {
+    return generateWordFromHtml(contentHtml, List.of());
+  }
+
+  public byte[] generateWordFromHtml(String contentHtml, List<ReportImage> images) {
     try (var document = new XWPFDocument();
         var output = new ByteArrayOutputStream()) {
-      String wrapped = "<root>" + normalizeHtml(contentHtml) + "</root>";
-      var factory = DocumentBuilderFactory.newInstance();
-      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-      factory.setExpandEntityReferences(false);
-      var dom =
-          factory
-              .newDocumentBuilder()
-              .parse(new ByteArrayInputStream(wrapped.getBytes(StandardCharsets.UTF_8)));
-      appendHtmlChildren(document, dom.getDocumentElement());
+      Map<String, ReportImage> imagesById =
+          images.stream()
+              .collect(Collectors.toMap(ReportImage::fileId, Function.identity(), (a, b) -> a));
+      appendHtmlFragment(document, contentHtml, imagesById);
       document.write(output);
       return output.toByteArray();
     } catch (Exception exception) {
@@ -120,13 +126,29 @@ public class ReportDocumentGenerator {
     return html;
   }
 
-  private void appendHtmlChildren(XWPFDocument document, Node parent) throws Exception {
+  private void appendHtmlFragment(
+      XWPFDocument document, String contentHtml, Map<String, ReportImage> imagesById)
+      throws Exception {
+    String wrapped = "<root>" + normalizeHtml(contentHtml) + "</root>";
+    var factory = DocumentBuilderFactory.newInstance();
+    factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+    factory.setExpandEntityReferences(false);
+    var dom =
+        factory
+            .newDocumentBuilder()
+            .parse(new ByteArrayInputStream(wrapped.getBytes(StandardCharsets.UTF_8)));
+    appendHtmlChildren(document, dom.getDocumentElement(), imagesById);
+  }
+
+  private void appendHtmlChildren(
+      XWPFDocument document, Node parent, Map<String, ReportImage> imagesById) throws Exception {
     for (Node child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-      appendHtmlNode(document, child);
+      appendHtmlNode(document, child, imagesById);
     }
   }
 
-  private void appendHtmlNode(XWPFDocument document, Node node) throws Exception {
+  private void appendHtmlNode(
+      XWPFDocument document, Node node, Map<String, ReportImage> imagesById) throws Exception {
     if (node.getNodeType() == Node.TEXT_NODE) {
       String text = cleanWordText(node.getTextContent());
       if (!text.isBlank()) {
@@ -141,11 +163,12 @@ public class ReportDocumentGenerator {
     switch (tag) {
       case "h1" -> appendWordParagraph(document, element.getTextContent(), true, 18);
       case "h2", "h3" -> appendWordParagraph(document, element.getTextContent(), true, 14);
-      case "p", "div", "section", "article" -> appendHtmlChildren(document, element);
+      case "p", "div", "section", "article", "figure" ->
+          appendHtmlChildren(document, element, imagesById);
       case "br" -> appendWordParagraph(document, " ", false, 12);
       case "table" -> appendHtmlTable(document, element);
-      case "img" -> appendHtmlImage(document, element);
-      default -> appendHtmlChildren(document, element);
+      case "img" -> appendHtmlImage(document, element, imagesById);
+      default -> appendHtmlChildren(document, element, imagesById);
     }
   }
 
@@ -184,24 +207,40 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void appendHtmlImage(XWPFDocument document, Element image) throws Exception {
+  private void appendHtmlImage(
+      XWPFDocument document, Element image, Map<String, ReportImage> imagesById) throws Exception {
     String src = image.getAttribute("src");
-    if (!src.startsWith("data:image/")) {
+    String fileId = image.getAttribute("data-file-id");
+    ReportImage stored = imagesById.get(fileId);
+    if (stored != null) {
+      appendWordImage(document, stored.bytes(), stored.mediaType(), stored.name());
       return;
     }
+    if (!src.startsWith("data:image/")) return;
     int comma = src.indexOf(',');
     int semicolon = src.indexOf(';');
-    if (comma < 0 || semicolon < 0 || semicolon > comma) {
-      return;
-    }
+    if (comma < 0 || semicolon < 0 || semicolon > comma) return;
     String mediaType = src.substring("data:".length(), semicolon);
     byte[] bytes = Base64.getDecoder().decode(src.substring(comma + 1));
-    int type = "image/png".equals(mediaType) ? XWPFDocument.PICTURE_TYPE_PNG : XWPFDocument.PICTURE_TYPE_JPEG;
+    appendWordImage(document, bytes, mediaType, "pasted-image");
+  }
+
+  private void appendWordImage(
+      XWPFDocument document, byte[] bytes, String mediaType, String imageName) throws Exception {
+    int type =
+        "image/png".equals(mediaType)
+            ? XWPFDocument.PICTURE_TYPE_PNG
+            : XWPFDocument.PICTURE_TYPE_JPEG;
     var paragraph = document.createParagraph();
     paragraph.setAlignment(ParagraphAlignment.CENTER);
     paragraph
         .createRun()
-        .addPicture(new ByteArrayInputStream(bytes), type, "pasted-image", Units.toEMU(420), Units.toEMU(260));
+        .addPicture(
+            new ByteArrayInputStream(bytes),
+            type,
+            imageName,
+            Units.toEMU(420),
+            Units.toEMU(260));
   }
 
   public String extractWordText(byte[] bytes, String originalName) {
@@ -522,6 +561,9 @@ public class ReportDocumentGenerator {
   private byte[] generateWord(ReportSections sections, List<ReportImage> images) {
     try (var document = new XWPFDocument();
         var output = new ByteArrayOutputStream()) {
+      Map<String, ReportImage> imagesById =
+          images.stream()
+              .collect(Collectors.toMap(ReportImage::fileId, Function.identity(), (a, b) -> a));
       var title = document.createParagraph();
       title.setAlignment(ParagraphAlignment.CENTER);
       var titleRun = title.createRun();
@@ -529,10 +571,13 @@ public class ReportDocumentGenerator {
       titleRun.setBold(true);
       titleRun.setFontFamily("SimHei");
       titleRun.setFontSize(18);
-      addSection(document, "一、情况说明", sections.situation());
-      addSection(document, "二、排查分析", sections.analysis());
-      addSection(document, "三、整改小结", sections.rectification());
+      addSection(document, "一、情况说明", sections.situation(), imagesById);
+      addSection(document, "二、排查分析", sections.analysis(), imagesById);
+      addSection(document, "三、整改小结", sections.rectification(), imagesById);
+      Set<String> inlineIds =
+          inlineFileIds(sections.situation(), sections.analysis(), sections.rectification());
       for (ReportImage image : images) {
+        if (inlineIds.contains(image.fileId())) continue;
         var paragraph = document.createParagraph();
         paragraph.setAlignment(ParagraphAlignment.CENTER);
         int type =
@@ -555,13 +600,22 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void addSection(XWPFDocument document, String heading, String content) {
+  private void addSection(
+      XWPFDocument document,
+      String heading,
+      String content,
+      Map<String, ReportImage> imagesById)
+      throws Exception {
     var headingParagraph = document.createParagraph();
     var headingRun = headingParagraph.createRun();
     headingRun.setText(heading);
     headingRun.setBold(true);
     headingRun.setFontFamily("SimHei");
     headingRun.setFontSize(14);
+    if (HTML_TAG.matcher(content).find()) {
+      appendHtmlFragment(document, content, imagesById);
+      return;
+    }
     for (String line : content.split("\\R", -1)) {
       var paragraph = document.createParagraph();
       var run = paragraph.createRun();
@@ -580,11 +634,11 @@ public class ReportDocumentGenerator {
       PdfWriter writer = new PdfWriter(document, font);
       writer.centered(sections.title(), 18);
       writer.heading("一、情况说明");
-      writer.paragraph(sections.situation());
+      writer.paragraph(plainText(sections.situation()));
       writer.heading("二、排查分析");
-      writer.paragraph(sections.analysis());
+      writer.paragraph(plainText(sections.analysis()));
       writer.heading("三、整改小结");
-      writer.paragraph(sections.rectification());
+      writer.paragraph(plainText(sections.rectification()));
       for (ReportImage image : images) {
         writer.image(image);
       }
@@ -593,6 +647,32 @@ public class ReportDocumentGenerator {
       return output.toByteArray();
     } catch (IOException exception) {
       throw new IllegalStateException("PDF report could not be generated", exception);
+    }
+  }
+
+  private Set<String> inlineFileIds(String... contents) {
+    return java.util.Arrays.stream(contents)
+        .flatMap(content -> INLINE_FILE_ID.matcher(content).results())
+        .map(result -> result.group(1))
+        .collect(Collectors.toSet());
+  }
+
+  private String plainText(String content) {
+    if (content == null || content.isBlank() || !HTML_TAG.matcher(content).find()) {
+      return content == null ? "" : content;
+    }
+    try {
+      String wrapped = "<root>" + normalizeHtml(content) + "</root>";
+      var factory = DocumentBuilderFactory.newInstance();
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setExpandEntityReferences(false);
+      var dom =
+          factory
+              .newDocumentBuilder()
+              .parse(new ByteArrayInputStream(wrapped.getBytes(StandardCharsets.UTF_8)));
+      return dom.getDocumentElement().getTextContent().trim();
+    } catch (Exception exception) {
+      return content.replaceAll("(?is)<[^>]+>", " ").replaceAll("\\s+", " ").trim();
     }
   }
 
@@ -630,7 +710,7 @@ public class ReportDocumentGenerator {
     String extract() throws Exception;
   }
 
-  public record ReportImage(String name, String mediaType, byte[] bytes) {
+  public record ReportImage(String fileId, String name, String mediaType, byte[] bytes) {
     public ReportImage {
       bytes = bytes.clone();
     }

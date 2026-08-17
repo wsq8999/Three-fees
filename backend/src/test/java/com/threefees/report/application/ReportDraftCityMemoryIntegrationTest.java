@@ -4,8 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.threefees.ai.application.AiServiceClient.ReportSections;
+import com.threefees.ai.application.CityMemoryService;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.domain.Role;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
@@ -20,9 +23,11 @@ class ReportDraftCityMemoryIntegrationTest {
 
   @Autowired private JdbcTemplate jdbcTemplate;
   @Autowired private ReportDraftService service;
+  @Autowired private CityMemoryService cityMemoryService;
 
   @AfterEach
   void cleanUp() {
+    jdbcTemplate.update("DELETE FROM ai_city_memory WHERE confirmed_by='city-memory-test'");
     jdbcTemplate.update(
         "DELETE FROM report_draft_version WHERE draft_id IN (SELECT id FROM report_draft WHERE created_by='city-memory-test')");
     jdbcTemplate.update(
@@ -31,7 +36,6 @@ class ReportDraftCityMemoryIntegrationTest {
     jdbcTemplate.update("DELETE FROM billing_point_snapshot WHERE billing_point_code='MEMORY-POINT-001'");
     jdbcTemplate.update("DELETE FROM import_job WHERE created_by='city-memory-test'");
     jdbcTemplate.update("DELETE FROM stored_file WHERE created_by='city-memory-test'");
-    jdbcTemplate.update("DELETE FROM ai_city_memory WHERE confirmed_by='city-memory-test'");
   }
 
   @Test
@@ -62,6 +66,104 @@ class ReportDraftCityMemoryIntegrationTest {
     assertThat(service.versions(draft.publicId(), actor)).hasSize(1);
   }
 
+  @Test
+  void latestUserCorrectionBecomesTheOnlyActiveCityMemoryForTheDraft() {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+
+    long firstMessageId = insertCorrectionMessage(draft.id(), "实际原因是空调集中运行");
+    cityMemoryService.rememberUserCorrection(
+        draft.id(),
+        firstMessageId,
+        "实际原因是空调集中运行",
+        "原因待核实",
+        "空调集中运行",
+        "现场记录确认空调集中运行。",
+        "调整空调运行时段。",
+        "city-memory-test");
+    long secondMessageId = insertCorrectionMessage(draft.id(), "实际原因是新增设备投运");
+    cityMemoryService.rememberUserCorrection(
+        draft.id(),
+        secondMessageId,
+        "实际原因是新增设备投运",
+        "空调集中运行",
+        "新增设备投运",
+        "设备台账确认本月新增设备。",
+        "补充设备变更备案。",
+        "city-memory-test");
+
+    Integer activeCount =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM ai_city_memory WHERE confirmed_by='city-memory-test' AND active=TRUE",
+            Integer.class);
+    String finalReason =
+        jdbcTemplate.queryForObject(
+            "SELECT final_reason FROM ai_city_memory WHERE confirmed_by='city-memory-test' AND active=TRUE",
+            String.class);
+    assertThat(activeCount).isEqualTo(1);
+    assertThat(finalReason).isEqualTo("新增设备投运");
+    assertThat(service.cityMemoryReferences("320500")).isEmpty();
+  }
+
+  @Test
+  void reorderAndRemovalKeepImageOrderAndAnalysisNumbersConsistent() {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    List<String> imageIds = seedDraftImages(draft.id());
+    draft = service.find(draft.publicId(), actor);
+    draft =
+        service.edit(
+            draft.publicId(),
+            new ReportSections(
+                draft.sections().title(),
+                draft.sections().situation(),
+                draft.sections().analysis()
+                    + "<figure data-file-id=\""
+                    + imageIds.get(0)
+                    + "\"><img data-file-id=\""
+                    + imageIds.get(0)
+                    + "\"></figure>"
+                    + "<figure data-file-id=\""
+                    + imageIds.get(1)
+                    + "\"><img data-file-id=\""
+                    + imageIds.get(1)
+                    + "\"></figure>",
+                draft.sections().rectification()),
+            draft.entityVersion(),
+            actor);
+
+    var reordered =
+        service.reorderImages(
+            draft.publicId(), List.of(imageIds.get(1), imageIds.get(0)), draft.entityVersion(), actor);
+
+    assertThat(reordered.currentImageFileIds())
+        .containsExactly(imageIds.get(1), imageIds.get(0));
+    assertThat(imageSortNumbers(draft.id())).containsExactly(0, 1);
+    assertThat(imageAnalysisJson(draft.id()).get(0)).contains("IMG-1");
+    assertThat(imageAnalysisJson(draft.id()).get(1)).contains("IMG-2");
+
+    var remaining =
+        service.removeImage(
+            draft.publicId(), imageIds.get(1), reordered.entityVersion(), actor);
+
+    assertThat(remaining.currentImageFileIds()).containsExactly(imageIds.get(0));
+    assertThat(remaining.sections().analysis())
+        .contains(imageIds.get(0))
+        .doesNotContain(imageIds.get(1));
+    assertThat(imageSortNumbers(draft.id())).containsExactly(0);
+    assertThat(imageAnalysisJson(draft.id()).getFirst())
+        .contains("IMG-1")
+        .doesNotContain("IMG-2");
+  }
+
   private void insertMemory(String cityCode, String reason) {
     jdbcTemplate.update(
         """
@@ -72,6 +174,81 @@ class ReportDraftCityMemoryIntegrationTest {
         UUID.randomUUID().toString(),
         cityCode,
         reason);
+  }
+
+  private long insertCorrectionMessage(long draftId, String correction) {
+    String publicId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO report_draft_message
+          (public_id, draft_id, city_code, intent, user_content, assistant_content,
+           changed_draft, image_file_ids_json, final_reason, created_by)
+        VALUES (?, ?, '320100', 'CORRECTION', ?, '已按人工确认原因修改报告',
+                TRUE, '[]', ?, 'city-memory-test')
+        """,
+        publicId,
+        draftId,
+        correction,
+        correction);
+    Long id =
+        jdbcTemplate.queryForObject(
+            "SELECT id FROM report_draft_message WHERE public_id=?", Long.class, publicId);
+    if (id == null) throw new IllegalStateException("Correction message was not inserted");
+    return id;
+  }
+
+  private List<String> seedDraftImages(long draftId) {
+    List<String> publicIds = List.of(UUID.randomUUID().toString(), UUID.randomUUID().toString());
+    for (int index = 0; index < publicIds.size(); index++) {
+      String publicId = publicIds.get(index);
+      jdbcTemplate.update(
+          """
+          INSERT INTO stored_file
+            (public_id, storage_name, original_name, media_type, byte_size, sha256,
+             purpose, created_by)
+          VALUES (?, ?, ?, 'image/png', 1, ?, 'DRAFT_IMAGE', 'city-memory-test')
+          """,
+          publicId,
+          publicId + ".png",
+          "image-" + (index + 1) + ".png",
+          Integer.toString(index).repeat(64));
+      Long fileId =
+          jdbcTemplate.queryForObject(
+              "SELECT id FROM stored_file WHERE public_id=?", Long.class, publicId);
+      jdbcTemplate.update(
+          """
+          INSERT INTO report_draft_image
+            (public_id, draft_id, file_id, sort_no, analysis_json, created_by)
+          VALUES (?, ?, ?, ?, ?, 'city-memory-test')
+          """,
+          UUID.randomUUID().toString(),
+          draftId,
+          fileId,
+          index,
+          "{\"imageId\":\"IMG-"
+              + (index + 1)
+              + "\",\"category\":\"测试图片\",\"observation\":\"观察\","
+              + "\"evidence\":\"证据\",\"limitation\":\"限制\"}");
+    }
+    jdbcTemplate.update(
+        "UPDATE report_draft SET current_image_file_ids_json=? WHERE id=?",
+        "[\"" + String.join("\",\"", publicIds) + "\"]",
+        draftId);
+    return publicIds;
+  }
+
+  private List<Integer> imageSortNumbers(long draftId) {
+    return jdbcTemplate.query(
+        "SELECT sort_no FROM report_draft_image WHERE draft_id=? ORDER BY sort_no, id",
+        (rs, row) -> rs.getInt("sort_no"),
+        draftId);
+  }
+
+  private List<String> imageAnalysisJson(long draftId) {
+    return jdbcTemplate.query(
+        "SELECT analysis_json FROM report_draft_image WHERE draft_id=? ORDER BY sort_no, id",
+        (rs, row) -> rs.getString("analysis_json"),
+        draftId);
   }
 
   private String seedOverLimitSnapshot() {
