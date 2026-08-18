@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Picture, Promotion } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
-import { businessApi, saveBlob } from "@/api/business-api";
+import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
 import PageState from "@/components/PageState.vue";
 import type { DraftBlock, ReportDraft } from "@/types/business";
@@ -457,9 +457,7 @@ function reportEditorRoot(): HTMLElement | null {
 function inlineImageIdsFromDom(): string[] {
   const root = reportEditorRoot();
   if (root === null) return [];
-  return Array.from(
-    root.querySelectorAll<HTMLElement>("figure[data-file-id]"),
-  )
+  return Array.from(root.querySelectorAll<HTMLElement>("figure[data-file-id]"))
     .map((element) => element.dataset.fileId)
     .filter((value): value is string => value !== undefined);
 }
@@ -522,8 +520,10 @@ function selectedInlineImageId(): string | null {
   const selection = window.getSelection();
   if (selection === null || selection.rangeCount === 0) return null;
   const fragment = selection.getRangeAt(0).cloneContents();
-  return fragment.querySelector<HTMLElement>("figure[data-file-id]")?.dataset
-    .fileId ?? null;
+  return (
+    fragment.querySelector<HTMLElement>("figure[data-file-id]")?.dataset
+      .fileId ?? null
+  );
 }
 
 function handleEditorKeydown(event: KeyboardEvent): void {
@@ -541,7 +541,9 @@ async function removeInlineImageFromReport(fileId: string): Promise<boolean> {
     const draftId = draft.value.id;
     const root = reportEditorRoot();
     root
-      ?.querySelectorAll<HTMLElement>(`figure[data-file-id="${CSS.escape(fileId)}"]`)
+      ?.querySelectorAll<HTMLElement>(
+        `figure[data-file-id="${CSS.escape(fileId)}"]`,
+      )
       .forEach((figure) => figure.remove());
     syncReportContentFromDom();
     imageUpdating.value = true;
@@ -566,7 +568,9 @@ async function removeInlineImageFromReport(fileId: string): Promise<boolean> {
       );
       return true;
     } catch (error) {
-      const reloaded = await businessApi.drafts.get(draftId).catch(() => undefined);
+      const reloaded = await businessApi.drafts
+        .get(draftId)
+        .catch(() => undefined);
       if (reloaded !== undefined) draft.value = reloaded;
       await renderMissingInlineImages();
       ElMessage.error(error instanceof Error ? error.message : "图片删除失败");
@@ -613,6 +617,15 @@ async function syncInlineImageOrder(): Promise<void> {
 
 async function generate(): Promise<void> {
   if (draft.value === null) return;
+  if (
+    sending.value ||
+    uploadingImages.value ||
+    imageUpdating.value ||
+    saving.value
+  ) {
+    ElMessage.info("当前报告仍在处理或保存，请完成后再确认生成。");
+    return;
+  }
   syncReportContentFromDom();
   try {
     await standardConfirm(
@@ -630,34 +643,32 @@ async function generate(): Promise<void> {
 
   generating.value = true;
   try {
+    if (
+      sending.value ||
+      uploadingImages.value ||
+      imageUpdating.value ||
+      saving.value
+    ) {
+      ElMessage.info("报告内容发生变化，请完成当前操作后重新确认。");
+      return;
+    }
     syncReportContentFromDom();
     if (!(await saveDraft(false))) return;
-    const report = await businessApi.drafts.generate(draft.value.id);
+    const report = await businessApi.drafts.generate(
+      draft.value.id,
+      draft.value.entityVersion,
+    );
     await router.replace({
       name: "report-detail",
       params: { reportId: report.id },
-      query: { from: "/reports/generate" },
+      query: { from: "/reports/generate", autoDownload: "word" },
     });
-    await saveGeneratedWord(report.id, report.wordFileName);
   } catch (error) {
     ElMessage.error(
       error instanceof Error ? error.message : "正式报告生成失败",
     );
   } finally {
     generating.value = false;
-  }
-}
-
-async function saveGeneratedWord(
-  reportId: string,
-  fileName: string,
-): Promise<void> {
-  try {
-    saveBlob(await businessApi.reports.downloadWord(reportId), fileName);
-  } catch {
-    ElMessage.warning(
-      "正式报告已生成，Word 自动下载失败，可在报告详情页手动下载。",
-    );
   }
 }
 
@@ -856,7 +867,13 @@ onMounted(load);
       <ElButton
         type="primary"
         :loading="generating"
-        :disabled="draft.status !== 'EDITING'"
+        :disabled="
+          draft.status !== 'EDITING' ||
+          sending ||
+          uploadingImages ||
+          imageUpdating ||
+          saving
+        "
         @click="generate"
       >
         确认报告并导出 Word

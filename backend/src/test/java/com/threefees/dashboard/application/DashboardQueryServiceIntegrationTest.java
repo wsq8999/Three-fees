@@ -29,6 +29,9 @@ public class DashboardQueryServiceIntegrationTest {
     jdbcTemplate.execute(
         "CREATE ALIAS IF NOT EXISTS JSON_UNQUOTE FOR "
             + "'com.threefees.dashboard.application.DashboardQueryServiceIntegrationTest.jsonUnquote'");
+    jdbcTemplate.update(
+        "DELETE FROM audit_report WHERE billing_point_snapshot_id IN "
+            + "(SELECT id FROM billing_point_snapshot WHERE billing_point_code LIKE 'BP-%')");
     jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code LIKE 'BP-%'");
     jdbcTemplate.update("DELETE FROM billing_point_snapshot WHERE billing_point_code LIKE 'BP-%'");
     jdbcTemplate.update("DELETE FROM import_job WHERE created_by = 'test'");
@@ -49,6 +52,7 @@ public class DashboardQueryServiceIntegrationTest {
     insertAudit("BP-NORMAL", "320100", "2026-06", "NORMAL", "WAITING");
     insertAudit("BP-OTHER-PERIOD", "320100", "2026-05", "OVER_LIMIT", "WAITING");
     insertAudit("BP-OTHER-CITY", "321200", "2026-06", "OVER_LIMIT", "WAITING");
+    insertReport("BP-GENERATED", "320100", "2026-06", "GENERATED");
 
     DashboardSummary citySummary =
         dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-06");
@@ -65,29 +69,24 @@ public class DashboardQueryServiceIntegrationTest {
   }
 
   @Test
-  void generatedReportStatusImmediatelyReducesPendingReportCount() {
-    insertSnapshot("BP-TO-GENERATE", "320100", "2026-07");
-    insertAudit("BP-TO-GENERATE", "320100", "2026-07", "OVER_LIMIT", "WAITING");
+  void generatedAndImportedReportsImmediatelyLeavePendingTasks() {
+    insertSnapshot("BP-SYSTEM-REPORT", "320100", "2026-07");
+    insertSnapshot("BP-IMPORTED-REPORT", "320100", "2026-07");
+    insertAudit("BP-SYSTEM-REPORT", "320100", "2026-07", "OVER_LIMIT", "WAITING");
+    insertAudit("BP-IMPORTED-REPORT", "320100", "2026-07", "OVER_LIMIT", "WAITING");
 
     DashboardSummary before =
         dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
 
-    jdbcTemplate.update(
-        """
-        UPDATE audit_result
-           SET report_status = 'GENERATED'
-         WHERE billing_point_code = ? AND city_code = ? AND data_period = ?
-        """,
-        "BP-TO-GENERATE",
-        "320100",
-        "2026-07");
+    insertReport("BP-SYSTEM-REPORT", "320100", "2026-07", "GENERATED");
+    insertReport("BP-IMPORTED-REPORT", "320100", "2026-07", "IMPORTED");
     DashboardSummary after =
         dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
 
-    assertThat(before.pendingReportCount()).isEqualTo(1);
+    assertThat(before.pendingReportCount()).isEqualTo(2);
     assertThat(before.finalReportCount()).isZero();
     assertThat(after.pendingReportCount()).isZero();
-    assertThat(after.finalReportCount()).isEqualTo(1);
+    assertThat(after.finalReportCount()).isEqualTo(2);
     assertThat(after.pendingTasks()).isEmpty();
   }
 
@@ -148,6 +147,44 @@ public class DashboardQueryServiceIntegrationTest {
         period + "-28",
         auditStatus,
         reportStatus);
+  }
+
+  private void insertReport(String code, String cityCode, String period, String sourceType) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO stored_file (
+            public_id, storage_name, original_name, storage_path, media_type, file_ext,
+            byte_size, sha256, purpose, created_by
+        ) VALUES (?, ?, 'dashboard-report.docx', 'dashboard-report', 'application/octet-stream',
+                  'docx', 1, ?, 'FORMAL_REPORT_WORD', 'test')
+        """,
+        UUID.randomUUID().toString(),
+        UUID.randomUUID().toString(),
+        UUID.randomUUID().toString().replace("-", ""));
+    Long fileId = jdbcTemplate.queryForObject("SELECT MAX(id) FROM stored_file", Long.class);
+    Long snapshotId =
+        jdbcTemplate.queryForObject(
+            "SELECT id FROM billing_point_snapshot "
+                + "WHERE billing_point_code=? AND city_code=? AND data_period=?",
+            Long.class,
+            code,
+            cityCode,
+            period);
+    jdbcTemplate.update(
+        """
+        INSERT INTO audit_report (
+            public_id, report_number, billing_point_snapshot_id, source_type, status,
+            title, situation, analysis, rectification, word_file_id, pdf_file_id,
+            business_snapshot_json, updated_by
+        ) VALUES (?, ?, ?, ?, 'GENERATED', ?, '', '', '', ?, ?, '{}', 'test')
+        """,
+        UUID.randomUUID().toString(),
+        "BG-" + UUID.randomUUID().toString().substring(0, 12),
+        snapshotId,
+        sourceType,
+        code + "报告",
+        fileId,
+        fileId);
   }
 
   private void insertImportJob(

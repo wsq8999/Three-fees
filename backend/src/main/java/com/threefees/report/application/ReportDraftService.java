@@ -10,6 +10,7 @@ import com.threefees.ai.application.AiServiceClient.Reference;
 import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.ai.application.AiServiceException;
 import com.threefees.ai.application.CityMemoryService;
+import com.threefees.ai.application.CityMemoryService.MemoryQuery;
 import com.threefees.file.application.StoredFileService;
 import com.threefees.identity.application.BusinessRuleException;
 import com.threefees.identity.application.CurrentUser;
@@ -66,7 +67,7 @@ public class ReportDraftService {
       CityMemoryService cityMemoryService,
       StoredFileService storedFileService,
       BusinessTaskRepository taskRepository,
-      @org.springframework.beans.factory.annotation.Value("${app.ai.max-history-cases:30}")
+      @org.springframework.beans.factory.annotation.Value("${app.ai.max-history-cases:8}")
           int maxHistoryCases) {
     this.jdbcTemplate = jdbcTemplate;
     this.objectMapper = objectMapper;
@@ -74,7 +75,7 @@ public class ReportDraftService {
     this.cityMemoryService = cityMemoryService;
     this.storedFileService = storedFileService;
     this.taskRepository = taskRepository;
-    this.maxHistoryCases = Math.max(1, Math.min(maxHistoryCases, 100));
+    this.maxHistoryCases = Math.max(1, Math.min(maxHistoryCases, 20));
   }
 
   @Transactional
@@ -116,45 +117,6 @@ public class ReportDraftService {
       throw new IllegalStateException("Draft key was not generated");
     }
     saveVersion(key.longValue(), 0, "INITIAL", sections, List.of(), actor.username());
-    if (aiServiceClient.isAvailable()) {
-      try {
-        Draft initialDraft = loadDraft(publicId);
-        var generated =
-            aiServiceClient.assist(
-                UUID.randomUUID().toString(),
-                "EDIT",
-                "请严格依据系统事实生成第一版完整电费稽核说明。证据不足时明确列出待核查事项，不能猜测具体原因。",
-                initialDraft.sections(),
-                facts(initialDraft),
-                List.of(),
-                agentContext(initialDraft, "INITIAL"),
-                UUID.randomUUID().toString());
-        if (generated.updatedSections() == null) {
-          throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整初始报告", true);
-        }
-        updateDraft(
-            key.longValue(),
-            generated.updatedSections(),
-            List.of(),
-            1,
-            generated.initialReason(),
-            generated.finalReason(),
-            actor.username(),
-            0);
-        saveVersion(
-            key.longValue(),
-            1,
-            "AI_INITIAL",
-            generated.updatedSections(),
-            List.of(),
-            actor.username());
-      } catch (AiServiceException exception) {
-        LOGGER.warn(
-            "Initial AI draft generation failed; keeping default draft. draftId={}, code={}",
-            publicId,
-            exception.code());
-      }
-    }
     return find(publicId, actor);
   }
 
@@ -285,6 +247,7 @@ public class ReportDraftService {
           new AiImage(file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
     }
     List<Fact> facts = factsForIntent(draft, normalizedIntent);
+    AgentContext context = agentContext(draft, normalizedIntent);
     ReportSections updated;
     String answer;
     var result =
@@ -295,7 +258,7 @@ public class ReportDraftService {
             draft.sections(),
             facts,
             images,
-            agentContext(draft, normalizedIntent),
+            context,
             traceId);
     updated = result.updatedSections();
     answer = result.answer();
@@ -342,6 +305,7 @@ public class ReportDraftService {
             result.initialReason(),
             result.finalReason(),
             images.size(),
+            context,
             actor.username());
     if ("CORRECTION".equals(normalizedIntent)) {
       cityMemoryService.rememberUserCorrection(
@@ -612,10 +576,7 @@ public class ReportDraftService {
   @Transactional
   public BusinessTask submitFormal(String publicId, long expectedVersion, CurrentUser actor) {
     Draft draft = find(publicId, actor);
-    String businessKey =
-        draft.formalReportId() == null
-            ? "FORMAL_REPORT:" + draft.billingPointPeriodId()
-            : "FORMAL_REPORT_CORRECTION:" + draft.formalReportId();
+    String businessKey = formalTaskBusinessKey(draft.publicId(), draft.currentVersion());
     var existing = taskRepository.findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey);
     if (existing.isPresent()) {
       return existing.orElseThrow();
@@ -641,7 +602,10 @@ public class ReportDraftService {
       return taskRepository.create(
           TaskType.FORMAL_REPORT,
           businessKey,
-          writeJson(Map.of("draftId", publicId)),
+          writeJson(
+              Map.of(
+                  "draftId", publicId,
+                  "contentVersion", draft.currentVersion())),
           actor.username(),
           3);
     } catch (DuplicateKeyException exception) {
@@ -649,6 +613,10 @@ public class ReportDraftService {
           .findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey)
           .orElseThrow(() -> exception);
     }
+  }
+
+  static String formalTaskBusinessKey(String draftPublicId, int contentVersion) {
+    return "FORMAL_REPORT:DRAFT:" + draftPublicId + ":CONTENT_VERSION:" + contentVersion;
   }
 
   private List<Fact> facts(Draft draft) {
@@ -731,26 +699,36 @@ public class ReportDraftService {
   private AgentContext agentContext(Draft draft, String intent) {
     boolean needsHistoricalCases = "INITIAL".equals(intent) || "IMAGE_ANALYSIS".equals(intent);
     boolean needsCityMemory = needsHistoricalCases || "CORRECTION".equals(intent);
-    List<Reference> samePoint =
-        needsHistoricalCases
-            ? reportReferences(
-                "s.city_code = ? AND s.billing_point_code = ? AND s.data_period <> ?",
-                maxHistoryCases,
-                draft.cityCode(),
-                draft.billingPointCode(),
-                draft.period())
-            : List.of();
+    var samePoint = new java.util.ArrayList<Reference>();
+    if (needsHistoricalCases) {
+      var profile =
+          cityMemoryService.findPointProfile(draft.cityCode(), draft.billingPointCode());
+      if (profile != null) {
+        samePoint.add(
+            new Reference(
+                "PROFILE-" + profile.publicId(), profile.summary(), profile.cityCode()));
+      }
+      samePoint.addAll(
+          reportReferences(
+              "s.city_code = ? AND s.billing_point_code = ? AND s.data_period <> ?",
+              Math.min(3, maxHistoryCases),
+              draft.cityCode(),
+              draft.billingPointCode(),
+              draft.period()));
+    }
     var cityReferences = new java.util.ArrayList<Reference>();
     if (needsCityMemory) {
-      cityReferences.addAll(cityMemoryReferences(draft.cityCode()));
+      cityReferences.addAll(relevantCityMemoryReferences(draft));
     }
-    if (needsHistoricalCases && cityReferences.size() < maxHistoryCases) {
+    if (needsHistoricalCases) {
       cityReferences.addAll(
           reportReferences(
-              "s.city_code = ? AND s.billing_point_code <> ?",
-              maxHistoryCases - cityReferences.size(),
+              "s.city_code = ? AND s.billing_point_code <> ? AND (a.over_limit_type = ? OR ? IS NULL)",
+              Math.min(3, maxHistoryCases),
               draft.cityCode(),
-              draft.billingPointCode()));
+              draft.billingPointCode(),
+              draft.overLimitType(),
+              draft.overLimitType()));
     }
     List<Reference> imageEvidence = imageEvidenceReferences(draft.id());
     List<ConversationTurn> messages =
@@ -776,7 +754,9 @@ public class ReportDraftService {
             .stream()
             .flatMap(List::stream)
             .toList();
-    return new AgentContext(samePoint, List.copyOf(cityReferences), imageEvidence, messages);
+    validateContextCity(draft.cityCode(), samePoint, cityReferences);
+    return new AgentContext(
+        List.copyOf(samePoint), List.copyOf(cityReferences), imageEvidence, messages);
   }
 
   private List<Reference> imageEvidenceReferences(long draftId) {
@@ -794,30 +774,64 @@ public class ReportDraftService {
   }
 
   List<Reference> cityMemoryReferences(String cityCode) {
-    return jdbcTemplate.query(
-        """
-        SELECT public_id, final_reason, user_correction, evidence_summary, trust_level
-          FROM ai_city_memory
-         WHERE city_code = ? AND active = TRUE
-         ORDER BY CASE trust_level WHEN 'USER_CONFIRMED' THEN 1 WHEN 'CONFIRMED_REPORT' THEN 2 ELSE 3 END,
-                  confirmed_at DESC, id DESC
-         LIMIT ?
-        """,
-        (rs, row) ->
-            new Reference(
-                "MEM-" + rs.getString("public_id"),
-                compact(
-                    "可信度="
-                        + rs.getString("trust_level")
-                        + "；最终原因="
-                        + value(rs.getString("final_reason"))
-                        + "；用户纠正="
-                        + value(rs.getString("user_correction"))
-                        + "；证据="
-                        + value(rs.getString("evidence_summary")),
-                    3000)),
-        cityCode,
-        maxHistoryCases);
+    return cityMemoryService
+        .findRelevantMemories(new MemoryQuery(cityCode, null, null, null, null), maxHistoryCases)
+        .stream()
+        .map(
+            memory ->
+                new Reference(
+                    "MEM-" + memory.publicId(), memory.summary(), memory.cityCode()))
+        .toList();
+  }
+
+  private List<Reference> relevantCityMemoryReferences(Draft draft) {
+    return cityMemoryService
+        .findRelevantMemories(
+            new MemoryQuery(
+                draft.cityCode(),
+                draft.billingPointCode(),
+                draft.overLimitType(),
+                draft.period(),
+                draft.maxExceedRatio(),
+                currentImageEvidenceText(draft.id())),
+            Math.min(5, maxHistoryCases))
+        .stream()
+        .map(
+            memory ->
+                new Reference(
+                    "MEM-" + memory.publicId(),
+                    "相关度=" + memory.score() + "；" + memory.summary(),
+                    memory.cityCode()))
+        .toList();
+  }
+
+  private String currentImageEvidenceText(long draftId) {
+    return jdbcTemplate
+        .queryForList(
+            """
+            SELECT analysis_json FROM report_draft_image
+             WHERE draft_id=? AND analysis_json IS NOT NULL
+             ORDER BY sort_no, id
+            """,
+            String.class,
+            draftId)
+        .stream()
+        .map(value -> compact(value, 1000))
+        .reduce((left, right) -> left + "；" + right)
+        .orElse("");
+  }
+
+  private void validateContextCity(
+      String expectedCityCode, List<Reference> samePoint, List<Reference> cityReferences) {
+    boolean crossCity =
+        Stream.concat(samePoint.stream(), cityReferences.stream())
+            .map(Reference::cityCode)
+            .filter(java.util.Objects::nonNull)
+            .anyMatch(cityCode -> !expectedCityCode.equals(cityCode));
+    if (crossCity) {
+      throw new AiServiceException(
+          "AI_CONTEXT_CITY_SCOPE_VIOLATION", "检测到跨城市记忆，已停止模型调用", false);
+    }
   }
 
   private List<Reference> reportReferences(String predicate, int limit, Object... args) {
@@ -871,7 +885,8 @@ public class ReportDraftService {
                             + value(rs.getString("image_analysis_status"))
                             + "；历史图片证据="
                             + value(rs.getString("image_analysis_text")),
-                        6000)),
+                        6000),
+                rs.getString("city_code")),
         parameters.toArray());
   }
 
@@ -885,6 +900,7 @@ public class ReportDraftService {
       String initialReason,
       String finalReason,
       int modelImageCount,
+      AgentContext context,
       String actor) {
     String messagePublicId = UUID.randomUUID().toString();
     jdbcTemplate.update(
@@ -915,8 +931,10 @@ public class ReportDraftService {
         """
         INSERT INTO ai_analysis_run
           (public_id, draft_id, message_id, city_code, billing_point_code, model_name,
-           prompt_version, image_count, status, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'three-fees-agent-v3', ?, 'SUCCEEDED', CURRENT_TIMESTAMP(3))
+           prompt_version, image_count, retrieved_memory_ids_json, context_summary_json,
+           status, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'three-fees-agent-v4', ?, ?, ?,
+                'SUCCEEDED', CURRENT_TIMESTAMP(3))
         """,
         UUID.randomUUID().toString(),
         draft.id(),
@@ -924,7 +942,15 @@ public class ReportDraftService {
         draft.cityCode(),
         draft.billingPointCode(),
         aiServiceClient.modelName(),
-        modelImageCount);
+        modelImageCount,
+        writeJson(context.cityMemories().stream().map(Reference::id).toList()),
+        writeJson(
+            Map.of(
+                "samePointReferenceCount", context.samePointCases().size(),
+                "cityReferenceCount", context.cityMemories().size(),
+                "imageEvidenceCount", context.imageEvidence().size(),
+                "conversationTurnCount", context.recentMessages().size(),
+                "modelImageCount", modelImageCount)));
     return messageId;
   }
 

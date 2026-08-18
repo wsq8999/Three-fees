@@ -25,8 +25,12 @@ const correctionForm = reactive({
   reason: "",
 });
 
-const isHistorical = computed(() => report.value?.source === "HISTORICAL_IMPORT");
-const sourceLabel = computed(() => (isHistorical.value ? "历史导入" : "系统生成"));
+const isHistorical = computed(
+  () => report.value?.source === "HISTORICAL_IMPORT",
+);
+const sourceLabel = computed(() =>
+  isHistorical.value ? "历史导入" : "系统生成",
+);
 const billingPointLabel = computed(() => {
   if (report.value === null) return "—";
   return `${report.value.billingPointCode} ｜ ${report.value.billingPointName} ｜ ${report.value.city.name}`;
@@ -36,8 +40,12 @@ const overLimitLabel = computed(() => {
   return `${overLimitTypeLabel(report.value.overLimitType)} ｜ ${formatPercent(report.value.maxRatio)}`;
 });
 
-const rawContent = computed(() => report.value?.previewHtml || report.value?.summary || "");
-const normalizedContent = computed(() => normalizePreviewContent(rawContent.value));
+const rawContent = computed(
+  () => report.value?.previewHtml || report.value?.summary || "",
+);
+const normalizedContent = computed(() =>
+  normalizePreviewContent(rawContent.value),
+);
 const contentHtml = computed(() =>
   looksLikeHtml(normalizedContent.value) ? normalizedContent.value : "",
 );
@@ -64,7 +72,10 @@ function normalizePreviewContent(value: string): string {
     .replace(/Historical Word preview/gi, "")
     .replace(/Original Word file is the source of truth\./gi, "")
     .replace(/\bINCLUDEPICTURE\b[\s\S]*?\bMERGEFORMAT(?:INET)?\b/gi, "")
-    .replace(/\b(?:MERGEFORMATINET|MERGEFORMAT|INCLUDEPICTURE|HYPERLINK)\b/gi, "")
+    .replace(
+      /\b(?:MERGEFORMATINET|MERGEFORMAT|INCLUDEPICTURE|HYPERLINK)\b/gi,
+      "",
+    )
     .trim();
 }
 
@@ -72,13 +83,15 @@ function decodeHtmlEntities(value: string): string {
   return value
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
+    .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, "&");
 }
 
 function looksLikeHtml(value: string): boolean {
-  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(value);
+  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(
+    value,
+  );
 }
 
 function overLimitTypeLabel(value: string | null | undefined): string {
@@ -100,9 +113,21 @@ async function load(): Promise<void> {
     const loaded = await businessApi.reports.get(String(route.params.reportId));
     if (loaded === undefined) throw new Error("报告不存在或当前账号无权访问");
     report.value = loaded;
+    loading.value = false;
     if (props.correction) correctionVisible.value = true;
+    if (route.query.autoDownload === "word") {
+      await downloadWord();
+      const query = { ...route.query };
+      delete query.autoDownload;
+      await router.replace({
+        name: route.name ?? "report-detail",
+        params: route.params,
+        query,
+      });
+    }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "报告加载失败";
+    errorMessage.value =
+      error instanceof Error ? error.message : "报告加载失败";
   } finally {
     loading.value = false;
   }
@@ -112,7 +137,10 @@ async function downloadWord(): Promise<void> {
   if (report.value === null) return;
   downloading.value = true;
   try {
-    saveBlob(await businessApi.reports.downloadWord(report.value.id), report.value.wordFileName);
+    saveBlob(
+      await businessApi.reports.downloadWord(report.value.id),
+      report.value.wordFileName,
+    );
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "Word 下载失败");
   } finally {
@@ -166,7 +194,11 @@ function correctionDialogChanged(visible: boolean): void {
 }
 
 async function goBack(): Promise<void> {
-  await router.push(typeof route.query.from === "string" ? route.query.from : "/reports/history");
+  await router.push(
+    typeof route.query.from === "string"
+      ? route.query.from
+      : "/reports/history",
+  );
 }
 
 onMounted(load);
@@ -200,7 +232,11 @@ onMounted(load);
 
     <section class="report-preview business-card" aria-label="报告预览">
       <article class="report-sheet">
-        <article v-if="contentHtml" class="word-preview-content" v-html="contentHtml" />
+        <article
+          v-if="contentHtml"
+          class="word-preview-content"
+          v-html="contentHtml"
+        />
         <template v-else>
           <section v-for="section in reportSections" :key="section.title">
             <h2>{{ section.title }}</h2>
@@ -255,7 +291,12 @@ onMounted(load);
           />
         </ElFormItem>
       </ElForm>
-      <ElAlert v-if="correctionError" :title="correctionError" type="error" show-icon />
+      <ElAlert
+        v-if="correctionError"
+        :title="correctionError"
+        type="error"
+        show-icon
+      />
       <template #footer>
         <ElButton @click="closeCorrection">取消</ElButton>
         <ElButton type="primary" @click="beginCorrection">下一步</ElButton>
@@ -267,7 +308,10 @@ onMounted(load);
 <style scoped>
 .report-metadata {
   display: grid;
-  grid-template-columns: minmax(420px, 1.6fr) minmax(260px, 0.8fr) minmax(180px, 0.5fr);
+  grid-template-columns: minmax(420px, 1.6fr) minmax(260px, 0.8fr) minmax(
+      180px,
+      0.5fr
+    );
   gap: 16px;
   align-items: center;
   padding: 16px 20px;

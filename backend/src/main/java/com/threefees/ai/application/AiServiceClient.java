@@ -293,7 +293,11 @@ public class AiServiceClient {
   public record ReportSections(
       String title, String situation, String analysis, String rectification) {}
 
-  public record Reference(String id, String summary) {}
+  public record Reference(String id, String summary, String cityCode) {
+    public Reference(String id, String summary) {
+      this(id, summary, null);
+    }
+  }
 
   public record ConversationTurn(String role, String content) {}
 

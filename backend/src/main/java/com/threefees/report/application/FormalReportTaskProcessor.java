@@ -1,5 +1,6 @@
 package com.threefees.report.application;
 
+import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.ai.application.CityMemoryService;
 import com.threefees.file.application.StoredFileService;
 import com.threefees.file.domain.StoredFile;
@@ -42,8 +43,14 @@ public class FormalReportTaskProcessor implements TaskProcessor {
 
   @Override
   public String process(BusinessTask task) {
-    String draftId = payload(task).draftId();
+    Payload payload = payload(task);
+    String draftId = payload.draftId();
     AuditReportService.GenerationInput input = reportService.generationInput(draftId);
+    if (input.contentVersion() != payload.contentVersion()) {
+      reportService.resetFailedGeneration(draftId, task.createdBy());
+      throw new TaskExecutionException(
+          "CONFIRMED_REPORT_VERSION_MISMATCH", "确认的报告版本已经变化，请重新确认", false);
+    }
     boolean correction = input.formalReportId() != null && !input.formalReportId().isBlank();
     if (!correction) {
       String existing = reportService.existingReportForSnapshot(input.snapshotId());
@@ -73,7 +80,7 @@ public class FormalReportTaskProcessor implements TaskProcessor {
       }
       var generated = documentGenerator.generate(input.sections(), images);
       byte[] wordBytes =
-          correction && looksLikeHtml(input.sections().situation())
+          correction && isFullDocumentHtml(input.sections())
               ? documentGenerator.generateWordFromHtml(input.sections().situation(), images)
               : generated.word();
       word =
@@ -137,12 +144,22 @@ public class FormalReportTaskProcessor implements TaskProcessor {
     }
   }
 
-  private boolean looksLikeHtml(String value) {
+  private static boolean looksLikeHtml(String value) {
     return value != null
         && java.util.regex.Pattern.compile(
                 "(?is)</?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\\b")
             .matcher(value)
             .find();
+  }
+
+  static boolean isFullDocumentHtml(ReportSections sections) {
+    return looksLikeHtml(sections.situation())
+        && isBlank(sections.analysis())
+        && isBlank(sections.rectification());
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.isBlank();
   }
 
   private void compensate(StoredFile pdf, StoredFile word, boolean finalized) {
@@ -165,7 +182,7 @@ public class FormalReportTaskProcessor implements TaskProcessor {
     }
   }
 
-  private record Payload(String draftId) {}
+  private record Payload(String draftId, int contentVersion) {}
 
   private record Result(String reportId) {}
 }
