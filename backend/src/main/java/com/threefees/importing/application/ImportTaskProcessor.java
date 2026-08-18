@@ -51,26 +51,32 @@ public class ImportTaskProcessor implements TaskProcessor {
   @Override
   public String process(BusinessTask task) {
 
-    String batchPublicId = payloadBatchId(task.payloadJson());
+    ImportTaskPayload payload = readPayload(task.payloadJson());
+
+    String batchPublicId = payload.batchId();
 
     var batch = batchRepository.findByPublicId(batchPublicId).orElseThrow();
 
     batchRepository.markProcessing(batch.id());
 
     /*
-     * 检查数据导入前置依赖。
+     * 最终业务规则：
      *
-     * 例如：
-     * 缴费明细依赖报账点；
-     * 电表读数依赖缴费明细；
-     * 标杆值依赖报账点。
+     * 1. 报账点清单必须先导入；
+     * 2. 缴费明细、电表读数、标杆值三者平级；
+     * 3. 后三类文件彼此之间没有导入顺序要求。
+     *
+     * DatasetType 中后三类的 prerequisites 都只包含 BILLING_POINT。
      */
     if (!batchRepository.prerequisitesActive(batch)) {
 
       List<ImportError> errors =
           List.of(
               new ImportError(
-                  0, "datasetType", "IMPORT_PREREQUISITE_MISSING", "请按报账点清单、缴费明细、电表读数、标杆值的依赖顺序导入"));
+                  0,
+                  "datasetType",
+                  "IMPORT_PREREQUISITE_MISSING",
+                  "请先导入报账点清单；缴费明细、电表读数、标杆值可任意顺序导入"));
 
       batchRepository.markFailed(batch.id(), errors);
 
@@ -81,72 +87,21 @@ public class ImportTaskProcessor implements TaskProcessor {
     try {
 
       /*
-       * 找到该导入批次对应的原始上传文件。
+       * 新任务：
+       *
+       * ImportCommandService 已经在上传阶段解析过一次文件，
+       * 并把当前城市 + 当前账期对应的 rows 保存到了任务 payload。
+       *
+       * 因此直接使用 payload.rows()，
+       * 不再重新读取整个 CSV / Excel。
        */
-      var storedFile = storedFileService.find(batch.sourceFileId());
+      List<ImportRow> rows =
+          payload.rows() == null || payload.rows().isEmpty()
+              ? loadRowsFromSource(batch)
+              : List.copyOf(payload.rows());
 
       /*
-       * 关键修改：
-       *
-       * 以前这里调用的是：
-       *
-       * read(bytes, fileName)
-       *
-       * 现在必须把 batch.datasetType() 一起传进去。
-       *
-       * 这样后台任务重新读取文件时，
-       * TabularFileReader 才知道当前导入的是：
-       *
-       * BILLING_POINT
-       * PAYMENT
-       * METER_READING
-       * BENCHMARK
-       *
-       * 才能够：
-       *
-       * 1. 自动遍历多个 Sheet；
-       * 2. 自动找到真正的数据 Sheet；
-       * 3. 自动找到真正的表头行；
-       * 4. 不再固定读取第一个 Sheet。
-       */
-      TabularData data =
-          tabularFileReader.read(
-              storedFileService.readBytes(storedFile),
-              storedFile.originalName(),
-              batch.datasetType());
-
-      /*
-       * 再按照当前数据类型进行字段映射。
-       *
-       * ImportRowMapper 已经改为：
-       *
-       * 按表头名称映射字段，
-       * 不再按固定列位置映射。
-       */
-      var rows =
-          importRowMapper.mapAuto(batch.datasetType(), null, null, data).stream()
-              .filter(
-                  group ->
-                      group.cityCode().equals(batch.cityCode())
-                          && group.period().equals(batch.period()))
-              .findFirst()
-              .map(ImportRowGroup::rows)
-              .orElseThrow(
-                  () ->
-                      new ImportValidationException(
-                          List.of(
-                              new ImportError(
-                                  0,
-                                  "datasetType",
-                                  "IMPORT_SCOPE_MISMATCH",
-                                  "导入文件中不存在当前批次城市和账期对应的数据"))));
-
-      /*
-       * 校验通过后：
-       *
-       * 替换当前批次数据，
-       * 激活数据，
-       * 并重新计算相关业务结果。
+       * 最终校验 + 正式表替换 + 激活 + 必要时重新稽核。
        */
       importActivationService.replaceActivateAndRecalculate(batch, rows);
 
@@ -154,18 +109,12 @@ public class ImportTaskProcessor implements TaskProcessor {
 
     } catch (ImportValidationException exception) {
 
-      /*
-       * 文件字段、数据内容等校验失败。
-       */
       batchRepository.markFailed(batch.id(), exception.errors());
 
       throw new TaskExecutionException("IMPORT_VALIDATION_FAILED", exception.getMessage(), false);
 
     } catch (BusinessRuleException exception) {
 
-      /*
-       * 文件格式、Sheet识别、业务规则等失败。
-       */
       batchRepository.markFailed(
           batch.id(),
           List.of(new ImportError(0, "file", exception.code(), exception.getMessage())));
@@ -178,12 +127,6 @@ public class ImportTaskProcessor implements TaskProcessor {
 
     } catch (RuntimeException exception) {
 
-      /*
-       * 未预期的系统异常。
-       *
-       * 记录完整日志，
-       * 同时把导入批次标记为失败。
-       */
       LOGGER.error(
           "Import processing failed batchId={} datasetType={} period={} cityCode={}",
           batch.publicId(),
@@ -204,36 +147,87 @@ public class ImportTaskProcessor implements TaskProcessor {
     }
   }
 
-  /** 从任务 payload 中读取导入批次 ID。 */
-  private String payloadBatchId(String json) {
+  /**
+   * 兼容旧任务。
+   *
+   * <p>代码升级前已经存在于数据库中的 IMPORT 任务 payload 只有 batchId， 没有 rows。
+   *
+   * <p>对于这些历史任务继续使用旧逻辑：
+   *
+   * <p>读取原始文件 -> 自动识别 Sheet / 表头 -> 映射 -> 找到当前城市和账期。
+   *
+   * <p>这样升级代码以后不需要删除旧任务。
+   */
+  private List<ImportRow> loadRowsFromSource(com.threefees.importing.domain.ImportBatch batch) {
+
+    var storedFile = storedFileService.find(batch.sourceFileId());
+
+    TabularData data =
+        tabularFileReader.read(
+            storedFileService.readBytes(storedFile),
+            storedFile.originalName(),
+            batch.datasetType());
+
+    return importRowMapper.mapAuto(batch.datasetType(), null, null, data).stream()
+        .filter(
+            group ->
+                group.cityCode().equals(batch.cityCode()) && group.period().equals(batch.period()))
+        .findFirst()
+        .map(ImportRowGroup::rows)
+        .orElseThrow(
+            () ->
+                new ImportValidationException(
+                    List.of(
+                        new ImportError(
+                            0, "datasetType", "IMPORT_SCOPE_MISMATCH", "导入文件中不存在当前批次城市和账期对应的数据"))));
+  }
+
+  /**
+   * 读取任务 payload。
+   *
+   * <p>旧格式：
+   *
+   * <pre>
+   * {"batchId":"..."}
+   * </pre>
+   *
+   * <p>新格式：
+   *
+   * <pre>
+   * {"batchId":"...","rows":[...]}
+   * </pre>
+   */
+  private ImportTaskPayload readPayload(String json) {
 
     try {
+      ImportTaskPayload payload = objectMapper.readValue(json, ImportTaskPayload.class);
 
-      String batchId = objectMapper.readTree(json).path("batchId").asText();
-
-      if (batchId == null || batchId.isBlank()) {
+      if (payload == null || payload.batchId() == null || payload.batchId().isBlank()) {
 
         throw new IllegalStateException("Import task payload does not contain batchId");
       }
 
-      return batchId;
+      return payload;
 
     } catch (JacksonException exception) {
-
       throw new IllegalStateException("Persisted import task payload is invalid", exception);
     }
   }
 
-  /** 将任务执行结果转换成 JSON。 */
   private String writeJson(Object value) {
 
     try {
-
       return objectMapper.writeValueAsString(value);
 
     } catch (JacksonException exception) {
-
       throw new IllegalStateException("Import result could not be serialized", exception);
     }
   }
+
+  /**
+   * rows 允许为 null：
+   *
+   * <p>用于兼容升级前只有 batchId 的旧任务。
+   */
+  private record ImportTaskPayload(String batchId, List<ImportRow> rows) {}
 }

@@ -42,7 +42,11 @@ class ImportCommandServiceIntegrationTest {
             "file",
             "billing.csv",
             "text/csv",
-            "报账点编码\nE2E-BP-0001\n".getBytes(StandardCharsets.UTF_8));
+            """
+              报账点编码,报账点名称,所属地市
+              E2E-BP-0001,端到端测试报账点,南京市
+              """
+                .getBytes(StandardCharsets.UTF_8));
 
     var batches =
         commandService.submit(

@@ -7,6 +7,7 @@ import type {
   BusinessCity,
   CreateImportInput,
   DashboardData,
+  DatasetType,
   DraftBlock,
   ExportJob,
   HistoricalReportBillingPoint,
@@ -270,6 +271,7 @@ function overLimitTypeLabel(value: string | null | undefined): string | null {
   };
   return labels[value] ?? value;
 }
+
 function mapBillingSummary(
   item: BackendBillingPointSummary,
 ): BillingPointDetail["summary"] {
@@ -625,14 +627,17 @@ async function fetchReportById(id: string): Promise<ReportSummary> {
 
 export const businessApi = {
   isMockMode: false,
+
   reset(): void {
     // 真实业务运行不在 API 层注入假数据。
   },
+
   cities: {
     async list(): Promise<BusinessCity[]> {
       return asResult<BusinessCity[]>(await httpClient.get("/api/v1/cities"));
     },
   },
+
   dashboard: {
     async get(cityCode?: string, period?: string): Promise<DashboardData> {
       const query = queryString({
@@ -648,13 +653,111 @@ export const businessApi = {
       );
     },
   },
+
   imports: {
+    /**
+     * 保留原 list()，避免影响项目里已经存在的调用方。
+     * 默认读取第一页，每页100条。
+     */
     async list(): Promise<ImportBatch[]> {
       const response = asResult<PageResult<ImportBatch>>(
         await httpClient.get("/api/v1/import-batches?page=0&size=100"),
       );
       return response.items;
     },
+
+    /**
+     * 分页查询导入批次。
+     * 后端单页最大100条，所以前端也把单页大小限制在100以内。
+     * 注意：这是“每页100条”，不是“总共只能100条”。
+     */
+    async listPage(
+      page = 0,
+      size = 100,
+      datasetType?: DatasetType,
+    ): Promise<PageResult<ImportBatch>> {
+      const safePage = Math.max(0, Math.trunc(page));
+      const safeSize = Math.min(100, Math.max(1, Math.trunc(size)));
+      const query = queryString({
+        datasetType: datasetType ?? "",
+        page: safePage,
+        size: safeSize,
+      });
+
+      return asResult<PageResult<ImportBatch>>(
+        await httpClient.get(`/api/v1/import-batches?${query}`),
+      );
+    },
+
+    /**
+     * 获取“本次导入”对应的全部批次。
+     *
+     * 例如：
+     * - 88个批次：通常1页即可找到；
+     * - 180个批次：自动翻页；
+     * - 350个批次：继续翻页；
+     *
+     * 找齐本次传入的批次ID后立即停止，不会把全部历史批次无上限拉回浏览器。
+     */
+    async listTracked(
+      ids: string[],
+      datasetType?: DatasetType,
+    ): Promise<ImportBatch[]> {
+      const orderedIds = [
+        ...new Set(
+          ids.filter(
+            (id) =>
+              id !== null &&
+              id !== undefined &&
+              id.trim().length > 0,
+          ),
+        ),
+      ];
+
+      if (orderedIds.length === 0) {
+        return [];
+      }
+
+      const targetIds = new Set(orderedIds);
+      const found = new Map<string, ImportBatch>();
+      let page = 0;
+
+      while (true) {
+        const result = await businessApi.imports.listPage(
+          page,
+          100,
+          datasetType,
+        );
+
+        for (const batch of result.items ?? []) {
+          if (!targetIds.has(batch.id)) {
+            continue;
+          }
+          found.set(batch.id, batch);
+        }
+
+        if (found.size === targetIds.size) {
+          break;
+        }
+
+        if (
+          result.totalPages <= 0 ||
+          (result.items ?? []).length === 0 ||
+          page + 1 >= result.totalPages
+        ) {
+          break;
+        }
+
+        page += 1;
+      }
+
+      return orderedIds
+        .map((id) => found.get(id))
+        .filter(
+          (batch): batch is ImportBatch => batch !== undefined,
+        );
+    },
+
     async get(id: string): Promise<ImportBatch | undefined> {
       return asResult<ImportBatch>(
         await httpClient.get(
@@ -662,6 +765,7 @@ export const businessApi = {
         ),
       );
     },
+
     async create(input: CreateImportInput, file: File): Promise<ImportBatch[]> {
       const form = new FormData();
       form.set("datasetType", input.datasetType);
@@ -669,19 +773,26 @@ export const businessApi = {
         form.set("period", input.period);
       }
       form.set("file", file);
+
       const response = await httpClient.postForm(
         "/api/v1/import-batches",
         form,
         LONG_RUNNING_REQUEST,
       );
+
       const result = asResult<
         ImportBatch | { items?: ImportBatch[]; batches?: ImportBatch[] }
       >(response);
-      if ("batches" in result && Array.isArray(result.batches))
+
+      if ("batches" in result && Array.isArray(result.batches)) {
         return result.batches;
-      if ("items" in result && Array.isArray(result.items)) return result.items;
+      }
+      if ("items" in result && Array.isArray(result.items)) {
+        return result.items;
+      }
       return [result as ImportBatch];
     },
+
     async retry(id: string): Promise<ImportBatch> {
       return asResult<ImportBatch>(
         await httpClient.post(
@@ -691,6 +802,7 @@ export const businessApi = {
       );
     },
   },
+
   exportJobs: {
     async create(input: {
       period: string;
@@ -704,11 +816,13 @@ export const businessApi = {
         }),
       );
     },
+
     async get(id: string): Promise<ExportJob> {
       return asResult<ExportJob>(
         await httpClient.get(`/api/v1/export-jobs/${encodeURIComponent(id)}`),
       );
     },
+
     async download(job: ExportJob): Promise<Blob> {
       if (job.downloadUrl === null) {
         throw new Error("导出任务尚未生成下载文件");
@@ -716,6 +830,7 @@ export const businessApi = {
       return httpClient.getBlob(job.downloadUrl, LONG_RUNNING_REQUEST);
     },
   },
+
   billingPoints: {
     async list(
       query: BillingPointQuery,
@@ -739,6 +854,7 @@ export const businessApi = {
         totalPages: result.totalPages,
       };
     },
+
     async get(id: string): Promise<BillingPointDetail | undefined> {
       return mapBillingDetail(
         asResult<BackendBillingPointDetail>(
@@ -749,6 +865,7 @@ export const businessApi = {
       );
     },
   },
+
   drafts: {
     async createOrResume(billingPointPeriodId: string): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
@@ -758,6 +875,7 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async createCorrection(
       reportId: string,
       reason: string,
@@ -770,12 +888,14 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async get(id: string): Promise<ReportDraft | undefined> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.get(`/api/v1/report-drafts/${encodeURIComponent(id)}`),
       );
       return mapDraft(raw);
     },
+
     async save(id: string, draft: ReportDraft): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.patch(
@@ -786,6 +906,7 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async uploadImage(
       id: string,
       file: File,
@@ -800,6 +921,7 @@ export const businessApi = {
       );
       return response;
     },
+
     async sendMessage(
       id: string,
       input: SendDraftMessageInput,
@@ -821,6 +943,7 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async removeImage(
       id: string,
       fileId: string,
@@ -834,6 +957,7 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async reorderImages(
       id: string,
       imageFileIds: string[],
@@ -848,6 +972,7 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
+
     async generate(id: string, version: number): Promise<ReportSummary> {
       const task = asResult<{ taskId: string }>(
         await httpClient.post(
@@ -860,6 +985,7 @@ export const businessApi = {
       return fetchReportById(reportId);
     },
   },
+
   reports: {
     async list(query: ReportQuery): Promise<PageResult<ReportSummary>> {
       const params = queryString({
@@ -882,9 +1008,11 @@ export const businessApi = {
         totalPages: result.totalPages,
       };
     },
+
     async get(id: string): Promise<ReportSummary | undefined> {
       return fetchReportById(id);
     },
+
     async listHistoricalCandidates(query: {
       cityCode: string;
       keyword: string;
@@ -899,6 +1027,7 @@ export const businessApi = {
         ),
       ).map(mapHistoricalCandidate);
     },
+
     async listHistoricalBillingPoints(query: {
       cityCode: string;
       keyword: string;
@@ -913,6 +1042,7 @@ export const businessApi = {
         ),
       );
     },
+
     async listHistoricalPeriods(query: {
       billingPointCode: string;
       cityCode: string;
@@ -928,6 +1058,7 @@ export const businessApi = {
         ),
       );
     },
+
     async importHistorical(input: {
       billingPointPeriodId?: string;
       billingPointCode?: string;
@@ -936,18 +1067,22 @@ export const businessApi = {
       file: File;
     }): Promise<ReportSummary> {
       const form = new FormData();
-      if (input.billingPointPeriodId)
+      if (input.billingPointPeriodId) {
         form.set("billingPointPeriodId", input.billingPointPeriodId);
-      if (input.billingPointCode)
+      }
+      if (input.billingPointCode) {
         form.set("billingPointCode", input.billingPointCode);
+      }
       if (input.cityCode) form.set("cityCode", input.cityCode);
       if (input.period) form.set("period", input.period);
       form.set("file", input.file);
+
       const created = asResult<{
         reportId?: string;
         reportPublicId?: string;
         taskId?: string;
       }>(await httpClient.postForm("/api/v1/historical-report-imports", form));
+
       const reportId = created.reportId ?? created.reportPublicId;
       if (reportId !== undefined) {
         return fetchReportById(reportId);
@@ -957,6 +1092,7 @@ export const businessApi = {
       }
       throw new Error("历史报告导入任务未返回报告编号");
     },
+
     async correct(
       id: string,
       input: { reason: string; correctedSummary?: string; file?: File },
@@ -972,6 +1108,7 @@ export const businessApi = {
           ),
         );
       }
+
       return asResult<ReportSummary>(
         await httpClient.post(
           `/api/v1/audit-reports/${encodeURIComponent(id)}/corrections`,
@@ -984,17 +1121,20 @@ export const businessApi = {
         ),
       );
     },
+
     async downloadWord(id: string): Promise<Blob> {
       return httpClient.getBlob(
         `/api/v1/reports/${encodeURIComponent(id)}/word`,
       );
     },
+
     async wordBlob(id: string): Promise<Blob> {
       return httpClient.getBlob(
         `/api/v1/reports/${encodeURIComponent(id)}/word?inline=true`,
       );
     },
   },
+
   reportGeneration: {
     async candidates(
       cityCode?: string,
@@ -1006,6 +1146,7 @@ export const businessApi = {
         ),
       );
     },
+
     async initialContent(
       billingPointCode: string,
       period: string,
@@ -1017,6 +1158,7 @@ export const businessApi = {
         ),
       );
     },
+
     async correctionInitialContent(
       reportId: string,
     ): Promise<ReportGenerationInitialContent> {
@@ -1026,16 +1168,15 @@ export const businessApi = {
         ),
       );
     },
+
     async analyzeImages(
       input: ReportGenerationImageAnalysisInput,
     ): Promise<ReportGenerationImageAnalysisResult> {
       return asResult<ReportGenerationImageAnalysisResult>(
-        await httpClient.post(
-          "/api/v1/report-generation/image-analysis",
-          input,
-        ),
+        await httpClient.post("/api/v1/report-generation/image-analysis", input),
       );
     },
+
     async generate(input: {
       billingPointCode: string;
       period: string;
@@ -1052,6 +1193,7 @@ export const businessApi = {
       );
       return fetchReportById(created.reportId);
     },
+
     async regenerate(
       reportId: string,
       input: {
@@ -1070,6 +1212,7 @@ export const businessApi = {
       return fetchReportById(updated.reportId);
     },
   },
+
   users: {
     async list(page: number, size: number): Promise<PageResult<ManagedUser>> {
       const result = asResult<PageResult<ManagedUser>>(
@@ -1079,6 +1222,7 @@ export const businessApi = {
       );
       return { ...result, page: result.page + 1 };
     },
+
     async create(input: {
       username: string;
       displayName: string;
@@ -1091,6 +1235,7 @@ export const businessApi = {
         await httpClient.post("/api/v1/users", input),
       );
     },
+
     async update(
       id: string,
       input:
@@ -1107,6 +1252,7 @@ export const businessApi = {
         await httpClient.patch(`/api/v1/users/${encodeURIComponent(id)}`, body),
       );
     },
+
     async resetPassword(
       id: string,
       newPassword?: string,
@@ -1122,6 +1268,7 @@ export const businessApi = {
         ),
       );
     },
+
     async setEnabled(id: string, enabled: boolean): Promise<ManagedUser> {
       return asResult<ManagedUser>(
         await httpClient.patch(`/api/v1/users/${encodeURIComponent(id)}`, {
@@ -1129,6 +1276,7 @@ export const businessApi = {
         }),
       );
     },
+
     async changeOwnPassword(
       _id: string,
       currentPassword: string,
@@ -1142,6 +1290,7 @@ export const businessApi = {
       });
     },
   },
+
   rules: {
     async list(): Promise<BenchmarkRule[]> {
       return asResult<BenchmarkRule[]>(

@@ -63,12 +63,24 @@ class ImportCrossDatasetValidatorIntegrationTest {
   }
 
   @Test
-  void meterImportStillRequiresReferencedPayment() {
-    assertThatThrownBy(
+  void meterImportDoesNotRequireReferencedPaymentWhenBillingPointExists() {
+    insertSnapshot("2027-01", "320100", "BP-001");
+
+    assertThatCode(
             () ->
                 validator.validate(
                     batch(DatasetType.METER_READING, "2027-01", "320100"),
                     List.of(row("BP-001", "PAY-MISSING"))))
+        .doesNotThrowAnyException();
+  }
+
+  @Test
+  void meterImportStillRejectsUnknownBillingPoint() {
+    assertThatThrownBy(
+            () ->
+                validator.validate(
+                    batch(DatasetType.METER_READING, "2027-02", "320100"),
+                    List.of(row("BP-MISSING", "PAY-001"))))
         .isInstanceOf(ImportValidationException.class);
   }
 

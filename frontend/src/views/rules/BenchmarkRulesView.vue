@@ -68,12 +68,16 @@ async function load(): Promise<void> {
 
     if (
       rules.value.some(
-        (item) => item.key === "RATED_BENCHMARK"
+        (item) => item.key === "RATED_BENCHMARK",
       )
     ) {
       selectedKey.value = "RATED_BENCHMARK";
-    } else if (rules.value.length > 0) {
-      selectedKey.value = rules.value[0].key;
+    } else {
+      const firstRule = rules.value[0];
+
+      if (firstRule !== undefined) {
+        selectedKey.value = firstRule.key;
+      }
     }
   } catch (error) {
     errorMessage.value =

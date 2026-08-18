@@ -40,29 +40,18 @@ public class ImportCommandService {
   private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
 
   private static final String LAST_PERIOD_START = "最后报账期始";
-
   private static final String LAST_PERIOD_END = "最后报账期终";
-
   private static final String PAYMENT_PERIOD_START = "缴费期始";
-
   private static final String PAYMENT_PERIOD_END = "缴费期终";
-
   private static final String YEAR = "年份";
-
   private static final String MONTH = "月份";
 
   private final StoredFileService storedFileService;
-
   private final BusinessTaskRepository taskRepository;
-
   private final ImportBatchRepository batchRepository;
-
   private final CityQueryService cityQueryService;
-
   private final TabularFileReader tabularFileReader;
-
   private final ImportRowMapper importRowMapper;
-
   private final ObjectMapper objectMapper;
 
   public ImportCommandService(
@@ -75,17 +64,11 @@ public class ImportCommandService {
       ObjectMapper objectMapper) {
 
     this.storedFileService = storedFileService;
-
     this.taskRepository = taskRepository;
-
     this.batchRepository = batchRepository;
-
     this.cityQueryService = cityQueryService;
-
     this.tabularFileReader = tabularFileReader;
-
     this.importRowMapper = importRowMapper;
-
     this.objectMapper = objectMapper;
   }
 
@@ -108,28 +91,38 @@ public class ImportCommandService {
             : idempotencyKey;
 
     if (normalizedKey.length() < 8 || normalizedKey.length() > 128) {
-
       throw new BusinessRuleException(
           "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key length must be 8 to 128");
     }
 
+    /*
+     * 上传阶段只解析一次原始文件。
+     *
+     * TabularFileReader 负责：
+     * 1. 自动识别 Sheet；
+     * 2. 自动识别真实表头；
+     * 3. 支持 CSV / XLS / XLSX。
+     *
+     * ImportRowMapper 负责：
+     * 1. 按表头名称映射；
+     * 2. 校验核心字段；
+     * 3. 按城市 + 账期分组。
+     */
     byte[] bytes = readUploadBytes(file);
 
-    /*
-     * 这里必须传datasetType。
-     *
-     * 这是本次多Sheet自动识别和自动找表头能够生效的关键。
-     */
     TabularData data = tabularFileReader.read(bytes, file.getOriginalFilename(), datasetType);
 
     List<ImportRowGroup> groups =
         importRowMapper.mapAuto(datasetType, cityConstraint, fallbackPeriod, data);
 
     if (groups.isEmpty()) {
-
       throw new BusinessRuleException("IMPORT_DATA_EMPTY", "No importable rows found");
     }
 
+    /*
+     * 原文件仍然保存下来：
+     * 用于留痕、下载、兼容历史任务以及必要时的故障恢复。
+     */
     var storedFile =
         storedFileService.storeUpload(
             file, Set.of("xlsx", "xls", "csv"), "IMPORT_SOURCE", actor.username());
@@ -153,7 +146,6 @@ public class ImportCommandService {
       var existing = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
 
       if (existing.isPresent()) {
-
         String batchId = readPayloadBatchId(existing.orElseThrow().payloadJson());
 
         created.add(
@@ -166,12 +158,24 @@ public class ImportCommandService {
 
       String batchPublicId = UUID.randomUUID().toString();
 
-      String payload = writeJson(Map.of("batchId", batchPublicId));
+      /*
+       * 关键优化：
+       *
+       * 以前任务 payload 只有 batchId。
+       * Worker 执行每个账期任务时，会重新读取并解析整个原文件。
+       *
+       * 现在把“当前城市 + 当前账期已经解析好的 rows”一起保存到任务 payload。
+       *
+       * 因此：
+       * 一个文件只在 submit() 阶段解析一次；
+       * 后台每个任务直接使用属于自己的 rows；
+       * 不再因为 68 个账期而把同一个 CSV 重复解析 68 次。
+       */
+      String payload = writeJson(new ImportTaskPayload(batchPublicId, List.copyOf(group.rows())));
 
       com.threefees.task.domain.BusinessTask task;
 
       try {
-
         task = taskRepository.create(TaskType.IMPORT, businessKey, payload, actor.username(), 3);
 
       } catch (DuplicateKeyException exception) {
@@ -179,7 +183,6 @@ public class ImportCommandService {
         var concurrent = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
 
         if (concurrent.isPresent()) {
-
           String concurrentBatchId = readPayloadBatchId(concurrent.orElseThrow().payloadJson());
 
           created.add(
@@ -212,7 +215,6 @@ public class ImportCommandService {
   private void registerRollbackCleanup(com.threefees.file.domain.StoredFile storedFile) {
 
     if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-
       return;
     }
 
@@ -223,7 +225,6 @@ public class ImportCommandService {
           public void afterCompletion(int status) {
 
             if (status != TransactionSynchronization.STATUS_COMMITTED) {
-
               storedFileService.deletePhysical(storedFile);
             }
           }
@@ -245,7 +246,6 @@ public class ImportCommandService {
     }
 
     if (requestedCityCode == null || requestedCityCode.isBlank()) {
-
       return null;
     }
 
@@ -253,7 +253,6 @@ public class ImportCommandService {
         cityQueryService.findAll().stream().anyMatch(city -> city.code().equals(requestedCityCode));
 
     if (!known) {
-
       throw new BusinessRuleException("CITY_UNKNOWN", "Unknown city code");
     }
 
@@ -263,16 +262,13 @@ public class ImportCommandService {
   private void validateFallbackPeriod(String period) {
 
     if (period == null || period.isBlank()) {
-
       return;
     }
 
     try {
-
       YearMonth.parse(period);
 
     } catch (DateTimeParseException exception) {
-
       throw new BusinessRuleException("PERIOD_INVALID", "Period must use YYYY-MM");
     }
   }
@@ -306,7 +302,6 @@ public class ImportCommandService {
     }
 
     if (selected != null) {
-
       return selected;
     }
 
@@ -337,7 +332,6 @@ public class ImportCommandService {
   private YearMonth parseBenchmarkMonth(Map<String, String> values, String fallbackPeriod) {
 
     try {
-
       int year = Integer.parseInt(value(values, YEAR));
 
       int month = Integer.parseInt(value(values, MONTH).replaceFirst("^0", ""));
@@ -345,7 +339,6 @@ public class ImportCommandService {
       return YearMonth.of(year, month);
 
     } catch (RuntimeException exception) {
-
       return YearMonth.parse(fallbackPeriod);
     }
   }
@@ -355,7 +348,6 @@ public class ImportCommandService {
     String value = raw == null ? "" : raw.trim();
 
     if (value.isBlank() || "-".equals(value)) {
-
       return null;
     }
 
@@ -366,11 +358,9 @@ public class ImportCommandService {
             DateTimeFormatter.ofPattern("yyyy.M.d"))) {
 
       try {
-
         return LocalDate.parse(value, formatter);
 
       } catch (DateTimeParseException ignored) {
-
         // 继续尝试下一种格式。
       }
     }
@@ -381,11 +371,9 @@ public class ImportCommandService {
   private Map<String, String> readRowValues(String json) {
 
     try {
-
       return objectMapper.readValue(json, STRING_MAP);
 
     } catch (JacksonException exception) {
-
       throw new IllegalStateException("Import row JSON is invalid", exception);
     }
   }
@@ -398,11 +386,9 @@ public class ImportCommandService {
   private byte[] readUploadBytes(MultipartFile file) {
 
     try {
-
       return file.getBytes();
 
     } catch (IOException exception) {
-
       throw new BusinessRuleException("FILE_READ_FAILED", "Unable to read upload file");
     }
   }
@@ -410,14 +396,12 @@ public class ImportCommandService {
   private String digest(String value) {
 
     try {
-
       byte[] hash =
           MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
 
       return HexFormat.of().formatHex(hash).substring(0, 24);
 
     } catch (NoSuchAlgorithmException exception) {
-
       throw new IllegalStateException("SHA-256 is not available", exception);
     }
   }
@@ -425,11 +409,9 @@ public class ImportCommandService {
   private String writeJson(Object value) {
 
     try {
-
       return objectMapper.writeValueAsString(value);
 
     } catch (JacksonException exception) {
-
       throw new IllegalStateException("Import task payload could not be serialized", exception);
     }
   }
@@ -437,12 +419,23 @@ public class ImportCommandService {
   private String readPayloadBatchId(String json) {
 
     try {
+      String batchId = objectMapper.readTree(json).path("batchId").asText();
 
-      return objectMapper.readTree(json).path("batchId").asText();
+      if (batchId == null || batchId.isBlank()) {
+        throw new IllegalStateException("Persisted import task payload does not contain batchId");
+      }
+
+      return batchId;
 
     } catch (JacksonException exception) {
-
       throw new IllegalStateException("Persisted import task payload is invalid", exception);
     }
   }
+
+  /**
+   * 新任务 payload。
+   *
+   * <p>rows 只包含当前城市、当前账期的数据。
+   */
+  private record ImportTaskPayload(String batchId, List<ImportRow> rows) {}
 }

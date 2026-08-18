@@ -6,11 +6,9 @@ import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
 import type { DatasetType, ImportBatch } from "@/types/business";
 
-/**
- * ==============================
+/* =========================================================
  * Props / Emits
- * ==============================
- */
+ * ========================================================= */
 
 const props = defineProps<{
   modelValue: boolean;
@@ -22,32 +20,34 @@ const emit = defineEmits<{
   imported: [batches: ImportBatch[]];
 }>();
 
-/**
- * ==============================
- * 常量
- * ==============================
- */
+/* =========================================================
+ * 配置
+ * ========================================================= */
 
 /**
- * 每隔1秒刷新一次导入进度。
+ * 每1秒刷新一次批次状态。
  */
 const POLL_INTERVAL_MS = 1_000;
 
 /**
  * 最长自动等待10分钟。
  *
- * 超过10分钟以后不判定导入失败，
- * 只停止自动查询，并提示用户后台任务仍可能继续。
+ * 超时只停止前端自动轮询，
+ * 不把后台任务判定为失败。
  */
 const POLL_TIMEOUT_MS = 10 * 60 * 1_000;
 
 /**
- * 当批次没有出现在列表接口中时，
- * 每轮最多补查5个批次。
+ * 如果分页列表中找不到某个本次批次，
+ * 少量使用单批次GET补查。
  *
- * 防止重新出现一次轮询几十个HTTP请求的问题。
+ * 正常情况下不会进入这里。
  */
-const FALLBACK_GET_LIMIT = 5;
+const MISSING_BATCH_CHECK_LIMIT = 3;
+
+/* =========================================================
+ * 导入类型
+ * ========================================================= */
 
 const datasetTypes: DatasetType[] = [
   "BILLING_POINT",
@@ -89,59 +89,40 @@ const datasetMeta: Record<
   },
 };
 
-/**
- * ==============================
+/* =========================================================
  * 页面状态
- * ==============================
- */
+ * ========================================================= */
 
-const selectedType =
-  ref<DatasetType>("BILLING_POINT");
+const selectedType = ref<DatasetType>("BILLING_POINT");
 
-const selectedFile =
-  ref<File | null>(null);
+const selectedFile = ref<File | null>(null);
 
-const runningBatch =
-  ref<ImportBatch | null>(null);
+const runningBatch = ref<ImportBatch | null>(null);
 
-const runningBatches =
-  ref<ImportBatch[]>([]);
+const runningBatches = ref<ImportBatch[]>([]);
 
-const progressVisible =
-  ref(false);
+const progressVisible = ref(false);
 
-const successVisible =
-  ref(false);
+const successVisible = ref(false);
 
-const pendingFocusBatch =
-  ref<ImportBatch | null>(null);
+const pendingImportedBatches = ref<ImportBatch[]>([]);
 
-const pendingImportedBatches =
-  ref<ImportBatch[]>([]);
+const isSubmitting = ref(false);
 
-const isSubmitting =
-  ref(false);
+const errorMessage = ref("");
 
-const errorMessage =
-  ref("");
+const progressIssue = ref<{
+  type: "warning" | "error";
+  message: string;
+} | null>(null);
 
-const progressIssue =
-  ref<{
-    type: "warning" | "error";
-    message: string;
-  } | null>(null);
+const uploadRef = ref<UploadInstance>();
 
-const uploadRef =
-  ref<UploadInstance>();
+const uploadKey = ref(0);
 
-const uploadKey =
-  ref(0);
-
-/**
- * ==============================
+/* =========================================================
  * 计算属性
- * ==============================
- */
+ * ========================================================= */
 
 const canSubmit = computed(
   () =>
@@ -153,7 +134,7 @@ const canSubmit = computed(
 /**
  * 当前正在跟踪的所有批次。
  */
-const trackedBatches = computed(() => {
+const trackedBatches = computed<ImportBatch[]>(() => {
   if (runningBatches.value.length > 0) {
     return runningBatches.value;
   }
@@ -166,26 +147,55 @@ const trackedBatches = computed(() => {
 });
 
 /**
+ * 当前是否还处于文件解析阶段。
+ *
+ * 这个阶段后端还没有返回真正的批次，
+ * 所以不能显示真实百分比。
+ */
+const isParsing = computed(
+  () =>
+    progressVisible.value &&
+    isSubmitting.value &&
+    trackedBatches.value.length === 0,
+);
+
+/**
+ * 判断一个批次是不是已经结束。
+ */
+function isTerminalBatch(batch: ImportBatch): boolean {
+  return (
+    batch.status === "ACTIVE" ||
+    batch.status === "FAILED" ||
+    batch.status === "SUPERSEDED"
+  );
+}
+
+/**
+ * 已完成批次。
+ *
+ * 成功、失败、被新批次替代，
+ * 都属于已经结束处理。
+ */
+const completedBatches = computed(() =>
+  trackedBatches.value.filter(isTerminalBatch),
+);
+
+
+/**
  * 失败批次。
  */
 const failedBatches = computed(() =>
   trackedBatches.value.filter(
-    (batch) =>
-      batch.status === "FAILED",
+    (batch) => batch.status === "FAILED",
   ),
 );
 
 /**
- * 已经完成的批次。
- *
- * ACTIVE = 成功
- * FAILED = 失败
+ * 被后续导入替代的批次。
  */
-const completedBatches = computed(() =>
+const supersededBatches = computed(() =>
   trackedBatches.value.filter(
-    (batch) =>
-      batch.status === "ACTIVE" ||
-      batch.status === "FAILED",
+    (batch) => batch.status === "SUPERSEDED",
   ),
 );
 
@@ -194,39 +204,38 @@ const completedBatches = computed(() =>
  */
 const totalErrors = computed(() =>
   failedBatches.value.reduce(
-    (total, batch) =>
-      total + batch.errors.length,
+    (total, batch) => total + batch.errors.length,
     0,
   ),
 );
 
+/* =========================================================
+ * 真实百分比
+ * ========================================================= */
+
 /**
- * 导入百分比。
+ * 不再使用固定20%。
+ *
+ * 只有真正拿到批次以后，
+ * 才计算真实处理进度。
  */
 const progressPercentage = computed(() => {
-  const total =
-    trackedBatches.value.length;
+  const total = trackedBatches.value.length;
 
   if (total === 0) {
-    return isSubmitting.value
-      ? 20
-      : 0;
+    return 0;
   }
 
   return Math.round(
-    (completedBatches.value.length /
-      total) *
-    100,
+    (completedBatches.value.length / total) * 100,
   );
 });
 
 /**
- * Element Plus 进度条状态。
+ * Element Plus进度条状态。
  */
 const progressStatus = computed(() => {
-  if (
-    failedBatches.value.length > 0
-  ) {
+  if (failedBatches.value.length > 0) {
     return "exception";
   }
 
@@ -245,34 +254,36 @@ const progressStatus = computed(() => {
  * 进度标题。
  */
 const progressSummary = computed(() => {
-  const total =
-    trackedBatches.value.length;
+  const total = trackedBatches.value.length;
 
   if (progressIssue.value !== null) {
-    return progressIssue.value.type ===
-    "error"
+    return progressIssue.value.type === "error"
       ? "进度查询异常"
       : "后台仍在处理中";
   }
 
   if (total === 0) {
-    return "正在提交导入任务";
+    return "正在解析文件";
   }
 
   if (
-    failedBatches.value.length > 0 &&
-    completedBatches.value.length ===
-    total
+    completedBatches.value.length === total &&
+    failedBatches.value.length > 0
   ) {
-    return failedBatches.value.length ===
-    total
+    return failedBatches.value.length === total
       ? "导入失败"
       : "部分账期导入失败";
   }
 
   if (
-    completedBatches.value.length ===
-    total
+    completedBatches.value.length === total &&
+    supersededBatches.value.length > 0
+  ) {
+    return "部分批次已被新的导入替代";
+  }
+
+  if (
+    completedBatches.value.length === total
   ) {
     return "导入成功";
   }
@@ -283,70 +294,60 @@ const progressSummary = computed(() => {
 });
 
 /**
- * 用户要求这里只保留：
+ * 用户要求：
+ *
+ * 下方只显示：
  *
  * 总批次 xx 个，已完成 xx 个
  */
 const progressDetail = computed(() => {
-  const total =
-    trackedBatches.value.length;
+  const total = trackedBatches.value.length;
 
   if (total === 0) {
-    return "正在上传并解析文件";
+    return "";
   }
 
   return `总批次 ${total} 个，已完成 ${completedBatches.value.length} 个`;
 });
 
-/**
- * 只有系统处理异常失败，
- * 才允许直接重新提交任务。
- *
- * 文件本身校验错误需要重新选择文件。
- */
-const retryableFailedBatches = computed(
-  () =>
-    failedBatches.value.filter(
-      (batch) =>
-        batch.errors.length > 0 &&
-        batch.errors.every(
-          (error) =>
-            error.code ===
-            "IMPORT_PROCESSING_FAILED",
-        ),
-    ),
+/* =========================================================
+ * 失败任务
+ * ========================================================= */
+
+const retryableFailedBatches = computed(() =>
+  failedBatches.value.filter(
+    (batch) =>
+      batch.errors.length > 0 &&
+      batch.errors.every(
+        (error) =>
+          error.code === "IMPORT_PROCESSING_FAILED",
+      ),
+  ),
 );
 
 const canRetryFailedBatches = computed(
   () =>
     failedBatches.value.length > 0 &&
-    retryableFailedBatches.value
-      .length ===
+    retryableFailedBatches.value.length ===
     failedBatches.value.length,
 );
 
-/**
- * 最多展示8条错误。
- */
 const sampledErrors = computed(() =>
   failedBatches.value
     .flatMap((batch) =>
       batch.errors.map((error) => ({
         ...error,
-        batchLabel:
-          importBatchLabel(batch),
+        batchLabel: importBatchLabel(batch),
       })),
     )
     .slice(0, 8),
 );
 
-const remainingErrorCount = computed(
-  () =>
-    Math.max(
-      0,
-      totalErrors.value -
-      sampledErrors.value.length,
-    ),
+const remainingErrorCount = computed(() =>
+  Math.max(
+    0,
+    totalErrors.value - sampledErrors.value.length,
+  ),
 );
 
 const requiresNewFile = computed(
@@ -355,84 +356,71 @@ const requiresNewFile = computed(
     !canRetryFailedBatches.value,
 );
 
-/**
- * ==============================
- * 基础工具方法
- * ==============================
- */
+/* =========================================================
+ * 工具方法
+ * ========================================================= */
 
-function sleep(
-  milliseconds: number,
-): Promise<void> {
+function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
-    globalThis.setTimeout(
-      resolve,
-      milliseconds,
-    );
+    globalThis.setTimeout(resolve, milliseconds);
   });
 }
 
-function isTerminalBatch(
-  batch: ImportBatch,
-): boolean {
-  return (
-    batch.status === "ACTIVE" ||
-    batch.status === "FAILED"
-  );
-}
-
-function importBatchLabel(
-  batch: ImportBatch,
-): string {
-  return `${batch.period} / ${
-    batch.cityCode ?? "-"
-  }`;
+function importBatchLabel(batch: ImportBatch): string {
+  return `${batch.period} / ${batch.cityCode ?? "-"}`;
 }
 
 /**
- * 保持最初创建时的批次顺序。
+ * 按创建时原来的顺序返回批次。
  */
 function orderedBatches(
   ids: string[],
-  batchMap: Map<
-    string,
-    ImportBatch
-  >,
+  batchMap: Map<string, ImportBatch>,
 ): ImportBatch[] {
   return ids
     .map((id) => batchMap.get(id))
     .filter(
-      (
-        batch,
-      ): batch is ImportBatch =>
+      (batch): batch is ImportBatch =>
         batch !== undefined,
     );
 }
 
 /**
- * 同步运行中的批次到页面。
+ * 同步批次状态到页面。
  */
 function updateRunningBatches(
   ids: string[],
-  batchMap: Map<
-    string,
-    ImportBatch
-  >,
+  batchMap: Map<string, ImportBatch>,
 ): void {
-  const latest =
-    orderedBatches(
-      ids,
-      batchMap,
-    );
+  const latest = orderedBatches(ids, batchMap);
 
   runningBatches.value = latest;
-
-  runningBatch.value =
-    latest[0] ?? null;
+  runningBatch.value = latest[0] ?? null;
 }
 
 /**
- * 将API错误转换成用户能够理解的信息。
+ * 判断所有批次是否已经结束。
+ */
+function allBatchesFinished(
+  ids: string[],
+  batchMap: Map<string, ImportBatch>,
+): boolean {
+  if (batchMap.size < ids.length) {
+    return false;
+  }
+
+  return ids.every((id) => {
+    const batch = batchMap.get(id);
+
+    return (
+      batch !== undefined &&
+      isTerminalBatch(batch)
+    );
+  });
+}
+
+/**
+ * 把API错误转换成用户看得懂的提示。
  */
 function pollingErrorMessage(
   batchId: string | null,
@@ -451,7 +439,7 @@ function pollingErrorMessage(
       return `${prefix}无权访问（403）。请检查当前登录账号权限以及该批次所属城市。`;
     }
 
-    return `${prefix}查询失败：${error.message}`;
+    return `${prefix}查询失败：${error.detail || error.message}`;
   }
 
   if (error instanceof Error) {
@@ -461,41 +449,32 @@ function pollingErrorMessage(
   return `${prefix}查询失败，请稍后重试。`;
 }
 
-/**
- * ==============================
+/* =========================================================
  * 表单
- * ==============================
- */
+ * ========================================================= */
 
-function selectDataset(
-  datasetType: DatasetType,
-): void {
+function selectDataset(datasetType: DatasetType): void {
   if (progressVisible.value) {
     return;
   }
 
-  selectedType.value =
-    datasetType;
+  selectedType.value = datasetType;
 }
 
 function resetForm(): void {
-  selectedType.value =
-    "BILLING_POINT";
+  selectedType.value = "BILLING_POINT";
 
   selectedFile.value = null;
 
   runningBatch.value = null;
-
   runningBatches.value = [];
-
-  pendingFocusBatch.value = null;
 
   pendingImportedBatches.value = [];
 
   errorMessage.value = "";
-
   progressIssue.value = null;
 
+  progressVisible.value = false;
   successVisible.value = false;
 
   uploadRef.value?.clearFiles();
@@ -503,9 +482,7 @@ function resetForm(): void {
   uploadKey.value += 1;
 }
 
-function handleFileChange(
-  file: UploadFile,
-): void {
+function handleFileChange(file: UploadFile): void {
   errorMessage.value = "";
 
   const raw = file.raw;
@@ -515,9 +492,7 @@ function handleFileChange(
   }
 
   if (
-    !/\.(?:xlsx|xls|csv)$/i.test(
-      raw.name,
-    )
+    !/\.(?:xlsx|xls|csv)$/i.test(raw.name)
   ) {
     errorMessage.value =
       "只支持 .xlsx、.xls 或 .csv 文件。";
@@ -543,106 +518,76 @@ function handleFileChange(
   selectedFile.value = raw;
 }
 
-/**
- * ==============================
- * 导入轮询
- * ==============================
- */
+/* =========================================================
+ * 批次完成
+ * ========================================================= */
 
-/**
- * 判断所有批次是否已经结束。
- */
-function allBatchesFinished(
-  ids: string[],
-  batchMap: Map<
-    string,
-    ImportBatch
-  >,
-): boolean {
-  if (
-    batchMap.size < ids.length
-  ) {
-    return false;
-  }
-
-  return ids.every((id) => {
-    const batch =
-      batchMap.get(id);
-
-    return (
-      batch !== undefined &&
-      isTerminalBatch(batch)
-    );
-  });
-}
-
-/**
- * 全部批次处理结束后的统一逻辑。
- */
 function finishPolling(
   ids: string[],
-  batchMap: Map<
-    string,
-    ImportBatch
-  >,
+  batchMap: Map<string, ImportBatch>,
 ): void {
-  updateRunningBatches(
-    ids,
-    batchMap,
+  updateRunningBatches(ids, batchMap);
+
+  const latest = orderedBatches(ids, batchMap);
+
+  const succeeded = latest.filter(
+    (batch) => batch.status === "ACTIVE",
   );
 
-  const latest =
-    orderedBatches(
-      ids,
-      batchMap,
-    );
-
-  const succeeded =
-    latest.filter(
-      (batch) =>
-        batch.status === "ACTIVE",
-    );
+  const superseded = latest.filter(
+    (batch) => batch.status === "SUPERSEDED",
+  );
 
   /**
-   * 全部成功才展示成功弹窗。
-   *
-   * 有任何FAILED时继续留在进度弹窗，
-   * 显示失败原因。
+   * 全部ACTIVE才算本次导入完整成功。
    */
-  if (
-    succeeded.length ===
-    latest.length
-  ) {
-    pendingFocusBatch.value =
-      succeeded.find(
-        (batch) =>
-          batch.datasetType ===
-          "BILLING_POINT",
-      ) ??
-      succeeded[0] ??
-      null;
-
-    pendingImportedBatches.value =
-      succeeded;
+  if (succeeded.length === latest.length) {
+    pendingImportedBatches.value = succeeded;
 
     successVisible.value = true;
+
+    return;
+  }
+
+  /**
+   * 如果某些任务被另外一轮导入覆盖，
+   * 不再一直卡着。
+   */
+  if (
+    superseded.length > 0 &&
+    failedBatches.value.length === 0
+  ) {
+    progressIssue.value = {
+      type: "warning",
+      message: `${superseded.length} 个批次已被后续导入替代，请刷新页面查看当前最新数据。`,
+    };
   }
 }
 
+/* =========================================================
+ * 导入进度轮询
+ * ========================================================= */
+
 /**
- * 进度轮询。
+ * 核心逻辑：
  *
- * 新逻辑：
+ * 本次导入88个：
+ * → 通常1页即可
  *
- * 1. 每1秒只调用一次批次列表接口；
- * 2. 列表里已经返回的批次直接更新；
- * 3. 不再每秒对88个批次分别GET；
- * 4. 列表中确实找不到的批次才少量补查；
- * 5. 单批次补查每轮最多5个；
- * 6. 最长自动等待10分钟。
+ * 本次导入180个：
+ * → 自动读取第0页、第1页
+ *
+ * 本次导入350个：
+ * → 自动读取4页
+ *
+ * 只要本次ID已经找齐：
+ * → 立刻停止继续翻历史页面
+ *
+ * 不会因为后端每页最大100而丢失第101个以后的任务。
  */
 async function pollBatches(
   ids: string[],
+  datasetType: DatasetType,
 ): Promise<void> {
   const validIds = [
     ...new Set(
@@ -650,7 +595,7 @@ async function pollBatches(
         (id) =>
           id !== null &&
           id !== undefined &&
-          id.length > 0,
+          id.trim().length > 0,
       ),
     ),
   ];
@@ -664,31 +609,21 @@ async function pollBatches(
   progressIssue.value = null;
 
   /**
-   * 先用创建接口返回的数据初始化Map。
+   * 创建接口返回的数据先放进去，
+   * 页面立即能知道总批次数。
    */
   const batchMap =
-    new Map<
-      string,
-      ImportBatch
-    >();
+    new Map<string, ImportBatch>();
 
-  for (const batch of
-    runningBatches.value) {
-    if (
-      validIds.includes(batch.id)
-    ) {
-      batchMap.set(
-        batch.id,
-        batch,
-      );
+  for (const batch of runningBatches.value) {
+    if (validIds.includes(batch.id)) {
+      batchMap.set(batch.id, batch);
     }
   }
 
   if (
     runningBatch.value !== null &&
-    validIds.includes(
-      runningBatch.value.id,
-    )
+    validIds.includes(runningBatch.value.id)
   ) {
     batchMap.set(
       runningBatch.value.id,
@@ -702,21 +637,12 @@ async function pollBatches(
   );
 
   const deadline =
-    Date.now() +
-    POLL_TIMEOUT_MS;
+    Date.now() + POLL_TIMEOUT_MS;
 
-  /**
-   * 用于超过100条批次时，
-   * 对列表接口没有覆盖到的批次做轮转补查。
-   */
-  let fallbackCursor = 0;
-
-  while (
-    Date.now() < deadline
-    ) {
+  while (Date.now() < deadline) {
     /**
-     * 如果当前已知状态已经全部结束，
-     * 不再发任何网络请求。
+     * 已经全部结束，
+     * 不再发任何请求。
      */
     if (
       allBatchesFinished(
@@ -732,50 +658,36 @@ async function pollBatches(
       return;
     }
 
-    let listResult:
-      | ImportBatch[]
-      | null = null;
+    let latest: ImportBatch[];
 
-    /**
-     * 正常情况下每轮只有这一条请求。
-     */
     try {
-      listResult =
-        await businessApi.imports.list();
+      /**
+       * 自动分页。
+       *
+       * 这里只获取本次导入对应的ID。
+       */
+      latest =
+        await businessApi.imports.listTracked(
+          validIds,
+          datasetType,
+        );
     } catch (error) {
       progressIssue.value = {
         type: "error",
-        message:
-          pollingErrorMessage(
-            null,
-            error,
-          ),
+        message: pollingErrorMessage(
+          null,
+          error,
+        ),
       };
 
       return;
     }
 
-    const trackedIdSet =
-      new Set(validIds);
-
-    const idsSeenInList =
+    const foundIds =
       new Set<string>();
 
-    /**
-     * 只取本次导入创建的批次。
-     */
-    for (const batch of listResult) {
-      if (
-        !trackedIdSet.has(
-          batch.id,
-        )
-      ) {
-        continue;
-      }
-
-      idsSeenInList.add(
-        batch.id,
-      );
+    for (const batch of latest) {
+      foundIds.add(batch.id);
 
       batchMap.set(
         batch.id,
@@ -789,7 +701,8 @@ async function pollBatches(
     );
 
     /**
-     * 列表更新以后可能已经全部结束。
+     * 自动分页回来以后，
+     * 再检查一次。
      */
     if (
       allBatchesFinished(
@@ -806,111 +719,58 @@ async function pollBatches(
     }
 
     /**
-     * 找出：
+     * 理论上本次批次都应该能在分页列表里找到。
      *
-     * 1. 尚未结束；
-     * 2. 当前列表接口又没有返回；
+     * 如果发现有批次完全没有出现，
+     * 少量调用单批次GET进行诊断。
      *
-     * 的批次。
-     *
-     * 这种情况通常只会在批次数超过列表100条时出现。
+     * 这样如果真的有403，
+     * 用户能够知道具体是哪一个批次。
      */
-    const missingPendingIds =
-      validIds.filter((id) => {
-        const batch =
-          batchMap.get(id);
+    const missingIds = validIds.filter(
+      (id) =>
+        !foundIds.has(id) &&
+        !(
+          batchMap.get(id) !== undefined &&
+          isTerminalBatch(
+            batchMap.get(id) as ImportBatch,
+          )
+        ),
+    );
 
-        if (
-          batch !== undefined &&
-          isTerminalBatch(batch)
-        ) {
-          return false;
-        }
-
-        return !idsSeenInList.has(
-          id,
-        );
-      });
-
-    /**
-     * 对列表没覆盖到的批次进行少量补查。
-     *
-     * 每轮最多5个，
-     * 不允许重新出现一次请求几十个批次的情况。
-     */
-    if (
-      missingPendingIds.length >
-      0
-    ) {
-      const fallbackIds:
-        string[] = [];
-
-      const fallbackCount =
-        Math.min(
-          FALLBACK_GET_LIMIT,
-          missingPendingIds.length,
-        );
-
-      for (
-        let offset = 0;
-        offset < fallbackCount;
-        offset += 1
-      ) {
-        const index =
-          (fallbackCursor +
-            offset) %
-          missingPendingIds.length;
-
-        fallbackIds.push(
-          missingPendingIds[index],
-        );
-      }
-
-      fallbackCursor =
-        (fallbackCursor +
-          fallbackCount) %
-        missingPendingIds.length;
+    if (missingIds.length > 0) {
+      const checkIds = missingIds.slice(
+        0,
+        MISSING_BATCH_CHECK_LIMIT,
+      );
 
       const results =
         await Promise.allSettled(
-          fallbackIds.map(
-            async (id) => {
-              const batch =
-                await businessApi.imports.get(
-                  id,
-                );
+          checkIds.map(async (id) => {
+            const batch =
+              await businessApi.imports.get(id);
 
-              if (
-                batch === undefined
-              ) {
-                throw new Error(
-                  "接口未返回批次数据",
-                );
-              }
+            if (batch === undefined) {
+              throw new Error(
+                "接口未返回批次数据",
+              );
+            }
 
-              return {
-                id,
-                batch,
-              };
-            },
-          ),
+            return {
+              id,
+              batch,
+            };
+          }),
         );
 
-      for (
-        let index = 0;
-        index < results.length;
-        index += 1
-      ) {
-        const result =
-          results[index];
+      for (const [index, result] of results.entries()) {
+        const id = checkIds[index];
 
-        const id =
-          fallbackIds[index];
+        if (id === undefined) {
+          continue;
+        }
 
-        if (
-          result.status ===
-          "fulfilled"
-        ) {
+        if (result.status === "fulfilled") {
           batchMap.set(
             result.value.id,
             result.value.batch,
@@ -919,17 +779,12 @@ async function pollBatches(
           continue;
         }
 
-        /**
-         * 如果真的发生403，
-         * 这里会明确告诉用户是哪一个批次。
-         */
         progressIssue.value = {
           type: "error",
-          message:
-            pollingErrorMessage(
-              id,
-              result.reason,
-            ),
+          message: pollingErrorMessage(
+            id,
+            result.reason,
+          ),
         };
 
         updateRunningBatches(
@@ -960,51 +815,52 @@ async function pollBatches(
       }
     }
 
-    await sleep(
-      POLL_INTERVAL_MS,
-    );
+    await sleep(POLL_INTERVAL_MS);
   }
 
   /**
-   * 10分钟后只停止自动查询。
+   * 10分钟只是停止前端自动等待。
    *
-   * 不把后台任务标记为失败。
+   * 后端任务仍然可能继续执行，
+   * 所以不能提示“导入失败”。
    */
   progressIssue.value = {
     type: "warning",
     message:
-      "自动等待已超过10分钟，后台任务可能仍在继续处理。请稍后重新打开页面查看最新结果，不要重复上传同一个文件。",
+      "自动等待已超过10分钟，后台任务可能仍在继续处理。请稍后刷新页面查看最新结果，不要重复上传同一个文件。",
   };
 }
 
-/**
- * ==============================
+/* =========================================================
  * 提交导入
- * ==============================
- */
+ * ========================================================= */
 
 async function submit(): Promise<void> {
-  if (
-    selectedFile.value === null
-  ) {
+  if (selectedFile.value === null) {
     return;
   }
 
   errorMessage.value = "";
-
   progressIssue.value = null;
 
+  /**
+   * 先打开弹窗。
+   *
+   * 这时候还没有批次，
+   * 所以页面只显示“正在解析文件”。
+   */
   progressVisible.value = true;
 
   isSubmitting.value = true;
 
   try {
+    const datasetType =
+      selectedType.value;
+
     const created =
       await businessApi.imports.create(
         {
-          datasetType:
-          selectedType.value,
-
+          datasetType,
           fileName:
           selectedFile.value.name,
         },
@@ -1017,8 +873,12 @@ async function submit(): Promise<void> {
       );
     }
 
-    runningBatches.value =
-      created;
+    /**
+     * 到这里以后才知道真实批次数。
+     *
+     * 从这里开始显示真实百分比。
+     */
+    runningBatches.value = created;
 
     runningBatch.value =
       created[0] ?? null;
@@ -1027,12 +887,9 @@ async function submit(): Promise<void> {
       created.map(
         (batch) => batch.id,
       ),
+      datasetType,
     );
   } catch (error) {
-    /**
-     * 创建导入任务阶段失败，
-     * 才关闭进度弹窗并回到主弹窗显示错误。
-     */
     progressVisible.value = false;
 
     errorMessage.value =
@@ -1045,24 +902,22 @@ async function submit(): Promise<void> {
               `${item.field} ${item.code} ${item.message}`,
           )
           .join("; ")}`
-        : error instanceof Error
-          ? error.message
-          : "导入任务提交失败";
+        : error instanceof ApiProblem
+          ? error.detail || error.message
+          : error instanceof Error
+            ? error.message
+            : "导入任务提交失败";
   } finally {
     isSubmitting.value = false;
   }
 }
 
-/**
- * ==============================
- * 失败任务重试
- * ==============================
- */
+/* =========================================================
+ * 重试
+ * ========================================================= */
 
 async function retry(): Promise<void> {
-  if (
-    !canRetryFailedBatches.value
-  ) {
+  if (!canRetryFailedBatches.value) {
     errorMessage.value =
       "请修正文件后重新导入。";
 
@@ -1086,8 +941,7 @@ async function retry(): Promise<void> {
         ),
       );
 
-    runningBatches.value =
-      retried;
+    runningBatches.value = retried;
 
     runningBatch.value =
       retried[0] ?? null;
@@ -1096,17 +950,15 @@ async function retry(): Promise<void> {
       retried.map(
         (batch) => batch.id,
       ),
+      selectedType.value,
     );
   } catch (error) {
     progressIssue.value = {
       type: "error",
+
       message:
-        error instanceof ApiProblem &&
-        (error.code ===
-          "IMPORT_REQUIRES_NEW_FILE" ||
-          error.code ===
-          "IMPORT_BATCH_NOT_RETRYABLE")
-          ? error.detail
+        error instanceof ApiProblem
+          ? error.detail || error.message
           : error instanceof Error
             ? error.message
             : "重试失败",
@@ -1116,13 +968,11 @@ async function retry(): Promise<void> {
   }
 }
 
-/**
- * ==============================
+/* =========================================================
  * 成功 / 关闭
- * ==============================
- */
+ * ========================================================= */
 
-async function confirmSuccess(): Promise<void> {
+function confirmSuccess(): void {
   const imported =
     pendingImportedBatches.value;
 
@@ -1158,11 +1008,9 @@ function closeMainDialog(): void {
   resetForm();
 }
 
-/**
- * ==============================
+/* =========================================================
  * 弹窗打开
- * ==============================
- */
+ * ========================================================= */
 
 watch(
   () => props.modelValue,
@@ -1177,9 +1025,9 @@ watch(
 </script>
 
 <template>
-  <!-- =========================
-       导入主弹窗
-       ========================= -->
+  <!-- =====================================================
+       导入数据
+       ===================================================== -->
   <ElDialog
     :model-value="modelValue"
     title="导入数据"
@@ -1194,7 +1042,7 @@ watch(
   >
     <div class="import-form">
       <!-- 导入类型 -->
-      <div class="form-row type-row">
+      <div class="form-row">
         <strong>
           <span>*</span>
           导入类型
@@ -1211,23 +1059,16 @@ watch(
             class="dataset-card"
             :class="{
               selected:
-                selectedType ===
-                datasetType,
+                selectedType === datasetType,
             }"
-            :disabled="
-              progressVisible
-            "
+            :disabled="progressVisible"
             @click="
-              selectDataset(
-                datasetType
-              )
+              selectDataset(datasetType)
             "
           >
             <b>
               {{
-                String(
-                  index + 1
-                ).padStart(
+                String(index + 1).padStart(
                   2,
                   "0"
                 )
@@ -1258,20 +1099,12 @@ watch(
                 列
               </small>
             </span>
-
-            <i
-              v-if="
-                selectedType ===
-                datasetType
-              "
-              aria-hidden="true"
-            />
           </button>
         </div>
       </div>
 
       <!-- 上传文件 -->
-      <div class="form-row upload-row">
+      <div class="form-row">
         <strong>
           <span>*</span>
           上传文件
@@ -1285,16 +1118,12 @@ watch(
           :auto-upload="false"
           :limit="1"
           accept=".xlsx,.xls,.csv"
-          :disabled="
-            progressVisible
-          "
-          :on-change="
-            handleFileChange
-          "
+          :disabled="progressVisible"
+          :on-change="handleFileChange"
           :on-remove="
-            () =>
-              (selectedFile =
-                null)
+            () => {
+              selectedFile = null;
+            }
           "
         >
           <div
@@ -1312,9 +1141,7 @@ watch(
 
             <span>
               <strong>
-                {{
-                  selectedFile.name
-                }}
+                {{ selectedFile.name }}
               </strong>
 
               <small>
@@ -1342,7 +1169,6 @@ watch(
         </ElUpload>
       </div>
 
-      <!-- 主弹窗错误 -->
       <ElAlert
         v-if="errorMessage"
         :title="errorMessage"
@@ -1370,9 +1196,9 @@ watch(
     </template>
   </ElDialog>
 
-  <!-- =========================
-       导入进度弹窗
-       ========================= -->
+  <!-- =====================================================
+       导入进度
+       ===================================================== -->
   <ElDialog
     v-model="progressVisible"
     title="导入进度"
@@ -1384,160 +1210,159 @@ watch(
     :show-close="false"
   >
     <div class="progress-list">
+      <!-- ================================================
+           阶段1：文件解析
+           不显示假百分比
+           ================================================ -->
       <section
-        class="batch-result batch-summary"
+        v-if="isParsing"
+        class="parsing-state"
       >
-        <div>
-          <strong>
-            {{ progressSummary }}
-          </strong>
-
-          <!-- 百分比只在这里显示一次 -->
-          <span>
-            {{ progressPercentage }}%
-          </span>
-        </div>
-
-        <!--
-          show-text=false：
-          进度条右边不再重复显示第二个百分比
-        -->
-        <ElProgress
-          :percentage="
-            progressPercentage
-          "
-          :status="
-            progressStatus
-          "
-          :show-text="false"
+        <div
+          class="parsing-spinner"
+          aria-hidden="true"
         />
 
-        <!--
-          用户要求：
-          这里只显示总批次、已完成
-        -->
+        <strong>
+          正在解析文件
+        </strong>
+
         <p>
-          {{ progressDetail }}
+          正在读取并校验文件内容，请稍候...
         </p>
       </section>
 
-      <!-- 轮询本身发生异常 -->
-      <ElAlert
-        v-if="progressIssue"
-        class="import-errors"
-        :type="
-          progressIssue.type
-        "
-        :closable="false"
-        show-icon
-        :title="
-          progressIssue.message
-        "
-      />
+      <!-- ================================================
+           阶段2：真实导入进度
+           ================================================ -->
+      <template v-else>
+        <section class="batch-summary">
+          <div class="progress-header">
+            <strong>
+              {{ progressSummary }}
+            </strong>
 
-      <!-- 文件校验失败 -->
-      <ElAlert
-        v-if="requiresNewFile"
-        class="import-errors"
-        type="warning"
-        :closable="false"
-        show-icon
-        title="请修正文件后重新导入，校验失败类任务不能直接重试。"
-      />
+            <span>
+              {{ progressPercentage }}%
+            </span>
+          </div>
 
-      <!-- 具体失败内容 -->
-      <ElAlert
-        v-if="
-          failedBatches.length >
-          0
-        "
-        class="import-errors"
-        type="error"
-        :closable="false"
-        show-icon
-      >
-        <p>
-          {{
-            failedBatches.length
-          }}
-          个任务失败，共
-          {{ totalErrors }}
-          条错误。
-        </p>
+          <!--
+            Element Plus自带的文字关闭，
+            所以百分比只显示一次。
+          -->
+          <ElProgress
+            :percentage="progressPercentage"
+            :status="progressStatus"
+            :show-text="false"
+          />
 
-        <ul
+          <p v-if="progressDetail">
+            {{ progressDetail }}
+          </p>
+        </section>
+
+        <!-- 轮询异常 -->
+        <ElAlert
+          v-if="progressIssue"
+          class="import-errors"
+          :type="progressIssue.type"
+          :closable="false"
+          show-icon
+          :title="progressIssue.message"
+        />
+
+        <!-- 文件本身需要修正 -->
+        <ElAlert
+          v-if="requiresNewFile"
+          class="import-errors"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="请修正文件后重新导入，校验失败类任务不能直接重试。"
+        />
+
+        <!-- 失败详情 -->
+        <ElAlert
           v-if="
-            sampledErrors.length >
-            0
+            failedBatches.length > 0
           "
+          class="import-errors"
+          type="error"
+          :closable="false"
+          show-icon
         >
-          <li
-            v-for="item in sampledErrors"
-            :key="`${item.batchLabel}-${item.row}-${item.column}-${item.code ?? ''}`"
-          >
+          <p>
             {{
-              item.batchLabel
-            }}：第
-            {{ item.row }}
-            行
-            {{ item.column }}
-            {{ item.code ?? "" }}
-            {{ item.message }}
-          </li>
-        </ul>
+              failedBatches.length
+            }}
+            个任务失败，共
+            {{ totalErrors }}
+            条错误。
+          </p>
 
-        <p
-          v-if="
-            remainingErrorCount >
-            0
-          "
-        >
-          还有
-          {{
-            remainingErrorCount
-          }}
-          条错误未展示。
-        </p>
-      </ElAlert>
+          <ul
+            v-if="
+              sampledErrors.length > 0
+            "
+          >
+            <li
+              v-for="item in sampledErrors"
+              :key="`${item.batchLabel}-${item.row}-${item.column}-${item.code ?? ''}`"
+            >
+              {{ item.batchLabel }}：
+              第 {{ item.row }} 行
+              {{ item.column }}
+              {{ item.code ?? "" }}
+              {{ item.message }}
+            </li>
+          </ul>
+
+          <p
+            v-if="
+              remainingErrorCount > 0
+            "
+          >
+            还有
+            {{
+              remainingErrorCount
+            }}
+            条错误未展示。
+          </p>
+        </ElAlert>
+      </template>
     </div>
 
     <template #footer>
-      <!--
-        只有系统处理异常才能直接重试。
-      -->
       <ElButton
         v-if="
+          !isParsing &&
           canRetryFailedBatches
         "
-        :loading="
-          isSubmitting
-        "
+        :loading="isSubmitting"
         @click="retry"
       >
         重新提交任务
       </ElButton>
 
-      <!--
-        有失败、轮询异常或超时时允许关闭进度弹窗。
-      -->
       <ElButton
         v-if="
-          failedBatches.length >
-            0 ||
-          progressIssue !== null
+          !isParsing &&
+          (
+            failedBatches.length > 0 ||
+            progressIssue !== null
+          )
         "
-        @click="
-          closeProgressDialog
-        "
+        @click="closeProgressDialog"
       >
         关闭
       </ElButton>
     </template>
   </ElDialog>
 
-  <!-- =========================
-       导入成功弹窗
-       ========================= -->
+  <!-- =====================================================
+       导入成功
+       ===================================================== -->
   <ElDialog
     v-model="successVisible"
     title="导入成功"
@@ -1555,9 +1380,7 @@ watch(
     <template #footer>
       <ElButton
         type="primary"
-        @click="
-          confirmSuccess
-        "
+        @click="confirmSuccess"
       >
         确定
       </ElButton>
@@ -1572,9 +1395,9 @@ watch(
   gap: 18px;
 }
 
-/* =========================
-   表单行
-   ========================= */
+/* =========================================================
+ * 表单
+ * ========================================================= */
 
 .form-row {
   display: grid;
@@ -1595,22 +1418,18 @@ watch(
   color: #ff3152;
 }
 
-/* =========================
-   导入类型
-   ========================= */
+/* =========================================================
+ * 导入类型
+ * ========================================================= */
 
 .dataset-grid {
   display: grid;
   grid-template-columns:
-    repeat(
-      2,
-      minmax(0, 1fr)
-    );
+    repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
 .dataset-card {
-  position: relative;
   display: flex;
   min-height: 116px;
   gap: 14px;
@@ -1619,8 +1438,7 @@ watch(
   color: #1f2d3d;
   text-align: left;
   background: #fff;
-  border:
-    1px solid #d7e0ee;
+  border: 1px solid #d7e0ee;
   border-radius: 8px;
   cursor: pointer;
   transition:
@@ -1647,6 +1465,7 @@ watch(
   display: grid;
   width: 42px;
   height: 42px;
+  flex: 0 0 42px;
   place-items: center;
   color: #ff3152;
   background: #fff0f3;
@@ -1666,22 +1485,18 @@ watch(
   color: #6b7a90;
 }
 
-/* =========================
-   文件上传
-   ========================= */
+/* =========================================================
+ * 上传
+ * ========================================================= */
 
 .file-upload {
   width: 100%;
 }
 
-.selected-file,
-.batch-result
-> div:first-child {
+.selected-file {
   display: flex;
   gap: 12px;
   align-items: center;
-  justify-content:
-    space-between;
 }
 
 .selected-file b {
@@ -1694,13 +1509,78 @@ watch(
   border-radius: 8px;
 }
 
-/* =========================
-   导入进度
-   ========================= */
+.selected-file span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
 
-.batch-result {
+/* =========================================================
+ * 文件解析阶段
+ * ========================================================= */
+
+.parsing-state {
+  display: flex;
+  min-height: 170px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 12px;
+  text-align: center;
+}
+
+.parsing-spinner {
+  width: 34px;
+  height: 34px;
+  margin-bottom: 18px;
+  border: 3px solid #e6ebf2;
+  border-top-color: #409eff;
+  border-radius: 50%;
+  animation: parsing-rotate 0.85s linear infinite;
+}
+
+.parsing-state strong {
+  color: #1f2d3d;
+  font-size: 15px;
+}
+
+.parsing-state p {
+  margin: 8px 0 0;
+  color: #6b7a90;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+@keyframes parsing-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* =========================================================
+ * 真实进度
+ * ========================================================= */
+
+.batch-summary {
   display: grid;
   gap: 10px;
+}
+
+.progress-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.progress-header span {
+  color: #5f6f86;
+  font-size: 14px;
 }
 
 .batch-summary p {
@@ -1709,16 +1589,9 @@ watch(
   line-height: 1.7;
 }
 
-.batch-summary
-> div:first-child
-> span {
-  color: #5f6f86;
-  font-size: 14px;
-}
-
-/* =========================
-   错误信息
-   ========================= */
+/* =========================================================
+ * 错误
+ * ========================================================= */
 
 .import-errors ul {
   padding-left: 18px;
@@ -1730,9 +1603,9 @@ watch(
   line-height: 1.7;
 }
 
-/* =========================
-   成功弹窗
-   ========================= */
+/* =========================================================
+ * 成功
+ * ========================================================= */
 
 .success-message {
   margin: 0;
@@ -1741,78 +1614,53 @@ watch(
   text-align: center;
 }
 
-/* =========================
-   弹窗高度
-   ========================= */
+/* =========================================================
+ * Dialog
+ * ========================================================= */
 
 :deep(.import-dialog),
-:deep(
-  .import-progress-dialog
-),
-:deep(
-  .import-success-dialog
-) {
+:deep(.import-progress-dialog),
+:deep(.import-success-dialog) {
   display: flex;
   flex-direction: column;
-  max-height:
-    calc(100vh - 48px);
+  max-height: calc(100vh - 48px);
   margin: 0 auto;
 }
 
-:deep(
-  .import-dialog
-    .el-dialog__body
-),
-:deep(
-  .import-progress-dialog
-    .el-dialog__body
-),
-:deep(
-  .import-success-dialog
-    .el-dialog__body
-) {
+:deep(.import-dialog .el-dialog__body),
+:deep(.import-progress-dialog .el-dialog__body),
+:deep(.import-success-dialog .el-dialog__body) {
   overflow: auto;
 }
 
-/* =========================
-   大屏
-   ========================= */
+/* =========================================================
+ * 大屏
+ * ========================================================= */
 
-@media (
-min-width: 1200px
-) {
+@media (min-width: 1200px) {
   .dataset-grid {
     grid-template-columns:
-      repeat(
-        4,
-        minmax(0, 1fr)
-      );
+      repeat(4, minmax(0, 1fr));
   }
 }
 
-/* =========================
-   小屏
-   ========================= */
+/* =========================================================
+ * 小屏
+ * ========================================================= */
 
-@media (
-max-width: 760px
-) {
+@media (max-width: 760px) {
   .form-row {
-    grid-template-columns:
-      1fr;
+    grid-template-columns: 1fr;
   }
 
   .dataset-grid {
-    grid-template-columns:
-      1fr;
+    grid-template-columns: 1fr;
   }
 
   .dataset-card,
   .selected-file,
-  .batch-result
-  > div:first-child {
-    align-items:
-      flex-start;
+  .progress-header {
+    align-items: flex-start;
     flex-direction: column;
   }
 }

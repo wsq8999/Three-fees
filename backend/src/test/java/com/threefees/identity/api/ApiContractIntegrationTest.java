@@ -65,7 +65,7 @@ class ApiContractIntegrationTest {
   }
 
   @Test
-  void unauthenticatedRequestUsesProblemDetailsAndIssuesCsrfCookie() throws Exception {
+  void unauthenticatedRequestUsesProblemDetails() throws Exception {
     var client = newClient();
 
     var response = get(client.httpClient(), "/api/v1/sessions/current");
@@ -74,29 +74,31 @@ class ApiContractIntegrationTest {
     assertThat(response.headers().firstValue("Content-Type").orElse(""))
         .startsWith("application/problem+json");
     assertThat(response.body()).contains("\"code\":\"AUTHENTICATION_REQUIRED\"");
-    assertThat(cookieValue(client.cookieManager(), "XSRF-TOKEN")).isNotBlank();
   }
 
   @Test
-  void loginRequiresCsrfAndRejectsInvalidCredentialsWithoutAccountDisclosure() throws Exception {
-    var withoutCsrf = newClient();
-    var missingCsrf =
+  void loginWithoutCsrfAndRejectsInvalidCredentialsWithoutAccountDisclosure() throws Exception {
+    var valid = newClient();
+
+    var validResponse =
         postJson(
-            withoutCsrf.httpClient(),
+            valid.httpClient(),
             "/api/v1/sessions",
             loginBody("admin", INITIAL_TEST_PASSWORD),
             null);
-    assertThat(missingCsrf.statusCode()).isEqualTo(403);
-    assertThat(missingCsrf.body()).contains("\"code\":\"CSRF_VALIDATION_FAILED\"");
+
+    assertThat(validResponse.statusCode()).isEqualTo(201);
+    assertThat(validResponse.headers().firstValue("Location")).contains("/api/v1/sessions/current");
 
     var invalid = newClient();
-    get(invalid.httpClient(), "/api/v1/sessions/current");
+
     var invalidResponse =
         postJson(
             invalid.httpClient(),
             "/api/v1/sessions",
             loginBody("admin", UUID.randomUUID().toString()),
-            cookieValue(invalid.cookieManager(), "XSRF-TOKEN"));
+            null);
+
     assertThat(invalidResponse.statusCode()).isEqualTo(401);
     assertThat(invalidResponse.body()).contains("\"code\":\"INVALID_CREDENTIALS\"");
     assertThat(invalidResponse.body()).doesNotContain("admin");
