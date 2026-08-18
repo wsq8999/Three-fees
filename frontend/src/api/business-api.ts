@@ -44,7 +44,8 @@ interface BackendPage<T> {
 }
 
 function mapDashboard(value: Partial<DashboardData>): DashboardData {
-  const pendingReportCount = value.pendingReportCount ?? value.draftReportCount ?? 0;
+  const pendingReportCount =
+    value.pendingReportCount ?? value.draftReportCount ?? 0;
   return {
     currentDataPeriod: value.currentDataPeriod ?? null,
     availablePeriods: value.availablePeriods ?? [],
@@ -71,7 +72,8 @@ function mapDashboard(value: Partial<DashboardData>): DashboardData {
     })),
     pendingTasks: (value.pendingTasks ?? []).map((item) => ({
       ...item,
-      overLimitType: overLimitTypeLabel(item.overLimitType) ?? item.overLimitType,
+      overLimitType:
+        overLimitTypeLabel(item.overLimitType) ?? item.overLimitType,
     })),
   };
 }
@@ -187,9 +189,12 @@ interface BackendTask {
 }
 
 const TASK_ERROR_MESSAGES: Record<string, string> = {
+  CONFIRMED_REPORT_VERSION_MISMATCH:
+    "确认的报告版本已经变化，请返回工作稿检查后重新确认。",
   HISTORICAL_WORD_INVALID:
     "历史 Word 无法识别，请确认文件是真实的 .doc 或 .docx 文档。",
-  HISTORICAL_REPORT_EMPTY: "历史 Word 暂无可在线预览内容，系统将保留原始 Word 供下载查看。",
+  HISTORICAL_REPORT_EMPTY:
+    "历史 Word 暂无可在线预览内容，系统将保留原始 Word 供下载查看。",
   HISTORICAL_CONVERSION_FAILED: "历史报告导入失败，请重新上传 Word 文件。",
   TASK_PAYLOAD_INVALID: "历史报告导入任务数据异常，请重新提交。",
 };
@@ -248,7 +253,12 @@ function mapReportStatus(
 }
 
 function overLimitTypeLabel(value: string | null | undefined): string | null {
-  if (value === null || value === undefined || value.length === 0 || /^\?+$/.test(value)) {
+  if (
+    value === null ||
+    value === undefined ||
+    value.length === 0 ||
+    /^\?+$/.test(value)
+  ) {
     return null;
   }
   const labels: Record<string, string> = {
@@ -298,13 +308,17 @@ function mapBillingDetail(item: BackendBillingPointDetail): BillingPointDetail {
     overviewGroups: mapFieldGroups(item.overviewGroups),
     payments: (item.payments as BackendRecordDetail[]).map(mapPaymentRecord),
     meters: (item.meters as BackendRecordDetail[]).map(mapMeterRecord),
-    benchmarks: (item.benchmarks as BackendRecordDetail[]).map(mapBenchmarkRecord),
+    benchmarks: (item.benchmarks as BackendRecordDetail[]).map(
+      mapBenchmarkRecord,
+    ),
     audit: item.audit as BillingPointDetail["audit"],
     draftId: item.draftId,
   };
 }
 
-function mapFieldGroups(groups: BackendFieldGroup[]): BillingPointDetail["overviewGroups"] {
+function mapFieldGroups(
+  groups: BackendFieldGroup[],
+): BillingPointDetail["overviewGroups"] {
   return groups.map((group) => ({
     title: group.title ?? group.name ?? "字段信息",
     fields: (group.fields ?? []).map(mapBusinessField),
@@ -319,7 +333,10 @@ function mapBusinessField(field: BackendFieldValue): BusinessField {
   };
 }
 
-function fieldFromGroups(groups: BillingPointDetail["overviewGroups"], labels: string[]): string {
+function fieldFromGroups(
+  groups: BillingPointDetail["overviewGroups"],
+  labels: string[],
+): string {
   for (const group of groups) {
     const found = group.fields.find((field) => labels.includes(field.label));
     if (found?.value && found.value !== "—") return found.value;
@@ -335,7 +352,8 @@ function approvalStatus(value: string): PaymentRecord["approvalStatus"] {
 
 function mapPaymentRecord(record: BackendRecordDetail): PaymentRecord {
   const groups = mapFieldGroups(record.fieldGroups ?? []);
-  const billNumber = record.paymentCode ?? fieldFromGroups(groups, ["缴费单编码"]);
+  const billNumber =
+    record.paymentCode ?? fieldFromGroups(groups, ["缴费单编码"]);
   const approval = fieldFromGroups(groups, ["审核状态"]);
   return {
     id: record.id,
@@ -392,19 +410,25 @@ function sectionsToBlocks(sections: ReportSections): DraftBlock[] {
       id: "situation",
       type: "SITUATION",
       title: "情况说明",
-      content: looksLikeHtml(sections.situation) ? sections.situation : cleanDraftText(sections.situation),
+      content: looksLikeHtml(sections.situation)
+        ? sections.situation
+        : cleanDraftText(sections.situation),
     },
     {
       id: "analysis",
       type: "ANALYSIS",
       title: "审计分析",
-      content: looksLikeHtml(sections.analysis) ? sections.analysis : cleanDraftText(sections.analysis),
+      content: looksLikeHtml(sections.analysis)
+        ? sections.analysis
+        : cleanDraftText(sections.analysis),
     },
     {
       id: "rectification",
       type: "RECTIFICATION",
       title: "整改建议",
-      content: looksLikeHtml(sections.rectification) ? sections.rectification : cleanDraftText(sections.rectification),
+      content: looksLikeHtml(sections.rectification)
+        ? sections.rectification
+        : cleanDraftText(sections.rectification),
     },
   ];
 }
@@ -466,7 +490,11 @@ function mapDraft(item: BackendReportDraft): ReportDraft {
 
 function mapReport(item: BackendReportSummary): ReportSummary {
   const sectionParts = item.sections
-    ? [item.sections.situation, item.sections.analysis, item.sections.rectification]
+    ? [
+        item.sections.situation,
+        item.sections.analysis,
+        item.sections.rectification,
+      ]
         .map((part) => cleanReportPart(part))
         .filter(
           (part) =>
@@ -503,7 +531,7 @@ function mapReport(item: BackendReportSummary): ReportSummary {
     wordFileName: `${item.reportNumber}.docx`,
     pdfFileName: `${item.reportNumber}.pdf`,
     summary,
-    previewHtml: sectionParts.find(looksLikeHtml) ?? null,
+    previewHtml: buildReportPreviewHtml(item.sections),
     archivedAudit: [],
     latestAudit: [],
     corrections: item.correctionReason
@@ -528,7 +556,7 @@ function cleanDraftText(value: string | null | undefined): string {
     .replace(/&nbsp;/g, " ")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, "\"")
+    .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/\n{3,}/g, "\n\n")
@@ -545,7 +573,9 @@ function cleanReportPart(value: string | null | undefined): string {
 }
 
 function looksLikeHtml(value: string): boolean {
-  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(value);
+  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(
+    value,
+  );
 }
 
 function mapHistoricalCandidate(
@@ -611,7 +641,9 @@ export const businessApi = {
       });
       return mapDashboard(
         asResult<Partial<DashboardData>>(
-          await httpClient.get(`/api/v1/dashboard/summary${query ? `?${query}` : ""}`),
+          await httpClient.get(
+            `/api/v1/dashboard/summary${query ? `?${query}` : ""}`,
+          ),
         ),
       );
     },
@@ -645,7 +677,8 @@ export const businessApi = {
       const result = asResult<
         ImportBatch | { items?: ImportBatch[]; batches?: ImportBatch[] }
       >(response);
-      if ("batches" in result && Array.isArray(result.batches)) return result.batches;
+      if ("batches" in result && Array.isArray(result.batches))
+        return result.batches;
       if ("items" in result && Array.isArray(result.items)) return result.items;
       return [result as ImportBatch];
     },
@@ -666,11 +699,9 @@ export const businessApi = {
       billingPointIds: string[];
     }): Promise<ExportJob> {
       return asResult<ExportJob>(
-        await httpClient.post(
-          "/api/v1/export-jobs",
-          input,
-          { headers: { "Idempotency-Key": crypto.randomUUID() } },
-        ),
+        await httpClient.post("/api/v1/export-jobs", input, {
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+        }),
       );
     },
     async get(id: string): Promise<ExportJob> {
@@ -727,7 +758,10 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
-    async createCorrection(reportId: string, reason: string): Promise<ReportDraft> {
+    async createCorrection(
+      reportId: string,
+      reason: string,
+    ): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.post(
           `/api/v1/report-drafts/corrections/${encodeURIComponent(reportId)}`,
@@ -787,7 +821,11 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
-    async removeImage(id: string, fileId: string, version: number): Promise<ReportDraft> {
+    async removeImage(
+      id: string,
+      fileId: string,
+      version: number,
+    ): Promise<ReportDraft> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.delete(
           `/api/v1/report-drafts/${encodeURIComponent(id)}/images/${encodeURIComponent(fileId)}`,
@@ -810,13 +848,12 @@ export const businessApi = {
       );
       return mapDraft(raw);
     },
-    async generate(id: string): Promise<ReportSummary> {
-      const current = await this.get(id);
+    async generate(id: string, version: number): Promise<ReportSummary> {
       const task = asResult<{ taskId: string }>(
         await httpClient.post(
           `/api/v1/report-drafts/${encodeURIComponent(id)}/formal-report`,
           {},
-          { headers: { "If-Match": String(current?.entityVersion ?? 0) } },
+          { headers: { "If-Match": String(version) } },
         ),
       );
       const reportId = await waitForReport(task.taskId);
@@ -899,8 +936,10 @@ export const businessApi = {
       file: File;
     }): Promise<ReportSummary> {
       const form = new FormData();
-      if (input.billingPointPeriodId) form.set("billingPointPeriodId", input.billingPointPeriodId);
-      if (input.billingPointCode) form.set("billingPointCode", input.billingPointCode);
+      if (input.billingPointPeriodId)
+        form.set("billingPointPeriodId", input.billingPointPeriodId);
+      if (input.billingPointCode)
+        form.set("billingPointCode", input.billingPointCode);
       if (input.cityCode) form.set("cityCode", input.cityCode);
       if (input.period) form.set("period", input.period);
       form.set("file", input.file);
@@ -908,9 +947,7 @@ export const businessApi = {
         reportId?: string;
         reportPublicId?: string;
         taskId?: string;
-      }>(
-        await httpClient.postForm("/api/v1/historical-report-imports", form),
-      );
+      }>(await httpClient.postForm("/api/v1/historical-report-imports", form));
       const reportId = created.reportId ?? created.reportPublicId;
       if (reportId !== undefined) {
         return fetchReportById(reportId);
@@ -953,32 +990,50 @@ export const businessApi = {
       );
     },
     async wordBlob(id: string): Promise<Blob> {
-      return httpClient.getBlob(`/api/v1/reports/${encodeURIComponent(id)}/word?inline=true`);
+      return httpClient.getBlob(
+        `/api/v1/reports/${encodeURIComponent(id)}/word?inline=true`,
+      );
     },
   },
   reportGeneration: {
-    async candidates(cityCode?: string): Promise<ReportGenerationInitialContent["candidate"][]> {
+    async candidates(
+      cityCode?: string,
+    ): Promise<ReportGenerationInitialContent["candidate"][]> {
       const params = queryString({ cityCode: cityCode ?? "" });
       return asResult<ReportGenerationInitialContent["candidate"][]>(
-        await httpClient.get(`/api/v1/report-generation/candidates${params ? `?${params}` : ""}`),
+        await httpClient.get(
+          `/api/v1/report-generation/candidates${params ? `?${params}` : ""}`,
+        ),
       );
     },
-    async initialContent(billingPointCode: string, period: string): Promise<ReportGenerationInitialContent> {
+    async initialContent(
+      billingPointCode: string,
+      period: string,
+    ): Promise<ReportGenerationInitialContent> {
       const params = queryString({ billingPointCode, period });
       return asResult<ReportGenerationInitialContent>(
-        await httpClient.get(`/api/v1/report-generation/initial-content?${params}`),
+        await httpClient.get(
+          `/api/v1/report-generation/initial-content?${params}`,
+        ),
       );
     },
-    async correctionInitialContent(reportId: string): Promise<ReportGenerationInitialContent> {
+    async correctionInitialContent(
+      reportId: string,
+    ): Promise<ReportGenerationInitialContent> {
       return asResult<ReportGenerationInitialContent>(
         await httpClient.get(
           `/api/v1/report-generation/corrections/${encodeURIComponent(reportId)}/initial-content`,
         ),
       );
     },
-    async analyzeImages(input: ReportGenerationImageAnalysisInput): Promise<ReportGenerationImageAnalysisResult> {
+    async analyzeImages(
+      input: ReportGenerationImageAnalysisInput,
+    ): Promise<ReportGenerationImageAnalysisResult> {
       return asResult<ReportGenerationImageAnalysisResult>(
-        await httpClient.post("/api/v1/report-generation/image-analysis", input),
+        await httpClient.post(
+          "/api/v1/report-generation/image-analysis",
+          input,
+        ),
       );
     },
     async generate(input: {
@@ -987,9 +1042,13 @@ export const businessApi = {
       contentHtml: string;
     }): Promise<ReportSummary> {
       const created = asResult<{ reportId: string; reportNumber: string }>(
-        await httpClient.post("/api/v1/report-generation/formal-reports", input, {
-          headers: { "Idempotency-Key": crypto.randomUUID() },
-        }),
+        await httpClient.post(
+          "/api/v1/report-generation/formal-reports",
+          input,
+          {
+            headers: { "Idempotency-Key": crypto.randomUUID() },
+          },
+        ),
       );
       return fetchReportById(created.reportId);
     },
@@ -1034,14 +1093,25 @@ export const businessApi = {
     },
     async update(
       id: string,
-      input: string | { displayName: string; cityCode?: string; enabled?: boolean; version?: number },
+      input:
+        | string
+        | {
+            displayName: string;
+            cityCode?: string;
+            enabled?: boolean;
+            version?: number;
+          },
     ): Promise<ManagedUser> {
       const body = typeof input === "string" ? { displayName: input } : input;
       return asResult<ManagedUser>(
         await httpClient.patch(`/api/v1/users/${encodeURIComponent(id)}`, body),
       );
     },
-    async resetPassword(id: string, newPassword?: string, confirmPassword?: string): Promise<ManagedUser> {
+    async resetPassword(
+      id: string,
+      newPassword?: string,
+      confirmPassword?: string,
+    ): Promise<ManagedUser> {
       return asResult<ManagedUser>(
         await httpClient.post(
           `/api/v1/users/${encodeURIComponent(id)}/password-resets`,
@@ -1090,12 +1160,66 @@ export function saveBlob(blob: Blob, fileName: string): void {
   URL.revokeObjectURL(url);
 }
 
-export async function triggerBrowserDownload(url: string, fileName = "download"): Promise<void> {
+export function buildReportPreviewHtml(
+  sections:
+    | {
+        title: string;
+        situation: string;
+        analysis: string;
+        rectification: string;
+      }
+    | null
+    | undefined,
+): string | null {
+  if (sections === null || sections === undefined) return null;
+  const situation = cleanReportPart(sections.situation);
+  const analysis = cleanReportPart(sections.analysis);
+  const rectification = cleanReportPart(sections.rectification);
+  if (
+    looksLikeHtml(situation) &&
+    analysis.length === 0 &&
+    rectification.length === 0
+  ) {
+    return situation;
+  }
+  const body = [
+    ["一、情况说明", situation],
+    ["二、排查分析", analysis],
+    ["三、整改小结", rectification],
+  ]
+    .map(
+      ([heading, content]) =>
+        `<section><h2>${heading}</h2>${reportPartHtml(content ?? "")}</section>`,
+    )
+    .join("");
+  return `<article class="confirmed-report-content"><h1>${escapeReportHtml(sections.title)}</h1>${body}</article>`;
+}
+
+function reportPartHtml(value: string): string {
+  if (looksLikeHtml(value)) return value;
+  return `<p>${escapeReportHtml(value).replace(/\r?\n/g, "<br>")}</p>`;
+}
+
+function escapeReportHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export async function triggerBrowserDownload(
+  url: string,
+  fileName = "download",
+): Promise<void> {
   const response = await httpClient.getBlobResponse(url);
   saveBlob(response.blob, response.fileName ?? fileName);
 }
 
-export function formatPercent(value: string | number | null | undefined): string {
+export function formatPercent(
+  value: string | number | null | undefined,
+): string {
   if (value === null || value === undefined || value === "") return "-";
   const text = String(value).trim();
   if (text === "" || text === "-") return "-";

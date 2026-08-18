@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.ai.application.CityMemoryService;
+import com.threefees.ai.application.CityMemoryService.MemoryQuery;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.domain.Role;
 import java.util.List;
@@ -28,6 +29,8 @@ class ReportDraftCityMemoryIntegrationTest {
   @AfterEach
   void cleanUp() {
     jdbcTemplate.update("DELETE FROM ai_city_memory WHERE confirmed_by='city-memory-test'");
+    jdbcTemplate.update(
+        "DELETE FROM ai_billing_point_memory_profile WHERE city_code IN ('320100', '320500')");
     jdbcTemplate.update(
         "DELETE FROM report_draft_version WHERE draft_id IN (SELECT id FROM report_draft WHERE created_by='city-memory-test')");
     jdbcTemplate.update(
@@ -107,6 +110,81 @@ class ReportDraftCityMemoryIntegrationTest {
     assertThat(activeCount).isEqualTo(1);
     assertThat(finalReason).isEqualTo("新增设备投运");
     assertThat(service.cityMemoryReferences("320500")).isEmpty();
+  }
+
+  @Test
+  void duplicateCorrectionsAreMergedAndPointProfileDrivesRelevantRetrieval() {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+
+    long firstMessageId = insertCorrectionMessage(draft.id(), "实际原因是夏季空调集中运行");
+    cityMemoryService.rememberUserCorrection(
+        draft.id(),
+        firstMessageId,
+        "实际原因是夏季空调集中运行",
+        "原因待核实",
+        "夏季空调集中运行",
+        "现场记录和图片确认空调负荷增加。",
+        "调整空调运行时段。",
+        "city-memory-test");
+    long secondMessageId = insertCorrectionMessage(draft.id(), "确认仍是夏季空调集中运行");
+    cityMemoryService.rememberUserCorrection(
+        draft.id(),
+        secondMessageId,
+        "确认仍是夏季空调集中运行",
+        "空调负荷增加",
+        "夏季空调集中运行",
+        "再次核验空调负荷记录。",
+        "继续执行空调错峰方案。",
+        "city-memory-test");
+    insertMemory("320100", "本市其他报账点计量异常");
+    insertMemory("320500", "苏州工业峰谷时段异常");
+
+    Integer memoryCount =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*) FROM ai_city_memory
+             WHERE city_code='320100' AND billing_point_code='MEMORY-POINT-001'
+               AND final_reason='夏季空调集中运行'
+            """,
+            Integer.class);
+    Integer confirmCount =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT confirm_count FROM ai_city_memory
+             WHERE city_code='320100' AND billing_point_code='MEMORY-POINT-001'
+               AND final_reason='夏季空调集中运行'
+            """,
+            Integer.class);
+    String memoryFeatures =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT CONCAT(reason_code, '|', season_code, '|', ratio_bucket, '|', status)
+              FROM ai_city_memory
+             WHERE city_code='320100' AND billing_point_code='MEMORY-POINT-001'
+               AND final_reason='夏季空调集中运行'
+            """,
+            String.class);
+    var profile = cityMemoryService.findPointProfile("320100", "MEMORY-POINT-001");
+    var matches =
+        cityMemoryService.findRelevantMemories(
+            new MemoryQuery(
+                "320100", "MEMORY-POINT-001", "ONLY_MOM", "2026-07", new java.math.BigDecimal("18.5")),
+            5);
+
+    assertThat(memoryCount).isEqualTo(1);
+    assertThat(confirmCount).isEqualTo(2);
+    assertThat(memoryFeatures).isEqualTo("AIR_CONDITIONING|SUMMER|10_TO_20|ACTIVE");
+    assertThat(profile).isNotNull();
+    assertThat(profile.activeMemoryCount()).isEqualTo(1);
+    assertThat(profile.summary()).contains("夏季空调集中运行", "累计确认2次");
+    assertThat(matches).isNotEmpty();
+    assertThat(matches.getFirst().billingPointCode()).isEqualTo("MEMORY-POINT-001");
+    assertThat(matches).allMatch(memory -> memory.cityCode().equals("320100"));
   }
 
   @Test

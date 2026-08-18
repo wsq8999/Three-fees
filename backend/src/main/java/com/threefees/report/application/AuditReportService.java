@@ -46,7 +46,7 @@ public class AuditReportService {
         .query(
             """
             SELECT d.id AS draft_db_id, d.public_id AS draft_public_id, d.status AS draft_status,
-                   d.title, d.situation, d.analysis, d.rectification,
+                   d.current_version_no, d.title, d.situation, d.analysis, d.rectification,
                    d.current_image_file_ids_json, d.formal_report_public_id, d.ai_final_reason,
                    s.id AS snapshot_db_id, s.public_id AS snapshot_public_id,
                    s.billing_point_code, s.billing_point_name, s.city_code, s.data_period,
@@ -64,6 +64,7 @@ public class AuditReportService {
                     resultSet.getLong("draft_db_id"),
                     resultSet.getString("draft_public_id"),
                     resultSet.getString("draft_status"),
+                    resultSet.getInt("current_version_no"),
                     resultSet.getString("formal_report_public_id"),
                     resultSet.getString("ai_final_reason"),
                     resultSet.getLong("snapshot_db_id"),
@@ -884,6 +885,7 @@ public class AuditReportService {
       long draftId,
       String draftPublicId,
       String draftStatus,
+      int contentVersion,
       String formalReportId,
       String correctionReason,
       long snapshotId,

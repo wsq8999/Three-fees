@@ -18,7 +18,7 @@ spring:
       max-file-size: -1
       max-request-size: -1
   datasource:
-    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&sslMode=DISABLED}
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&sslMode=DISABLED&allowPublicKeyRetrieval=true}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:123456}
     hikari:
@@ -65,7 +65,7 @@ app:
   ai:
     enabled: ${AI_ENABLED:true}
     model: ${KIMI_MODEL:kimi-k3}
-    max-history-cases: ${AI_MAX_HISTORY_CASES:30}
+    max-history-cases: ${AI_MAX_HISTORY_CASES:8}
   report:
     font-path: ${REPORT_FONT_PATH:}
 

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
 
 import { businessApi, formatPercent } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
@@ -16,6 +17,7 @@ const loading = ref(true);
 const errorMessage = ref("");
 const selectedPeriod = ref("");
 const importGuideVisible = ref(false);
+const openingTaskId = ref<string | null>(null);
 
 const periodLabel = computed(() => {
   const period = selectedPeriod.value || dashboard.value?.currentDataPeriod;
@@ -100,18 +102,25 @@ async function changePeriod(): Promise<void> {
 }
 
 async function openTask(task: DashboardData["pendingTasks"][number]): Promise<void> {
-  if (task.billingPointPeriodId) {
+  if (openingTaskId.value !== null) return;
+  if (!task.billingPointPeriodId) {
+    ElMessage.error("该任务缺少报账点账期信息，请刷新工作台后重试。");
+    return;
+  }
+
+  openingTaskId.value = task.id;
+  try {
     const draft = await businessApi.drafts.createOrResume(task.billingPointPeriodId);
     await router.push({
       name: "report-draft",
       params: { draftId: draft.id },
       query: { from: route.fullPath },
     });
-    return;
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "报告草稿打开失败，请稍后重试。");
+  } finally {
+    openingTaskId.value = null;
   }
-  await router.push({
-    path: task.target,
-  });
 }
 
 onMounted(load);
@@ -203,7 +212,15 @@ onMounted(load);
         </ElTableColumn>
         <ElTableColumn label="操作" width="105">
           <template #default="scope">
-            <ElButton link type="danger" @click="openTask(asPendingTask(scope.row))">生成报告</ElButton>
+            <ElButton
+              link
+              type="danger"
+              :loading="openingTaskId === scope.row.id"
+              :disabled="openingTaskId !== null && openingTaskId !== scope.row.id"
+              @click="openTask(asPendingTask(scope.row))"
+            >
+              生成报告
+            </ElButton>
           </template>
         </ElTableColumn>
         <template #empty>

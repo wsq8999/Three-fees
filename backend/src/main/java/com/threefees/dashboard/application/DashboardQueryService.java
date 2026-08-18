@@ -40,7 +40,7 @@ public class DashboardQueryService {
       return emptySummary(visibleCityCount, periods);
     }
 
-    long pendingReportCount = countReportStatus(period, cityScope, "WAITING");
+    long pendingReportCount = countPendingReports(period, cityScope);
     return new DashboardSummary(
         period,
         periods,
@@ -53,7 +53,7 @@ public class DashboardQueryService {
         lastUpdatedAt(period, cityScope),
         countAuditStatus(period, cityScope, "NORMAL"),
         countPendingAudit(period, cityScope),
-        countReportStatus(period, cityScope, "GENERATED"),
+        countReports(period, cityScope),
         importSummaries(period, cityScope),
         districtOverLimitCounts(period, cityScope),
         overLimitTypeCounts(period, cityScope),
@@ -162,7 +162,7 @@ public class DashboardQueryService {
     return number(sql.toString(), args);
   }
 
-  private long countReportStatus(String period, String cityScope, String reportStatus) {
+  private long countPendingReports(String period, String cityScope) {
     var sql =
         new StringBuilder(
             """
@@ -176,11 +176,36 @@ public class DashboardQueryService {
                        AND a.city_code = s.city_code
                      WHERE s.data_period = ?
                        AND a.audit_status = 'OVER_LIMIT'
-                       AND a.report_status = ?
+                       AND NOT EXISTS (
+                             SELECT 1
+                               FROM audit_report r
+                               JOIN billing_point_snapshot report_snapshot
+                                 ON report_snapshot.id = r.billing_point_snapshot_id
+                              WHERE report_snapshot.billing_point_code = s.billing_point_code
+                                AND report_snapshot.data_period = s.data_period
+                                AND report_snapshot.city_code = s.city_code
+                           )
                    """);
     var args = new ArrayList<>();
     args.add(period);
-    args.add(reportStatus);
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(") report_points");
+    return number(sql.toString(), args);
+  }
+
+  private long countReports(String period, String cityScope) {
+    var sql =
+        new StringBuilder(
+            """
+            SELECT COUNT(*)
+              FROM (
+                    SELECT DISTINCT s.billing_point_code, s.data_period, s.city_code
+                      FROM audit_report r
+                      JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
+                     WHERE s.data_period = ?
+                   """);
+    var args = new ArrayList<>();
+    args.add(period);
     appendCityScope(sql, args, cityScope, "s");
     sql.append(") report_points");
     return number(sql.toString(), args);
@@ -308,7 +333,15 @@ public class DashboardQueryService {
                AND a.city_code = s.city_code
              WHERE s.data_period = ?
                AND a.audit_status = 'OVER_LIMIT'
-               AND a.report_status = 'WAITING'
+               AND NOT EXISTS (
+                     SELECT 1
+                       FROM audit_report r
+                       JOIN billing_point_snapshot report_snapshot
+                         ON report_snapshot.id = r.billing_point_snapshot_id
+                      WHERE report_snapshot.billing_point_code = s.billing_point_code
+                        AND report_snapshot.data_period = s.data_period
+                        AND report_snapshot.city_code = s.city_code
+                   )
             """);
     var args = new ArrayList<>();
     args.add(period);
