@@ -40,8 +40,6 @@ const filters = reactive({
   cityCode: "",
   district: "",
   period: "",
-  siteKeyword: "",
-  meterKeyword: "",
   reviewStatus: "",
   pointStatus: "",
   auditStatus: "" as AuditStatus | "",
@@ -104,8 +102,6 @@ function hydrateFromRoute(): void {
     cityCode: session.currentUser?.city?.code ?? base.cityCode,
     district: queryText(route.query.district),
     period: base.period,
-    siteKeyword: queryText(route.query.site),
-    meterKeyword: queryText(route.query.meter),
     reviewStatus: queryText(route.query.review),
     pointStatus: queryText(route.query.pointStatus),
     auditStatus: base.auditStatus,
@@ -125,8 +121,6 @@ function routeQuery(): Record<string, string> {
     ...(filters.cityCode ? { city: filters.cityCode } : {}),
     ...(filters.district ? { district: filters.district } : {}),
     ...(filters.period ? { period: filters.period } : {}),
-    ...(filters.siteKeyword ? { site: filters.siteKeyword } : {}),
-    ...(filters.meterKeyword ? { meter: filters.meterKeyword } : {}),
     ...(filters.reviewStatus ? { review: filters.reviewStatus } : {}),
     ...(filters.pointStatus ? { pointStatus: filters.pointStatus } : {}),
     ...(filters.auditStatus ? { status: filters.auditStatus } : {}),
@@ -175,8 +169,6 @@ async function load(): Promise<void> {
     const keywords = [
       filters.code,
       filters.name,
-      filters.siteKeyword,
-      filters.meterKeyword,
     ]
       .map((value) => value.trim())
       .filter(Boolean);
@@ -227,8 +219,6 @@ async function reset(): Promise<void> {
     cityCode: session.currentUser?.city?.code ?? "",
     district: "",
     period: "",
-    siteKeyword: "",
-    meterKeyword: "",
     reviewStatus: "",
     pointStatus: "",
     auditStatus: "",
@@ -390,22 +380,6 @@ watch(
           value-format="YYYY-MM"
           format="YYYY年MM月"
           placeholder="全部账期"
-          clearable
-        />
-      </label>
-      <label>
-        <span>站址关键字</span>
-        <ElInput
-          v-model="filters.siteKeyword"
-          placeholder="请输入站址关键字"
-          clearable
-        />
-      </label>
-      <label>
-        <span>电表关键字</span>
-        <ElInput
-          v-model="filters.meterKeyword"
-          placeholder="请输入电表关键字"
           clearable
         />
       </label>
@@ -651,11 +625,14 @@ watch(
 
 .filter-actions {
   display: flex;
-  grid-column: 1 / -1;
+  grid-column: -2 / -1;
   gap: 10px;
   align-items: end;
   justify-content: flex-end;
+  justify-self: end;
+  align-self: end;
   padding-top: 4px;
+  white-space: nowrap;
 }
 
 .filter-actions .el-button {
@@ -694,7 +671,7 @@ watch(
 
 @media (width <= 1280px) {
   .filter-grid {
-    grid-template-columns: repeat(3, minmax(150px, 1fr));
+    grid-template-columns: repeat(4, minmax(150px, 1fr));
   }
 }
 

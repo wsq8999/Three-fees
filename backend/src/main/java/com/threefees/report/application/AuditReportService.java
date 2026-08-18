@@ -299,7 +299,13 @@ public class AuditReportService {
 
   @Transactional(readOnly = true)
   public ReportPage findPage(
-      String keyword, String period, String cityCode, int page, int size, CurrentUser actor) {
+      String keyword,
+      String period,
+      String cityCode,
+      String district,
+      int page,
+      int size,
+      CurrentUser actor) {
     String scopedCity = scopeCity(actor, cityCode);
     var arguments = new java.util.ArrayList<Object>();
     StringBuilder where = new StringBuilder(" WHERE 1=1");
@@ -307,6 +313,19 @@ public class AuditReportService {
       where.append(" AND s.city_code = ?");
       arguments.add(scopedCity);
     }
+      if (district != null && !district.isBlank()) {
+          where.append(
+              """
+               AND COALESCE(
+                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''),
+                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."区县"')), ''),
+                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."行政区"')), ''),
+                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区域"')), '')
+               ) = ?
+              """);
+
+          arguments.add(district.trim());
+      }
     if (period != null && !period.isBlank()) {
       where.append(" AND s.data_period = ?");
       arguments.add(period);

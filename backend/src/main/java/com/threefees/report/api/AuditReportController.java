@@ -44,16 +44,27 @@ public class AuditReportController {
     this.historicalService = historicalService;
   }
 
-  @GetMapping("/api/v1/reports")
-  public ReportPage reports(
-      @RequestParam(required = false) String keyword,
-      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
-      @RequestParam(required = false) String cityCode,
-      @RequestParam(defaultValue = "0") @Min(0) int page,
-      @RequestParam(defaultValue = "10") @Min(1) @Max(100) int size,
-      @AuthenticationPrincipal CurrentUser actor) {
-    return reportService.findPage(keyword, period, cityCode, page, size, actor);
-  }
+    @GetMapping("/api/v1/reports")
+    public ReportPage reports(
+        @RequestParam(required = false) String keyword,
+        @RequestParam(required = false)
+        @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])")
+        String period,
+        @RequestParam(required = false) String cityCode,
+        @RequestParam(required = false) String district,
+        @RequestParam(defaultValue = "0") @Min(0) int page,
+        @RequestParam(defaultValue = "10") @Min(1) @Max(100) int size,
+        @AuthenticationPrincipal CurrentUser actor) {
+
+        return reportService.findPage(
+            keyword,
+            period,
+            cityCode,
+            district,
+            page,
+            size,
+            actor);
+    }
 
   @GetMapping("/api/v1/reports/{publicId}")
   public ResponseEntity<ReportDetail> report(
