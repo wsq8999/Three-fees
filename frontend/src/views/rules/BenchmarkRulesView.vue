@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { ArrowRight } from "@element-plus/icons-vue";
 
 import { businessApi } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
@@ -8,33 +7,79 @@ import type { BenchmarkRule } from "@/types/business";
 
 const rules = ref<BenchmarkRule[]>([]);
 const selectedKey = ref<BenchmarkRule["key"]>("RATED_BENCHMARK");
+
 const loading = ref(true);
 const errorMessage = ref("");
 
-const ruleHints: Record<BenchmarkRule["key"], string> = {
-  YEAR_ON_YEAR: "固定对比去年同月",
-  MONTH_ON_MONTH: "固定对比上一个自然月",
-  RATED_BENCHMARK: "对比当月日标杆合计",
-};
+const selected = computed(() => {
+  return (
+    rules.value.find((item) => item.key === selectedKey.value) ??
+    rules.value[0]
+  );
+});
 
-const selected = computed(
-  () => rules.value.find((rule) => rule.key === selectedKey.value) ?? rules.value[0],
-);
+/**
+ * 顶部规则切换名称
+ */
+function getTabName(key: BenchmarkRule["key"]): string {
+  switch (key) {
+    case "YEAR_ON_YEAR":
+      return "同比标杆";
 
-const selectedIndex = computed(() =>
-  Math.max(0, rules.value.findIndex((rule) => rule.key === selected.value?.key)),
-);
+    case "MONTH_ON_MONTH":
+      return "环比标杆";
 
+    case "RATED_BENCHMARK":
+      return "额定标杆";
+
+    default:
+      return "标杆";
+  }
+}
+
+/**
+ * 三类标杆简要用途说明
+ */
+function getRuleHint(key: BenchmarkRule["key"]): string {
+  switch (key) {
+    case "YEAR_ON_YEAR":
+      return "用于与去年同月历史用电情况进行比较";
+
+    case "MONTH_ON_MONTH":
+      return "用于与上一个自然月历史用电情况进行比较";
+
+    case "RATED_BENCHMARK":
+      return "用于与当前账期适用的额定标杆值进行比较";
+
+    default:
+      return "";
+  }
+}
+
+/**
+ * 加载标杆规则
+ */
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
+
   try {
     rules.value = await businessApi.rules.list();
-    if (rules.value.some((item) => item.key === "RATED_BENCHMARK")) {
+
+    if (
+      rules.value.some(
+        (item) => item.key === "RATED_BENCHMARK"
+      )
+    ) {
       selectedKey.value = "RATED_BENCHMARK";
+    } else if (rules.value.length > 0) {
+      selectedKey.value = rules.value[0].key;
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "标杆规则加载失败";
+    errorMessage.value =
+      error instanceof Error
+        ? error.message
+        : "标杆规则加载失败";
   } finally {
     loading.value = false;
   }
@@ -44,7 +89,13 @@ onMounted(load);
 </script>
 
 <template>
-  <PageState v-if="loading" kind="loading" />
+  <!-- 加载中 -->
+  <PageState
+    v-if="loading"
+    kind="loading"
+  />
+
+  <!-- 加载失败 -->
   <PageState
     v-else-if="errorMessage"
     kind="error"
@@ -52,401 +103,543 @@ onMounted(load);
     :description="errorMessage"
     @retry="load"
   />
-  <template v-else-if="selected">
-    <section class="rules-header">
-      <div>
-        <h1>标杆规则管理</h1>
-        <p>统一查看同比、环比、额定标杆三类稽核规则，规则只读，计算以系统后台为准。</p>
-      </div>
-      <dl>
-        <div>
-          <dt>规则数量</dt>
-          <dd>{{ rules.length }}条</dd>
-        </div>
-        <div>
-          <dt>同比/环比容忍</dt>
-          <dd>20%</dd>
-        </div>
-        <div>
-          <dt>当前版本</dt>
-          <dd>V2.0</dd>
-        </div>
-        <div>
-          <dt>运行状态</dt>
-          <dd><ElTag type="success" effect="light">使用中</ElTag></dd>
-        </div>
-      </dl>
-    </section>
 
-    <div class="rules-layout">
-      <aside class="rule-list">
-        <div class="section-title">
-          <h2>规则目录</h2>
-          <span>只读</span>
-        </div>
+  <!-- 正常内容 -->
+  <template v-else-if="selected">
+    <!-- 标杆切换 -->
+    <section
+      class="rule-switch-card business-card"
+      aria-label="标杆切换"
+    >
+      <div class="rule-switch-list">
         <button
-          v-for="(rule, index) in rules"
+          v-for="rule in rules"
           :key="rule.key"
           type="button"
-          :class="{ selected: selectedKey === rule.key }"
+          class="rule-switch-item"
+          :class="{
+            active: selectedKey === rule.key,
+          }"
           @click="selectedKey = rule.key"
         >
-          <b>{{ String(index + 1).padStart(2, "0") }}</b>
-          <span>
-            <strong>{{ rule.name }}</strong>
-            <small>{{ ruleHints[rule.key] }}</small>
-          </span>
+          {{ getTabName(rule.key) }}
         </button>
+      </div>
+    </section>
 
-        <section class="decision-note">
-          <strong>最终判定</strong>
-          <p>任一适用规则超标，则本期稽核结果为超标；最大超标比例取三类有效结果中的最大值。</p>
-        </section>
-      </aside>
+    <!-- 标杆详情 -->
+    <section class="rule-detail-card business-card">
+      <!-- 标题 -->
+      <header class="rule-detail-header">
+        <div class="rule-title-area">
+          <h2>
+            {{ selected.name }}
+          </h2>
 
-      <main class="rule-panel">
-        <header>
-          <div>
-            <small>规则 {{ String(selectedIndex + 1).padStart(2, "0") }}</small>
-            <h2>{{ selected.name }}</h2>
-            <p>{{ selected.description }}</p>
-          </div>
-          <ElTag effect="plain">固定规则 · 只读</ElTag>
-        </header>
+          <p class="rule-description">
+            {{ selected.description }}
+          </p>
 
-        <section class="rule-section">
-          <div class="section-title">
-            <h3>计算步骤</h3>
-          </div>
-          <div class="calculation-chain">
-            <template v-for="(step, index) in selected.chain" :key="step">
-              <div class="step-card">
-                <small>{{ String(index + 1).padStart(2, "0") }}</small>
-                <strong>{{ step }}</strong>
-              </div>
-              <ElIcon v-if="index < selected.chain.length - 1"><ArrowRight /></ElIcon>
-            </template>
-          </div>
-        </section>
-
-        <div class="rule-grid">
-          <section class="rule-section">
-            <div class="section-title">
-              <h3>计算公式</h3>
-            </div>
-            <p>{{ selected.formula }}</p>
-          </section>
-          <section class="rule-section">
-            <div class="section-title">
-              <h3>边界与例外</h3>
-            </div>
-            <p>{{ selected.boundaries.join("；") }}</p>
-          </section>
+          <p class="rule-hint">
+            {{ getRuleHint(selected.key) }}
+          </p>
         </div>
+      </header>
 
-        <section class="rule-section">
-          <div class="section-title">
-            <h3>示例演算</h3>
+      <!-- 计算规则 -->
+      <section class="detail-section">
+        <h3 class="section-heading">
+          计算规则
+        </h3>
+
+        <div class="info-list">
+          <div class="info-row">
+            <div class="info-label">
+              计算公式
+            </div>
+
+            <div class="info-value formula-value">
+              {{ selected.formula }}
+            </div>
           </div>
-          <div class="example-grid">
-            <span v-for="item in selected.example" :key="item.label">
-              <small>{{ item.label }}</small>
-              <strong>{{ item.value }}</strong>
+
+          <div
+            v-if="selected.boundaries?.length"
+            class="info-row"
+          >
+            <div class="info-label">
+              边界与例外
+            </div>
+
+            <div class="info-value">
+              <ul class="plain-list">
+                <li
+                  v-for="item in selected.boundaries"
+                  :key="item"
+                >
+                  {{ item }}
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 计算步骤 -->
+      <section
+        v-if="selected.chain?.length"
+        class="detail-section"
+      >
+        <h3 class="section-heading">
+          计算步骤
+        </h3>
+
+        <div class="step-list">
+          <template
+            v-for="(step, index) in selected.chain"
+            :key="`${selected.key}-${index}`"
+          >
+            <div class="step-item">
+              <span class="step-number">
+                {{ index + 1 }}
+              </span>
+
+              <span class="step-text">
+                {{ step }}
+              </span>
+            </div>
+
+            <span
+              v-if="
+                index <
+                selected.chain.length - 1
+              "
+              class="step-divider"
+            >
+              →
             </span>
-          </div>
-        </section>
-
-        <div class="rule-grid">
-          <section class="rule-section">
-            <div class="section-title">
-              <h3>标杆值 Excel 校验</h3>
-            </div>
-            <div class="validation-list">
-              <span><b>自然月完整</b><small>1日至月末均有有效日值</small></span>
-              <span><b>越界日期为空</b><small>如2月31日必须为空</small></span>
-              <span><b>月平均一致</b><small>允许导入误差小于0.01</small></span>
-            </div>
-          </section>
-          <section class="rule-section">
-            <div class="section-title">
-              <h3>版本与快照</h3>
-            </div>
-            <p>{{ selected.snapshotNote }}</p>
-          </section>
+          </template>
         </div>
-      </main>
-    </div>
+      </section>
+
+      <!-- 示例演算 -->
+      <section
+        v-if="selected.example?.length"
+        class="detail-section"
+      >
+        <h3 class="section-heading">
+          示例演算
+        </h3>
+
+        <div class="example-table">
+          <ElTable
+            :data="[selected]"
+            border
+            style="width: 100%"
+          >
+            <ElTableColumn
+              v-for="item in selected.example"
+              :key="item.label"
+              :label="item.label"
+              min-width="130"
+              align="center"
+            >
+              <template #default>
+                {{ item.value }}
+              </template>
+            </ElTableColumn>
+          </ElTable>
+        </div>
+      </section>
+
+      <!-- 额定标杆数据校验 -->
+      <section
+        v-if="
+          selected.key === 'RATED_BENCHMARK'
+        "
+        class="detail-section"
+      >
+        <h3 class="section-heading">
+          数据校验要求
+        </h3>
+
+        <div class="info-list">
+          <div class="info-row">
+            <div class="info-label">
+              自然月完整
+            </div>
+
+            <div class="info-value">
+              1日至月末均应存在有效日标杆值。
+            </div>
+          </div>
+
+          <div class="info-row">
+            <div class="info-label">
+              越界日期为空
+            </div>
+
+            <div class="info-value">
+              当月不存在的日期应保持为空，
+              例如2月份不存在的日期不得填写数据。
+            </div>
+          </div>
+
+          <div class="info-row">
+            <div class="info-label">
+              数据一致
+            </div>
+
+            <div class="info-value">
+              导入数据应符合系统规定的字段格式及数值校验要求。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 最终判定 -->
+      <section class="final-section">
+        <div class="final-title">
+          最终判定
+        </div>
+
+        <div class="final-content">
+          任一适用标杆超标，则当前报账点当前账期的稽核结果判定为超标；
+          最大超标比例取同比、环比、额定标杆三类有效计算结果中的最大值。
+        </div>
+      </section>
+    </section>
   </template>
 </template>
 
 <style scoped>
-.rules-header,
-.rule-list,
-.rule-panel,
-.rule-section {
-  background: #fff;
-  border: 1px solid #e3e8f0;
-  border-radius: 8px;
-}
+/* ==============================
+   顶部标杆切换
+   ============================== */
 
-.rules-header {
-  display: flex;
-  gap: 20px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 18px 20px;
+.rule-switch-card {
+  padding: 0 18px;
   margin-bottom: 14px;
 }
 
-.rules-header h1,
-.rules-header p,
-.rules-header dl,
-.rules-header dd,
-.section-title h2,
-.section-title h3 {
-  margin: 0;
-}
-
-.rules-header h1 {
-  color: #10203a;
-  font-size: 20px;
-  font-weight: 800;
-}
-
-.rules-header p {
-  margin-top: 6px;
-  color: #66758a;
-  font-size: 13px;
-}
-
-.rules-header dl {
-  display: grid;
-  min-width: min(100%, 520px);
-  grid-template-columns: repeat(4, minmax(96px, 1fr));
-}
-
-.rules-header dl > div {
-  padding-left: 16px;
-  border-left: 1px solid #e7edf5;
-}
-
-.rules-header dt {
-  color: #7b8798;
-  font-size: 12px;
-}
-
-.rules-header dd {
-  margin-top: 5px;
-  color: #10203a;
-  font-weight: 800;
-}
-
-.rules-layout {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 14px;
-}
-
-.rule-list,
-.rule-panel {
-  min-width: 0;
-  padding: 16px;
-}
-
-.section-title {
+.rule-switch-list {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  min-height: 52px;
+  gap: 28px;
+  align-items: stretch;
 }
 
-.section-title h2,
-.section-title h3 {
-  color: #10203a;
-  font-size: 16px;
-  font-weight: 800;
-}
-
-.section-title span {
-  color: #8a96a8;
-  font-size: 12px;
-}
-
-.rule-list button {
-  display: flex;
-  width: 100%;
-  gap: 12px;
-  align-items: center;
-  padding: 13px 12px;
-  margin-top: 10px;
-  color: #26364f;
-  text-align: left;
-  background: #fff;
-  border: 1px solid #e5ebf3;
-  border-radius: 8px;
+.rule-switch-item {
+  position: relative;
+  padding: 0 4px;
+  color: #5f6b7a;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  background: transparent;
+  border: 0;
   cursor: pointer;
+  transition: color 0.2s ease;
 }
 
-.rule-list button.selected {
-  color: #ef233c;
-  background: #fff4f5;
-  border-color: #ffc6cf;
+.rule-switch-item:hover {
+  color: #1f2d3d;
 }
 
-.rule-list button b {
-  color: inherit;
-  font-size: 16px;
+.rule-switch-item.active {
+  color: #f5223d;
 }
 
-.rule-list button span {
-  display: flex;
+.rule-switch-item.active::after {
+  position: absolute;
+  right: 4px;
+  bottom: 0;
+  left: 4px;
+  height: 2px;
+  background: #f5223d;
+  content: "";
+}
+
+/* ==============================
+   主体卡片
+   ============================== */
+
+.rule-detail-card {
   min-width: 0;
-  flex-direction: column;
-  gap: 4px;
+  padding: 0 20px 20px;
 }
 
-.rule-list button small {
+/* ==============================
+   标杆头部
+   ============================== */
+
+.rule-detail-header {
+  padding: 20px 0 18px;
+  border-bottom: 1px solid #e7edf5;
+}
+
+.rule-title-area {
+  min-width: 0;
+}
+
+.rule-title-area h2 {
+  margin: 0;
+  color: #1f2d3d;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.rule-description {
+  max-width: 900px;
+  margin: 8px 0 0;
+  color: #41536b;
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.rule-hint {
+  margin: 4px 0 0;
   color: #7b8798;
-}
-
-.decision-note {
-  padding: 14px;
-  margin-top: 14px;
-  background: #fff8e8;
-  border: 1px solid #f7dfac;
-  border-radius: 8px;
-}
-
-.decision-note p {
-  margin: 6px 0 0;
-  color: #76531a;
   font-size: 13px;
   line-height: 1.7;
 }
 
-.rule-panel > header {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
-  justify-content: space-between;
-  padding-bottom: 14px;
-  border-bottom: 1px solid #e5ebf3;
+/* ==============================
+   内容分区
+   ============================== */
+
+.detail-section {
+  padding: 20px 0;
+  border-bottom: 1px solid #edf1f5;
 }
 
-.rule-panel > header small {
-  color: #7b8798;
+.section-heading {
+  margin: 0 0 14px;
+  color: #1f2d3d;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.5;
 }
 
-.rule-panel > header h2 {
-  margin: 4px 0;
-  color: #10203a;
-  font-size: 20px;
-  font-weight: 800;
+/* ==============================
+   普通字段展示
+   ============================== */
+
+.info-list {
+  border-top: 1px solid #edf1f5;
 }
 
-.rule-panel > header p,
-.rule-section p {
-  margin: 0;
-  color: #4e5f78;
+.info-row {
+  display: grid;
+  grid-template-columns:
+    120px
+    minmax(0, 1fr);
+  border-bottom: 1px solid #edf1f5;
+}
+
+.info-row:last-child {
+  border-bottom: 0;
+}
+
+.info-label {
+  padding: 12px 14px;
+  color: #41536b;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.7;
+  background: #f8fafd;
+}
+
+.info-value {
+  min-width: 0;
+  padding: 12px 16px;
+  color: #243247;
+  font-size: 13px;
   line-height: 1.75;
 }
 
-.rule-panel > header p {
-  max-width: 760px;
+.formula-value {
+  font-weight: 500;
 }
 
-.rule-section {
-  padding: 14px;
-  margin-top: 14px;
+/* ==============================
+   边界说明
+   ============================== */
+
+.plain-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
 }
 
-.rule-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  gap: 14px;
+.plain-list li {
+  position: relative;
+  padding-left: 14px;
+  margin-bottom: 5px;
 }
 
-.calculation-chain {
+.plain-list li:last-child {
+  margin-bottom: 0;
+}
+
+.plain-list li::before {
+  position: absolute;
+  top: 10px;
+  left: 1px;
+  width: 4px;
+  height: 4px;
+  background: #8a96a8;
+  border-radius: 50%;
+  content: "";
+}
+
+/* ==============================
+   计算步骤
+   ============================== */
+
+.step-list {
   display: flex;
+  width: 100%;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: stretch;
-  margin-top: 12px;
+  align-items: center;
 }
 
-.calculation-chain .el-icon {
-  align-self: center;
-  color: #a5afbf;
-}
-
-.step-card {
+.step-item {
   display: flex;
-  min-width: min(100%, 180px);
+  min-width: 150px;
   flex: 1;
-  flex-direction: column;
-  gap: 6px;
+  gap: 9px;
+  align-items: center;
+}
+
+.step-number {
+  display: inline-flex;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  align-items: center;
   justify-content: center;
-  padding: 12px;
-  background: #f8fafc;
-  border: 1px solid #e7edf5;
-  border-radius: 8px;
+  color: #41536b;
+  font-size: 12px;
+  font-weight: 700;
+  background: #f2f5f9;
+  border: 1px solid #dfe6f0;
+  border-radius: 50%;
 }
 
-.step-card small,
-.example-grid small,
-.validation-list small {
-  color: #7b8798;
-}
-
-.step-card strong {
-  color: #10203a;
-}
-
-.example-grid,
-.validation-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.example-grid span,
-.validation-list span {
-  display: flex;
+.step-text {
   min-width: 0;
-  flex-direction: column;
-  gap: 5px;
-  padding: 12px;
-  background: #f8fafc;
-  border: 1px solid #edf1f6;
-  border-radius: 8px;
+  color: #243247;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.example-grid strong {
-  color: #ef233c;
+.step-divider {
+  flex: none;
+  color: #a5afbf;
+  font-size: 16px;
 }
 
-@media (width <= 1100px) {
-  .rules-header {
+/* ==============================
+   示例表格
+   ============================== */
+
+.example-table {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/*
+ * ElTable 的表头、边框、行高和 hover
+ * 继续使用项目 base.css 的全局样式。
+ */
+
+/* ==============================
+   最终判定
+   ============================== */
+
+.final-section {
+  display: grid;
+  grid-template-columns:
+    120px
+    minmax(0, 1fr);
+  margin-top: 20px;
+  overflow: hidden;
+  border: 1px solid #dfe6f0;
+  border-radius: 6px;
+}
+
+.final-title {
+  padding: 13px 14px;
+  color: #1f2d3d;
+  font-size: 13px;
+  font-weight: 700;
+  background: #f8fafd;
+}
+
+.final-content {
+  padding: 13px 16px;
+  color: #41536b;
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+/* ==============================
+   响应式
+   ============================== */
+
+@media (width <= 900px) {
+  .step-list {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .rules-header dl,
-  .rules-layout,
-  .rule-grid {
-    grid-template-columns: 1fr;
+  .step-item {
+    width: 100%;
+    min-width: 0;
+    flex: none;
+  }
+
+  .step-divider {
+    display: none;
   }
 }
 
 @media (width <= 640px) {
-  .rules-header dl {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    row-gap: 12px;
+  .rule-switch-card {
+    padding: 0 14px;
   }
 
-  .rules-header dl > div {
-    padding-left: 10px;
+  .rule-switch-list {
+    gap: 20px;
+    overflow-x: auto;
+  }
+
+  .rule-switch-item {
+    flex: none;
+    white-space: nowrap;
+  }
+
+  .rule-detail-card {
+    padding: 0 14px 16px;
+  }
+
+  .info-row,
+  .final-section {
+    grid-template-columns: 1fr;
+  }
+
+  .info-label,
+  .final-title {
+    padding-bottom: 6px;
+  }
+
+  .info-value,
+  .final-content {
+    padding-top: 8px;
   }
 }
 </style>

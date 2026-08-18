@@ -40,7 +40,7 @@ public class BenchmarkRuleController {
             "重新导入激活批次后重新查找上一有效月并生成新审计快照。"),
         new BenchmarkRuleResponse(
             "RATED_BENCHMARK",
-            "额定标杆（导入值）",
+            "额定标杆",
             "benchmark-v2026.1",
             "比较有效电表行分摊后度数合计与适用的额定标杆。",
             "额定标杆总量=当月1日至月末有效日标杆值之和；实际总耗电量>额定标杆总量则超标。",

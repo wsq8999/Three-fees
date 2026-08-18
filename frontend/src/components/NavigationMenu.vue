@@ -46,7 +46,7 @@ const activePath = computed(() => resolveNavigationActivePath(route.path));
       <ElMenuItem index="/reports/history">历史报告</ElMenuItem>
     </ElSubMenu>
     <ElMenuItem index="/benchmark-rules">
-      <ElIcon><DataAnalysis /></ElIcon><span>标杆规则管理</span>
+      <ElIcon><DataAnalysis /></ElIcon><span>标杆规则查看</span>
     </ElMenuItem>
     <ElMenuItem v-if="canManageUsers" index="/users">
       <ElIcon><User /></ElIcon><span>用户管理</span>

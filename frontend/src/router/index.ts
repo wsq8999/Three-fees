@@ -96,7 +96,7 @@ export const router = createRouter({
           path: "benchmark-rules",
           name: "benchmark-rules",
           component: () => import("@/views/rules/BenchmarkRulesView.vue"),
-          meta: { title: "标杆规则管理", requiresAuth: true },
+          meta: { title: "标杆规则查看", requiresAuth: true },
         },
         {
           path: "users",
