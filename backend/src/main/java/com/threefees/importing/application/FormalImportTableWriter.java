@@ -9,8 +9,8 @@ import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -136,7 +136,9 @@ public class FormalImportTableWriter {
   private List<ImportRow> aggregateBillingPointRows(List<ImportRow> rows) {
     var grouped = new LinkedHashMap<String, List<ImportRow>>();
     for (ImportRow row : rows) {
-      grouped.computeIfAbsent(row.billingPointCode(), ignored -> new java.util.ArrayList<>()).add(row);
+      grouped
+          .computeIfAbsent(row.billingPointCode(), ignored -> new java.util.ArrayList<>())
+          .add(row);
     }
     var aggregated = new java.util.ArrayList<ImportRow>();
     for (List<ImportRow> group : grouped.values()) {
@@ -311,7 +313,8 @@ public class FormalImportTableWriter {
             ps.setString(14, value(values, BENCHMARK_DISTRICT));
             ps.setInt(15, intValue(values, YEAR, month.getYear()));
             ps.setInt(16, intValue(values, MONTH, month.getMonthValue()));
-            BigDecimal monthBenchmark = firstDecimal(values, MONTHLY_BENCHMARK, MONTHLY_AVERAGE_BENCHMARK);
+            BigDecimal monthBenchmark =
+                firstDecimal(values, MONTHLY_BENCHMARK, MONTHLY_AVERAGE_BENCHMARK);
             setBigDecimal(ps, 17, monthBenchmark == null ? BigDecimal.ZERO : monthBenchmark);
             for (int day = 1; day <= 31; day++) {
               BigDecimal value = valueDecimal(values, Integer.toString(day));
@@ -321,7 +324,8 @@ public class FormalImportTableWriter {
               setBigDecimal(ps, 17 + day, value);
             }
             BigDecimal calculatedAverage =
-                dayTotal.divide(BigDecimal.valueOf(month.lengthOfMonth()), 6, java.math.RoundingMode.HALF_UP);
+                dayTotal.divide(
+                    BigDecimal.valueOf(month.lengthOfMonth()), 6, java.math.RoundingMode.HALF_UP);
             setBigDecimal(ps, 49, dayTotal);
             setBigDecimal(ps, 50, calculatedAverage);
             ps.setString(51, "PASS");
@@ -334,8 +338,9 @@ public class FormalImportTableWriter {
   }
 
   private String benchmarkSql() {
-    var columns = new StringBuilder(
-        """
+    var columns =
+        new StringBuilder(
+            """
         INSERT INTO benchmark_value
           (public_id, data_period, period_start, period_end, city_code, district_code,
            source_import_job_id, source_row_no, raw_row_json, billing_point_code,
@@ -499,7 +504,8 @@ public class FormalImportTableWriter {
     }
   }
 
-  private void setBigDecimal(PreparedStatement ps, int index, BigDecimal value) throws SQLException {
+  private void setBigDecimal(PreparedStatement ps, int index, BigDecimal value)
+      throws SQLException {
     ps.setBigDecimal(index, value);
   }
 }

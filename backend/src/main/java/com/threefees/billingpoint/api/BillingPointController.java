@@ -41,7 +41,8 @@ public class BillingPointController {
       @RequestParam(required = false) String billingPointStatus,
       @RequestParam(required = false) String auditStatus,
       @RequestParam(required = false) String reportStatus,
-      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String focusPeriod,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])")
+          String focusPeriod,
       @RequestParam(required = false) String focusCityCode,
       @RequestParam(defaultValue = "0") @Min(0) int page,
       @RequestParam(defaultValue = "10") @Min(1) @Max(100) int size,

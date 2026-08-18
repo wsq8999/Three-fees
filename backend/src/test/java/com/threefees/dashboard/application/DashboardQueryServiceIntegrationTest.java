@@ -15,7 +15,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(
     classes = ThreeFeesApplication.class,
-    properties = {"app.bootstrap.enabled=true", "app.bootstrap.initial-password=test-password-123456"})
+    properties = {
+      "app.bootstrap.enabled=true",
+      "app.bootstrap.initial-password=test-password-123456"
+    })
 public class DashboardQueryServiceIntegrationTest {
 
   @Autowired private DashboardQueryService dashboardQueryService;
@@ -75,13 +78,11 @@ public class DashboardQueryServiceIntegrationTest {
     insertAudit("BP-SYSTEM-REPORT", "320100", "2026-07", "OVER_LIMIT", "WAITING");
     insertAudit("BP-IMPORTED-REPORT", "320100", "2026-07", "OVER_LIMIT", "WAITING");
 
-    DashboardSummary before =
-        dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
+    DashboardSummary before = dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
 
     insertReport("BP-SYSTEM-REPORT", "320100", "2026-07", "GENERATED");
     insertReport("BP-IMPORTED-REPORT", "320100", "2026-07", "IMPORTED");
-    DashboardSummary after =
-        dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
+    DashboardSummary after = dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-07");
 
     assertThat(before.pendingReportCount()).isEqualTo(2);
     assertThat(before.finalReportCount()).isZero();
@@ -234,7 +235,8 @@ public class DashboardQueryServiceIntegrationTest {
     return value;
   }
 
-  private record TestUser(String cityCode, String cityName, Set<Role> roles) implements CurrentUser {
+  private record TestUser(String cityCode, String cityName, Set<Role> roles)
+      implements CurrentUser {
     @Override
     public long id() {
       return 1;

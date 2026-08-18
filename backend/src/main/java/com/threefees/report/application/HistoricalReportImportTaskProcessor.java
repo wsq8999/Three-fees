@@ -69,11 +69,7 @@ public class HistoricalReportImportTaskProcessor implements TaskProcessor {
               task.createdBy());
       cityMemoryService.indexHistoricalReport(finalization.reportId());
       cityMemoryService.updateHistoricalImageAnalysis(
-          finalization.reportId(),
-          0,
-          "SKIPPED",
-          "历史报告按原始 Word 文件导入，未执行 AI 图片分析。",
-          null);
+          finalization.reportId(), 0, "SKIPPED", "历史报告按原始 Word 文件导入，未执行 AI 图片分析。", null);
       return result(finalization.reportId());
     } catch (TaskExecutionException exception) {
       historicalService.markFailed(input.id(), exception.code(), task.createdBy());

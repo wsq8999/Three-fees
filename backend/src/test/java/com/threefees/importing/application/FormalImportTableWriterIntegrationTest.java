@@ -16,7 +16,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(
     classes = ThreeFeesApplication.class,
-    properties = {"app.bootstrap.enabled=true", "app.bootstrap.initial-password=test-password-123456"})
+    properties = {
+      "app.bootstrap.enabled=true",
+      "app.bootstrap.initial-password=test-password-123456"
+    })
 class FormalImportTableWriterIntegrationTest {
 
   @Autowired private FormalImportTableWriter writer;
@@ -29,8 +32,22 @@ class FormalImportTableWriterIntegrationTest {
     writer.replace(
         batch,
         List.of(
-            row(2, "320100", "BP-001", "报账点一", null, null, billingPointJson("BP-001", "报账点一", "南京市", "玄武区")),
-            row(3, "320100", "BP-002", "报账点二", null, null, billingPointJson("BP-002", "报账点二", "南京市", "鼓楼区"))));
+            row(
+                2,
+                "320100",
+                "BP-001",
+                "报账点一",
+                null,
+                null,
+                billingPointJson("BP-001", "报账点一", "南京市", "玄武区")),
+            row(
+                3,
+                "320100",
+                "BP-002",
+                "报账点二",
+                null,
+                null,
+                billingPointJson("BP-002", "报账点二", "南京市", "鼓楼区"))));
     writer.replace(
         batch,
         List.of(
@@ -111,13 +128,41 @@ class FormalImportTableWriterIntegrationTest {
     writer.replace(
         paymentBatch,
         List.of(
-            row(2, "320100", "BP-101", "报账点一", "PAY-1", null, paymentJson("BP-101", "报账点一", "PAY-1", "100.00")),
-            row(3, "320100", "BP-102", "报账点二", "PAY-2", null, paymentJson("BP-102", "报账点二", "PAY-2", "200.00"))));
+            row(
+                2,
+                "320100",
+                "BP-101",
+                "报账点一",
+                "PAY-1",
+                null,
+                paymentJson("BP-101", "报账点一", "PAY-1", "100.00")),
+            row(
+                3,
+                "320100",
+                "BP-102",
+                "报账点二",
+                "PAY-2",
+                null,
+                paymentJson("BP-102", "报账点二", "PAY-2", "200.00"))));
     writer.replace(
         meterBatch,
         List.of(
-            row(2, "320100", "BP-101", "报账点一", "PAY-1", "M-1", meterJson("BP-101", "报账点一", "PAY-1", "M-1", "10")),
-            row(3, "320100", "BP-102", "报账点二", "PAY-2", "M-2", meterJson("BP-102", "报账点二", "PAY-2", "M-2", "20"))));
+            row(
+                2,
+                "320100",
+                "BP-101",
+                "报账点一",
+                "PAY-1",
+                "M-1",
+                meterJson("BP-101", "报账点一", "PAY-1", "M-1", "10")),
+            row(
+                3,
+                "320100",
+                "BP-102",
+                "报账点二",
+                "PAY-2",
+                "M-2",
+                meterJson("BP-102", "报账点二", "PAY-2", "M-2", "20"))));
     writer.replace(
         benchmarkBatch,
         List.of(
@@ -127,11 +172,25 @@ class FormalImportTableWriterIntegrationTest {
     writer.replace(
         paymentBatch,
         List.of(
-            row(2, "320100", "BP-101", "报账点一", "PAY-1B", null, paymentJson("BP-101", "报账点一", "PAY-1B", "300.00"))));
+            row(
+                2,
+                "320100",
+                "BP-101",
+                "报账点一",
+                "PAY-1B",
+                null,
+                paymentJson("BP-101", "报账点一", "PAY-1B", "300.00"))));
     writer.replace(
         meterBatch,
         List.of(
-            row(2, "320100", "BP-101", "报账点一", "PAY-1B", "M-1B", meterJson("BP-101", "报账点一", "PAY-1B", "M-1B", "30"))));
+            row(
+                2,
+                "320100",
+                "BP-101",
+                "报账点一",
+                "PAY-1B",
+                "M-1B",
+                meterJson("BP-101", "报账点一", "PAY-1B", "M-1B", "30"))));
     writer.replace(
         benchmarkBatch,
         List.of(
@@ -167,11 +226,25 @@ class FormalImportTableWriterIntegrationTest {
     writer.replace(
         batch(DatasetType.BILLING_POINT, "2026-08", "320100"),
         List.of(
-            row(2, "320100", "BP-SAME", "南京报账点", null, null, billingPointJson("BP-SAME", "南京报账点", "南京市", "玄武区"))));
+            row(
+                2,
+                "320100",
+                "BP-SAME",
+                "南京报账点",
+                null,
+                null,
+                billingPointJson("BP-SAME", "南京报账点", "南京市", "玄武区"))));
     writer.replace(
         batch(DatasetType.BILLING_POINT, "2026-08", "321200"),
         List.of(
-            row(2, "321200", "BP-SAME", "泰州报账点", null, null, billingPointJson("BP-SAME", "泰州报账点", "泰州市", "海陵区"))));
+            row(
+                2,
+                "321200",
+                "BP-SAME",
+                "泰州报账点",
+                null,
+                null,
+                billingPointJson("BP-SAME", "泰州报账点", "泰州市", "海陵区"))));
 
     assertThat(count("billing_point_snapshot", "2026-08", "320100")).isEqualTo(1);
     assertThat(count("billing_point_snapshot", "2026-08", "321200")).isEqualTo(1);
@@ -247,8 +320,7 @@ class FormalImportTableWriterIntegrationTest {
         valuesJson);
   }
 
-  private String billingPointJson(
-      String code, String name, String cityName, String districtName) {
+  private String billingPointJson(String code, String name, String cityName, String districtName) {
     return "{"
         + jsonPair("报账点编码", code)
         + ","
@@ -276,15 +348,16 @@ class FormalImportTableWriterIntegrationTest {
       String resourceCode,
       String resourceName,
       String meterCode) {
-    return billingPointJson(code, name, cityName, districtName).replace(
-        "}",
-        ","
-            + jsonPair("关联资源编码", resourceCode)
-            + ","
-            + jsonPair("关联资源名称", resourceName)
-            + ","
-            + jsonPair("关联电表编码", meterCode)
-            + "}");
+    return billingPointJson(code, name, cityName, districtName)
+        .replace(
+            "}",
+            ","
+                + jsonPair("关联资源编码", resourceCode)
+                + ","
+                + jsonPair("关联资源名称", resourceName)
+                + ","
+                + jsonPair("关联电表编码", meterCode)
+                + "}");
   }
 
   private String paymentJson(String code, String name, String paymentCode, String amount) {

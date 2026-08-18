@@ -53,7 +53,8 @@ public class HistoricalReportService {
   public HistoricalImport submit(
       String billingPointPeriodId, MultipartFile file, String idempotencyKey, CurrentUser actor) {
     if (billingPointPeriodId == null || billingPointPeriodId.isBlank()) {
-      throw new BusinessRuleException("HISTORICAL_REPORT_INPUT_INVALID", "billingPointPeriodId is required");
+      throw new BusinessRuleException(
+          "HISTORICAL_REPORT_INPUT_INVALID", "billingPointPeriodId is required");
     }
     Candidate candidate = candidate(billingPointPeriodId);
     return submit(candidate, billingPointPeriodId, file, idempotencyKey, actor);
@@ -67,8 +68,12 @@ public class HistoricalReportService {
       MultipartFile file,
       String idempotencyKey,
       CurrentUser actor) {
-    if (billingPointCode == null || billingPointCode.isBlank() || period == null || period.isBlank()) {
-      throw new BusinessRuleException("HISTORICAL_REPORT_INPUT_INVALID", "billingPointCode and period are required");
+    if (billingPointCode == null
+        || billingPointCode.isBlank()
+        || period == null
+        || period.isBlank()) {
+      throw new BusinessRuleException(
+          "HISTORICAL_REPORT_INPUT_INVALID", "billingPointCode and period are required");
     }
     Candidate candidate = candidate(billingPointCode.trim(), cityCode, period.trim(), actor);
     String referenceCity = candidate.cityCode() == null ? "" : candidate.cityCode();
@@ -95,7 +100,9 @@ public class HistoricalReportService {
       return prior;
     }
     if (!candidate.eligible()) {
-      throw new BusinessRuleException("HISTORICAL_REPORT_NOT_ELIGIBLE", "Historical report already exists or period is not eligible");
+      throw new BusinessRuleException(
+          "HISTORICAL_REPORT_NOT_ELIGIBLE",
+          "Historical report already exists or period is not eligible");
     }
     String normalizedKey = normalizeIdempotencyKey(idempotencyKey);
     String businessKey = "HISTORY:" + businessReference + ":" + digest(normalizedKey);
@@ -139,6 +146,7 @@ public class HistoricalReportService {
     }
     return find(importId, actor);
   }
+
   private HistoricalImport retryFailedImport(
       String billingPointPeriodId,
       String importId,
@@ -284,8 +292,8 @@ public class HistoricalReportService {
         .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
   }
 
-
-  private Candidate candidate(String billingPointCode, String cityCode, String period, CurrentUser actor) {
+  private Candidate candidate(
+      String billingPointCode, String cityCode, String period, CurrentUser actor) {
     StringBuilder sql =
         new StringBuilder(
             """
@@ -336,6 +344,7 @@ public class HistoricalReportService {
     }
     return actorCity;
   }
+
   private HistoricalImport findBySnapshot(long snapshotId) {
     return jdbcTemplate
         .query(

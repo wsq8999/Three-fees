@@ -44,5 +44,3 @@ public interface ImportBatchRepository {
 
   void markFailed(long id, List<ImportError> errors);
 }
-
-

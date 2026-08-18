@@ -109,16 +109,12 @@ const progressSummary = computed(() => {
 });
 const progressDetail = computed(() => {
   const total = trackedBatches.value.length;
-  if (total === 0) return "正在上传并解析文件";
-  const parts = [
-    `总批次 ${total} 个`,
-    `已完成 ${completedBatches.value.length} 个`,
-    `成功 ${succeededBatches.value.length} 个`,
-  ];
-  if (failedBatches.value.length > 0) parts.push(`失败 ${failedBatches.value.length} 个`);
-  if (totalRows.value > 0) parts.push(`总行数 ${totalRows.value}`);
-  if (totalErrors.value > 0) parts.push(`错误 ${totalErrors.value} 条`);
-  return parts.join("，");
+
+  if (total === 0) {
+    return "正在上传并解析文件";
+  }
+
+  return `总批次 ${total} 个，已完成 ${completedBatches.value.length} 个`;
 });
 const retryableFailedBatches = computed(() =>
   failedBatches.value.filter(
@@ -416,6 +412,7 @@ watch(
         <ElProgress
           :percentage="progressPercentage"
           :status="progressStatus"
+          :show-text="false"
         />
         <p>{{ progressDetail }}</p>
       </section>

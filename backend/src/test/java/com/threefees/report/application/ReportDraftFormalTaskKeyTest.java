@@ -19,11 +19,8 @@ class ReportDraftFormalTaskKeyTest {
 
   @Test
   void treatsOnlySingleSectionHistoricalHtmlAsACompleteDocument() {
-    var systemReport =
-        new ReportSections(
-            "最终确认报告", "<p>情况说明</p>", "<p>排查分析</p>", "<p>整改小结</p>");
-    var importedReport =
-        new ReportSections("历史报告", "<article>完整原始报告</article>", "", "");
+    var systemReport = new ReportSections("最终确认报告", "<p>情况说明</p>", "<p>排查分析</p>", "<p>整改小结</p>");
+    var importedReport = new ReportSections("历史报告", "<article>完整原始报告</article>", "", "");
 
     assertThat(FormalReportTaskProcessor.isFullDocumentHtml(systemReport)).isFalse();
     assertThat(FormalReportTaskProcessor.isFullDocumentHtml(importedReport)).isTrue();

@@ -19,17 +19,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import javax.xml.parsers.DocumentBuilderFactory;
-import org.apache.poi.extractor.ExtractorFactory;
-import org.apache.poi.extractor.POITextExtractor;
-import org.apache.poi.hwpf.model.PicturesTable;
-import org.apache.poi.hwpf.usermodel.Picture;
-import org.apache.poi.hwpf.usermodel.CharacterRun;
-import org.apache.poi.hwpf.usermodel.Paragraph;
-import org.apache.poi.hwpf.usermodel.Range;
-import org.apache.poi.hwpf.usermodel.Table;
-import org.apache.poi.hwpf.usermodel.TableCell;
-import org.apache.poi.hwpf.usermodel.TableIterator;
-import org.apache.poi.hwpf.usermodel.TableRow;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDPageContentStream;
@@ -37,9 +26,20 @@ import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
+import org.apache.poi.extractor.ExtractorFactory;
+import org.apache.poi.extractor.POITextExtractor;
 import org.apache.poi.hwpf.HWPFDocument;
 import org.apache.poi.hwpf.extractor.Word6Extractor;
 import org.apache.poi.hwpf.extractor.WordExtractor;
+import org.apache.poi.hwpf.model.PicturesTable;
+import org.apache.poi.hwpf.usermodel.CharacterRun;
+import org.apache.poi.hwpf.usermodel.Paragraph;
+import org.apache.poi.hwpf.usermodel.Picture;
+import org.apache.poi.hwpf.usermodel.Range;
+import org.apache.poi.hwpf.usermodel.Table;
+import org.apache.poi.hwpf.usermodel.TableCell;
+import org.apache.poi.hwpf.usermodel.TableIterator;
+import org.apache.poi.hwpf.usermodel.TableRow;
 import org.apache.poi.util.Units;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
 import org.apache.poi.xwpf.usermodel.BodyElementType;
@@ -147,8 +147,8 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void appendHtmlNode(
-      XWPFDocument document, Node node, Map<String, ReportImage> imagesById) throws Exception {
+  private void appendHtmlNode(XWPFDocument document, Node node, Map<String, ReportImage> imagesById)
+      throws Exception {
     if (node.getNodeType() == Node.TEXT_NODE) {
       String text = cleanWordText(node.getTextContent());
       if (!text.isBlank()) {
@@ -202,7 +202,8 @@ public class ReportDocumentGenerator {
         row.addNewTableCell();
       }
       for (int cellIndex = 0; cellIndex < Math.max(cells.getLength(), 1); cellIndex++) {
-        row.getCell(cellIndex).setText(cellIndex < cells.getLength() ? cells.item(cellIndex).getTextContent() : "");
+        row.getCell(cellIndex)
+            .setText(cellIndex < cells.getLength() ? cells.item(cellIndex).getTextContent() : "");
       }
     }
   }
@@ -236,11 +237,7 @@ public class ReportDocumentGenerator {
     paragraph
         .createRun()
         .addPicture(
-            new ByteArrayInputStream(bytes),
-            type,
-            imageName,
-            Units.toEMU(420),
-            Units.toEMU(260));
+            new ByteArrayInputStream(bytes), type, imageName, Units.toEMU(420), Units.toEMU(260));
   }
 
   public String extractWordText(byte[] bytes, String originalName) {
@@ -352,7 +349,8 @@ public class ReportDocumentGenerator {
         wroteContent |= appendBufferedParagraph(html, text);
         XWPFPictureData data = picture.getPictureData();
         if (data != null) {
-          appendImage(html, data.getData(), data.getFileName(), data.getPackagePart().getContentType());
+          appendImage(
+              html, data.getData(), data.getFileName(), data.getPackagePart().getContentType());
           wroteContent = true;
         }
       }
@@ -371,7 +369,8 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void appendDocParagraph(StringBuilder html, PicturesTable picturesTable, Paragraph paragraph) {
+  private void appendDocParagraph(
+      StringBuilder html, PicturesTable picturesTable, Paragraph paragraph) {
     StringBuilder text = new StringBuilder();
     boolean wroteContent = false;
     for (int runIndex = 0; runIndex < paragraph.numCharacterRuns(); runIndex++) {
@@ -380,7 +379,8 @@ public class ReportDocumentGenerator {
         wroteContent |= appendBufferedParagraph(html, text);
         Picture picture = picturesTable.extractPicture(run, false);
         if (picture != null) {
-          appendImage(html, picture.getContent(), picture.suggestFullFileName(), picture.getMimeType());
+          appendImage(
+              html, picture.getContent(), picture.suggestFullFileName(), picture.getMimeType());
           wroteContent = true;
         }
       } else {
@@ -535,7 +535,8 @@ public class ReportDocumentGenerator {
     if (extractedAnyText) {
       return "";
     }
-    IllegalArgumentException exception = new IllegalArgumentException("Word file could not be read");
+    IllegalArgumentException exception =
+        new IllegalArgumentException("Word file could not be read");
     failures.forEach(exception::addSuppressed);
     throw exception;
   }
@@ -601,10 +602,7 @@ public class ReportDocumentGenerator {
   }
 
   private void addSection(
-      XWPFDocument document,
-      String heading,
-      String content,
-      Map<String, ReportImage> imagesById)
+      XWPFDocument document, String heading, String content, Map<String, ReportImage> imagesById)
       throws Exception {
     var headingParagraph = document.createParagraph();
     var headingRun = headingParagraph.createRun();

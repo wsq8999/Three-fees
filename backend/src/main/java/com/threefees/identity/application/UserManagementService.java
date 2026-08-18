@@ -64,7 +64,9 @@ public class UserManagementService {
     operationLogService.userOperationSucceeded(id, updated.username(), OperationAction.USER_UPDATE);
     if (existing.enabled() != enabled) {
       operationLogService.userOperationSucceeded(
-          id, updated.username(), enabled ? OperationAction.USER_ENABLE : OperationAction.USER_DISABLE);
+          id,
+          updated.username(),
+          enabled ? OperationAction.USER_ENABLE : OperationAction.USER_DISABLE);
     }
     return updated;
   }

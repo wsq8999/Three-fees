@@ -42,7 +42,8 @@ class ReportDocumentGeneratorTest {
     var generator = new ReportDocumentGenerator("");
     var sections = new ReportSections("历史报告", "情况正文", "排查正文", "整改正文");
 
-    var text = generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
+    var text =
+        generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
 
     assertThat(text).contains("历史报告", "情况正文", "排查正文", "整改正文");
   }
@@ -68,7 +69,8 @@ class ReportDocumentGeneratorTest {
     var generated =
         generator.generate(
             sections,
-            List.of(new ReportImage(imageId, "evidence.png", "image/png", imageBytes.toByteArray())));
+            List.of(
+                new ReportImage(imageId, "evidence.png", "image/png", imageBytes.toByteArray())));
 
     try (var word = new XWPFDocument(new ByteArrayInputStream(generated.word()));
         var extractor = new XWPFWordExtractor(word)) {
@@ -84,7 +86,8 @@ class ReportDocumentGeneratorTest {
     var generator = new ReportDocumentGenerator("");
     var sections = new ReportSections("历史报告", "情况\u0001正文", "排查正文", "整改正文");
 
-    var text = generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
+    var text =
+        generator.extractWordText(generator.generate(sections, List.of()).word(), "历史报告.docx");
     var pdf = generator.generateHistoricalPdf("历史报告", text);
 
     try (var document = Loader.loadPDF(pdf)) {

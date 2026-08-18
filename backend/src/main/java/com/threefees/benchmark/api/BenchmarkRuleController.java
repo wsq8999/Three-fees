@@ -48,8 +48,7 @@ public class BenchmarkRuleController {
             List.of(
                 new RuleExample("实际总电量 A", "12,850.36 kWh"),
                 new RuleExample("额定标杆 D", "11,500.00 kWh"),
-                new RuleExample("偏差率", "11.74%")
-            ),
+                new RuleExample("偏差率", "11.74%")),
             List.of("日标杆不完整时不适用", "阈值为0且实际为0时正常", "阈值为0且实际大于0时超标且不显示无穷比例"),
             "报告始终展示生成时使用的规则版本，不随后续规则说明变化而回写。"));
   }

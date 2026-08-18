@@ -40,20 +40,20 @@ public class CityMemoryService {
     }
     long memoryId =
         upsertMemory(
-        source.cityCode(),
-        source.billingPointCode(),
-        source.overLimitType(),
-        source.period(),
-        source.maxRatio(),
-        source.initialReason(),
-        source.userCorrection(),
-        source.finalReason(),
-        source.analysis(),
-        source.rectification(),
-        "CONFIRMED_REPORT",
-        source.reportId(),
-        source.messageId(),
-        actor);
+            source.cityCode(),
+            source.billingPointCode(),
+            source.overLimitType(),
+            source.period(),
+            source.maxRatio(),
+            source.initialReason(),
+            source.userCorrection(),
+            source.finalReason(),
+            source.analysis(),
+            source.rectification(),
+            "CONFIRMED_REPORT",
+            source.reportId(),
+            source.messageId(),
+            actor);
     deactivateDraftCorrections(draftPublicId, memoryId);
     rebuildPointProfile(source.cityCode(), source.billingPointCode());
   }
@@ -99,20 +99,20 @@ public class CityMemoryService {
                 () -> new IllegalStateException("Report draft does not exist: " + draftId));
     long memoryId =
         upsertMemory(
-        source.cityCode(),
-        source.billingPointCode(),
-        source.overLimitType(),
-        source.period(),
-        source.maxRatio(),
-        initialReason,
-        userCorrection,
-        finalReason,
-        evidenceSummary,
-        rectificationSummary,
-        "USER_CONFIRMED",
-        null,
-        messageId,
-        actor);
+            source.cityCode(),
+            source.billingPointCode(),
+            source.overLimitType(),
+            source.period(),
+            source.maxRatio(),
+            initialReason,
+            userCorrection,
+            finalReason,
+            evidenceSummary,
+            rectificationSummary,
+            "USER_CONFIRMED",
+            null,
+            messageId,
+            actor);
     supersedeOtherDraftCorrections(draftId, messageId, memoryId);
     rebuildPointProfile(source.cityCode(), source.billingPointCode());
   }
@@ -152,8 +152,9 @@ public class CityMemoryService {
     String ratioBucket = ratioBucket(query.maxRatio());
     List<String> currentEvidenceTags = deriveEvidenceTags(query.evidenceText());
     List<MemoryMatch> matches =
-        jdbcTemplate.query(
-            """
+        jdbcTemplate
+            .query(
+                """
             SELECT public_id, city_code, billing_point_code, over_limit_type,
                    final_reason, user_correction, evidence_summary, trust_level,
                    confirm_count, evidence_tags_json,
@@ -170,36 +171,36 @@ public class CityMemoryService {
              ORDER BY relevance_score DESC, confirmed_at DESC, id DESC
              LIMIT ?
             """,
-            (rs, row) ->
-                new MemoryMatch(
-                    rs.getString("public_id"),
-                    rs.getString("city_code"),
-                    rs.getString("billing_point_code"),
-                    rs.getString("over_limit_type"),
-                    rs.getInt("relevance_score")
-                        + evidenceTagScore(
-                            rs.getString("evidence_tags_json"), currentEvidenceTags),
-                    compact(
-                        "可信度="
-                            + rs.getString("trust_level")
-                            + "；确认次数="
-                            + rs.getInt("confirm_count")
-                            + "；最终原因="
-                            + value(rs.getString("final_reason"))
-                            + "；用户纠正="
-                            + value(rs.getString("user_correction"))
-                            + "；证据="
-                            + value(rs.getString("evidence_summary")),
-                        2400)),
-            query.billingPointCode(),
-            query.overLimitType(),
-            query.overLimitType(),
-            season,
-            season,
-            ratioBucket,
-            ratioBucket,
-            query.cityCode(),
-            candidateLimit)
+                (rs, row) ->
+                    new MemoryMatch(
+                        rs.getString("public_id"),
+                        rs.getString("city_code"),
+                        rs.getString("billing_point_code"),
+                        rs.getString("over_limit_type"),
+                        rs.getInt("relevance_score")
+                            + evidenceTagScore(
+                                rs.getString("evidence_tags_json"), currentEvidenceTags),
+                        compact(
+                            "可信度="
+                                + rs.getString("trust_level")
+                                + "；确认次数="
+                                + rs.getInt("confirm_count")
+                                + "；最终原因="
+                                + value(rs.getString("final_reason"))
+                                + "；用户纠正="
+                                + value(rs.getString("user_correction"))
+                                + "；证据="
+                                + value(rs.getString("evidence_summary")),
+                            2400)),
+                query.billingPointCode(),
+                query.overLimitType(),
+                query.overLimitType(),
+                season,
+                season,
+                ratioBucket,
+                ratioBucket,
+                query.cityCode(),
+                candidateLimit)
             .stream()
             .sorted(
                 java.util.Comparator.comparingInt(MemoryMatch::score)
@@ -276,12 +277,7 @@ public class CityMemoryService {
     String ratioBucket = ratioBucket(maxRatio);
     String fingerprint =
         fingerprint(
-            cityCode,
-            billingPointCode,
-            overLimitType,
-            season,
-            ratioBucket,
-            safeFinalReason);
+            cityCode, billingPointCode, overLimitType, season, ratioBucket, safeFinalReason);
     ExistingMemory existing =
         findExistingMemory(cityCode, billingPointCode, safeFinalReason, fingerprint);
     String tagsJson = json(deriveEvidenceTags(safeFinalReason + " " + value(evidenceSummary)));
@@ -432,8 +428,7 @@ public class CityMemoryService {
              LIMIT 20
             """,
             (rs, row) ->
-                new ReasonAggregate(
-                    rs.getString("final_reason"), rs.getInt("confirmations")),
+                new ReasonAggregate(rs.getString("final_reason"), rs.getInt("confirmations")),
             cityCode,
             billingPointCode);
     Integer activeMemoryCount =
@@ -643,7 +638,8 @@ public class CityMemoryService {
   private String fingerprint(String... values) {
     String joined = String.join("|", java.util.Arrays.stream(values).map(this::normalize).toList());
     try {
-      byte[] digest = MessageDigest.getInstance("SHA-256").digest(joined.getBytes(StandardCharsets.UTF_8));
+      byte[] digest =
+          MessageDigest.getInstance("SHA-256").digest(joined.getBytes(StandardCharsets.UTF_8));
       return java.util.HexFormat.of().formatHex(digest);
     } catch (NoSuchAlgorithmException exception) {
       throw new IllegalStateException("SHA-256 is unavailable", exception);

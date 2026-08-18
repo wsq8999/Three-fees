@@ -81,7 +81,9 @@ public class StoredFileService {
   }
 
   public StoredFile find(String publicId) {
-    return repository.findByPublicId(publicId).orElseThrow(() -> new ResourceNotFoundException("文件"));
+    return repository
+        .findByPublicId(publicId)
+        .orElseThrow(() -> new ResourceNotFoundException("文件"));
   }
 
   public StoredFile find(long id) {
@@ -149,7 +151,8 @@ public class StoredFileService {
       String actor,
       boolean validate)
       throws IOException {
-    return storeStream(input, originalName, extension, purpose, actor, validate, mediaType(extension));
+    return storeStream(
+        input, originalName, extension, purpose, actor, validate, mediaType(extension));
   }
 
   private StoredFile storeStream(

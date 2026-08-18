@@ -88,7 +88,9 @@ public class ImportBatchController {
     ImportBatch first = batches.getFirst();
     return ResponseEntity.accepted()
         .location(URI.create("/api/v1/tasks/" + first.taskPublicId()))
-        .body(new CreateImportBatchResponse(batches.stream().map(ImportBatchResponse::from).toList()));
+        .body(
+            new CreateImportBatchResponse(
+                batches.stream().map(ImportBatchResponse::from).toList()));
   }
 
   private DatasetType parseDatasetType(String value) {

@@ -163,7 +163,7 @@ public class ExportTaskProcessor implements TaskProcessor {
           jdbcTemplate.queryForList(
               """
               SELECT values_json
-                FROM 
+                FROM
               """
                   + tableName
                   + """

@@ -34,7 +34,9 @@ public class DashboardQueryService {
     List<String> periods = availablePeriods(cityScope);
     String latestPeriod = periods.isEmpty() ? null : periods.getFirst();
     String period =
-        requestedPeriod != null && periods.contains(requestedPeriod) ? requestedPeriod : latestPeriod;
+        requestedPeriod != null && periods.contains(requestedPeriod)
+            ? requestedPeriod
+            : latestPeriod;
     int visibleCityCount = actor.roles().contains(Role.SUPER_ADMIN) ? cityQueryService.count() : 1;
     if (period == null) {
       return emptySummary(visibleCityCount, periods);
@@ -238,14 +240,18 @@ public class DashboardQueryService {
     var args = new ArrayList<>();
     args.add(period);
     appendCityScope(sql, args, cityScope, "b");
-    LocalDateTime value = jdbcTemplate.queryForObject(sql.toString(), LocalDateTime.class, args.toArray());
+    LocalDateTime value =
+        jdbcTemplate.queryForObject(sql.toString(), LocalDateTime.class, args.toArray());
     return value == null ? null : value.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME);
   }
 
   private List<DashboardSummary.DatasetImportSummary> importSummaries(
       String period, String cityScope) {
     return DATASET_TYPES.stream()
-        .map(type -> new DashboardSummary.DatasetImportSummary(type, activeBatch(type, period, cityScope)))
+        .map(
+            type ->
+                new DashboardSummary.DatasetImportSummary(
+                    type, activeBatch(type, period, cityScope)))
         .toList();
   }
 
@@ -264,14 +270,13 @@ public class DashboardQueryService {
     args.add(period);
     appendCityScope(sql, args, cityScope, "b");
     sql.append(" ORDER BY b.completed_at DESC, b.id DESC LIMIT 1");
-    return jdbcTemplate
-        .query(sql.toString(), this::mapImportBatch, args.toArray())
-        .stream()
+    return jdbcTemplate.query(sql.toString(), this::mapImportBatch, args.toArray()).stream()
         .findFirst()
         .orElse(null);
   }
 
-  private List<DashboardSummary.NameCount> districtOverLimitCounts(String period, String cityScope) {
+  private List<DashboardSummary.NameCount> districtOverLimitCounts(
+      String period, String cityScope) {
     var sql =
         new StringBuilder(
             """
@@ -315,7 +320,9 @@ public class DashboardQueryService {
     sql.append(" GROUP BY name ORDER BY total DESC, name ASC LIMIT 8");
     return jdbcTemplate.query(
         sql.toString(),
-        (rs, row) -> new DashboardSummary.NameCount(overLimitTypeLabel(rs.getString("name")), rs.getLong("total")),
+        (rs, row) ->
+            new DashboardSummary.NameCount(
+                overLimitTypeLabel(rs.getString("name")), rs.getLong("total")),
         args.toArray());
   }
 
@@ -355,7 +362,8 @@ public class DashboardQueryService {
     String code = rs.getString("billing_point_code");
     String name = rs.getString("billing_point_name");
     BigDecimal ratio = rs.getBigDecimal("max_ratio");
-    String ratioText = ratio == null ? "—" : ratio.multiply(BigDecimal.valueOf(100)).stripTrailingZeros() + "%";
+    String ratioText =
+        ratio == null ? "—" : ratio.multiply(BigDecimal.valueOf(100)).stripTrailingZeros() + "%";
     return new DashboardSummary.PendingReportTask(
         rs.getString("public_id"),
         rs.getString("public_id"),

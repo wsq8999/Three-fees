@@ -118,11 +118,7 @@ class AuditCalculatorTest {
   void historicalDailyMetricsUsePaymentDaysAndDoNotReduceThresholdWhenRatedRatioIsBelowOne() {
     var reference =
         new AuditCalculationInput.ReferencePeriod(
-            YearMonth.of(2025, 6),
-            true,
-            new BigDecimal("300"),
-            10,
-            new BigDecimal("400"));
+            YearMonth.of(2025, 6), true, new BigDecimal("300"), 10, new BigDecimal("400"));
     var result =
         calculator.calculate(
             new AuditCalculationInput(

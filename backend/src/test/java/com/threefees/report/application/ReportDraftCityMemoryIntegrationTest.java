@@ -18,8 +18,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-@SpringBootTest(
-    properties = {"three-fees.process-role=api", "app.bootstrap.enabled=false"})
+@SpringBootTest(properties = {"three-fees.process-role=api", "app.bootstrap.enabled=false"})
 class ReportDraftCityMemoryIntegrationTest {
 
   @Autowired private JdbcTemplate jdbcTemplate;
@@ -33,10 +32,10 @@ class ReportDraftCityMemoryIntegrationTest {
         "DELETE FROM ai_billing_point_memory_profile WHERE city_code IN ('320100', '320500')");
     jdbcTemplate.update(
         "DELETE FROM report_draft_version WHERE draft_id IN (SELECT id FROM report_draft WHERE created_by='city-memory-test')");
-    jdbcTemplate.update(
-        "DELETE FROM report_draft WHERE created_by='city-memory-test'");
+    jdbcTemplate.update("DELETE FROM report_draft WHERE created_by='city-memory-test'");
     jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code='MEMORY-POINT-001'");
-    jdbcTemplate.update("DELETE FROM billing_point_snapshot WHERE billing_point_code='MEMORY-POINT-001'");
+    jdbcTemplate.update(
+        "DELETE FROM billing_point_snapshot WHERE billing_point_code='MEMORY-POINT-001'");
     jdbcTemplate.update("DELETE FROM import_job WHERE created_by='city-memory-test'");
     jdbcTemplate.update("DELETE FROM stored_file WHERE created_by='city-memory-test'");
   }
@@ -173,7 +172,11 @@ class ReportDraftCityMemoryIntegrationTest {
     var matches =
         cityMemoryService.findRelevantMemories(
             new MemoryQuery(
-                "320100", "MEMORY-POINT-001", "ONLY_MOM", "2026-07", new java.math.BigDecimal("18.5")),
+                "320100",
+                "MEMORY-POINT-001",
+                "ONLY_MOM",
+                "2026-07",
+                new java.math.BigDecimal("18.5")),
             5);
 
     assertThat(memoryCount).isEqualTo(1);
@@ -220,26 +223,25 @@ class ReportDraftCityMemoryIntegrationTest {
 
     var reordered =
         service.reorderImages(
-            draft.publicId(), List.of(imageIds.get(1), imageIds.get(0)), draft.entityVersion(), actor);
+            draft.publicId(),
+            List.of(imageIds.get(1), imageIds.get(0)),
+            draft.entityVersion(),
+            actor);
 
-    assertThat(reordered.currentImageFileIds())
-        .containsExactly(imageIds.get(1), imageIds.get(0));
+    assertThat(reordered.currentImageFileIds()).containsExactly(imageIds.get(1), imageIds.get(0));
     assertThat(imageSortNumbers(draft.id())).containsExactly(0, 1);
     assertThat(imageAnalysisJson(draft.id()).get(0)).contains("IMG-1");
     assertThat(imageAnalysisJson(draft.id()).get(1)).contains("IMG-2");
 
     var remaining =
-        service.removeImage(
-            draft.publicId(), imageIds.get(1), reordered.entityVersion(), actor);
+        service.removeImage(draft.publicId(), imageIds.get(1), reordered.entityVersion(), actor);
 
     assertThat(remaining.currentImageFileIds()).containsExactly(imageIds.get(0));
     assertThat(remaining.sections().analysis())
         .contains(imageIds.get(0))
         .doesNotContain(imageIds.get(1));
     assertThat(imageSortNumbers(draft.id())).containsExactly(0);
-    assertThat(imageAnalysisJson(draft.id()).getFirst())
-        .contains("IMG-1")
-        .doesNotContain("IMG-2");
+    assertThat(imageAnalysisJson(draft.id()).getFirst()).contains("IMG-1").doesNotContain("IMG-2");
   }
 
   private void insertMemory(String cityCode, String reason) {

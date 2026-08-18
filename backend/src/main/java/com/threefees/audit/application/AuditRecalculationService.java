@@ -266,7 +266,8 @@ public class AuditRecalculationService {
 
   private BigDecimal loadBenchmarkTotal(
       YearMonth period, String cityCode, String billingPointCode) {
-    return jdbcTemplate.query(
+    return jdbcTemplate
+        .query(
             """
             SELECT calculated_day_total
               FROM benchmark_value
@@ -290,12 +291,12 @@ public class AuditRecalculationService {
     AuditCalculationResult result = evidence.result();
     String reportStatus =
         result.status().name().equals("OVER_LIMIT")
-            ? existingReport(snapshot.billingPointCode(), period, cityCode) ? "GENERATED" : "WAITING"
+            ? existingReport(snapshot.billingPointCode(), period, cityCode)
+                ? "GENERATED"
+                : "WAITING"
             : "NA";
     String paymentEligibilityReason =
-        current.hasPayments()
-            ? current.paymentEligible() ? "全部缴费明细审核通过" : "存在未审核通过的缴费明细"
-            : "无缴费明细";
+        current.hasPayments() ? current.paymentEligible() ? "全部缴费明细审核通过" : "存在未审核通过的缴费明细" : "无缴费明细";
     int updated =
         jdbcTemplate.update(
             """

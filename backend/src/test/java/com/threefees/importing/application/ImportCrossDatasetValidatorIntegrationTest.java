@@ -18,7 +18,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(
     classes = ThreeFeesApplication.class,
-    properties = {"app.bootstrap.enabled=true", "app.bootstrap.initial-password=test-password-123456"})
+    properties = {
+      "app.bootstrap.enabled=true",
+      "app.bootstrap.initial-password=test-password-123456"
+    })
 class ImportCrossDatasetValidatorIntegrationTest {
 
   @Autowired private ImportCrossDatasetValidator validator;

@@ -47,11 +47,9 @@ public class BillingPointQueryService {
   @Transactional(readOnly = true)
   public PageResult findPage(BillingPointFilter filter, int page, int size, CurrentUser actor) {
     String cityScope = cityScope(actor, filter.cityCode());
-    String period =
-        filter.period() == null || filter.period().isBlank()
-            ? null
-            : filter.period();
-    List<BillingPointSummary> all = loadSummaries(period, cityScope, filter.focusPeriod(), filter.focusCityCode());
+    String period = filter.period() == null || filter.period().isBlank() ? null : filter.period();
+    List<BillingPointSummary> all =
+        loadSummaries(period, cityScope, filter.focusPeriod(), filter.focusCityCode());
     Predicate<BillingPointSummary> predicate = filters(filter);
     List<BillingPointSummary> filtered = all.stream().filter(predicate).toList();
     int from = Math.min(Math.multiplyExact(page, size), filtered.size());
@@ -455,7 +453,9 @@ public class BillingPointQueryService {
       String formula) {
     var node = objectMapper.createObjectNode();
     String status =
-        "OVER_LIMIT".equals(result) ? "OVER_LIMIT" : "NORMAL".equals(result) ? "NORMAL" : "NOT_APPLICABLE";
+        "OVER_LIMIT".equals(result)
+            ? "OVER_LIMIT"
+            : "NORMAL".equals(result) ? "NORMAL" : "NOT_APPLICABLE";
     node.put("key", key);
     node.put("label", label);
     node.put("status", status);

@@ -48,8 +48,7 @@ public class ReportDraftService {
   private static final Logger LOGGER = LoggerFactory.getLogger(ReportDraftService.class);
   private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
   private static final Pattern INLINE_FIGURE =
-      Pattern.compile(
-          "(?is)<figure\\b[^>]*data-file-id=[\"']([^\"']+)[\"'][^>]*>.*?</figure>");
+      Pattern.compile("(?is)<figure\\b[^>]*data-file-id=[\"']([^\"']+)[\"'][^>]*>.*?</figure>");
   private static final Pattern HTML_ELEMENT = Pattern.compile("(?is)<[a-z][^>]*>");
 
   private final JdbcTemplate jdbcTemplate;
@@ -531,10 +530,8 @@ public class ReportDraftService {
     String quotedId = Pattern.quote(imageFileId);
     return content
         .replaceAll(
-            "(?is)<figure\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>.*?</figure>",
-            "")
-        .replaceAll(
-            "(?is)<img\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>", "")
+            "(?is)<figure\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>.*?</figure>", "")
+        .replaceAll("(?is)<img\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>", "")
         .trim();
   }
 
@@ -602,10 +599,7 @@ public class ReportDraftService {
       return taskRepository.create(
           TaskType.FORMAL_REPORT,
           businessKey,
-          writeJson(
-              Map.of(
-                  "draftId", publicId,
-                  "contentVersion", draft.currentVersion())),
+          writeJson(Map.of("draftId", publicId, "contentVersion", draft.currentVersion())),
           actor.username(),
           3);
     } catch (DuplicateKeyException exception) {
@@ -701,12 +695,10 @@ public class ReportDraftService {
     boolean needsCityMemory = needsHistoricalCases || "CORRECTION".equals(intent);
     var samePoint = new java.util.ArrayList<Reference>();
     if (needsHistoricalCases) {
-      var profile =
-          cityMemoryService.findPointProfile(draft.cityCode(), draft.billingPointCode());
+      var profile = cityMemoryService.findPointProfile(draft.cityCode(), draft.billingPointCode());
       if (profile != null) {
         samePoint.add(
-            new Reference(
-                "PROFILE-" + profile.publicId(), profile.summary(), profile.cityCode()));
+            new Reference("PROFILE-" + profile.publicId(), profile.summary(), profile.cityCode()));
       }
       samePoint.addAll(
           reportReferences(
@@ -779,8 +771,7 @@ public class ReportDraftService {
         .stream()
         .map(
             memory ->
-                new Reference(
-                    "MEM-" + memory.publicId(), memory.summary(), memory.cityCode()))
+                new Reference("MEM-" + memory.publicId(), memory.summary(), memory.cityCode()))
         .toList();
   }
 
@@ -829,8 +820,7 @@ public class ReportDraftService {
             .filter(java.util.Objects::nonNull)
             .anyMatch(cityCode -> !expectedCityCode.equals(cityCode));
     if (crossCity) {
-      throw new AiServiceException(
-          "AI_CONTEXT_CITY_SCOPE_VIOLATION", "检测到跨城市记忆，已停止模型调用", false);
+      throw new AiServiceException("AI_CONTEXT_CITY_SCOPE_VIOLATION", "检测到跨城市记忆，已停止模型调用", false);
     }
   }
 
@@ -1053,8 +1043,7 @@ public class ReportDraftService {
         analysis.limitation());
   }
 
-  private ReportSections preserveInlineFigures(
-      ReportSections original, ReportSections generated) {
+  private ReportSections preserveInlineFigures(ReportSections original, ReportSections generated) {
     return new ReportSections(
         generated.title(),
         preserveInlineFigures(original.situation(), generated.situation()),
@@ -1076,9 +1065,7 @@ public class ReportDraftService {
     if (figures.isEmpty()) return merged;
     if (!HTML_ELEMENT.matcher(merged).find()) {
       merged =
-          "<div>"
-              + htmlEscape(merged).replace("\r\n", "<br />").replace("\n", "<br />")
-              + "</div>";
+          "<div>" + htmlEscape(merged).replace("\r\n", "<br />").replace("\n", "<br />") + "</div>";
     }
     return merged + String.join("", figures);
   }

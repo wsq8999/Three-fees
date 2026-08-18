@@ -208,7 +208,6 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
         .findFirst();
   }
 
-
   @Override
   public void markProcessing(long id) {
     jdbcTemplate.update(
@@ -348,5 +347,4 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
       throw new IllegalStateException("Persisted import job errors are invalid", exception);
     }
   }
-
 }

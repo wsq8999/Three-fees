@@ -109,9 +109,7 @@ public class AuditReportController {
       @RequestParam(required = false) String billingPointPeriodId,
       @RequestParam(required = false) String billingPointCode,
       @RequestParam(required = false) String cityCode,
-      @RequestParam(required = false)
-          @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])")
-          String period,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
       @RequestParam MultipartFile file,
       @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
       @AuthenticationPrincipal CurrentUser actor) {

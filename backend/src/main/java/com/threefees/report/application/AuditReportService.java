@@ -669,6 +669,7 @@ public class AuditReportService {
                 resultSet.getBigDecimal("max_ratio")),
         args.toArray());
   }
+
   @Transactional
   public FinalizationResult finalizeHistoricalReport(
       long historicalImportId,
@@ -971,6 +972,7 @@ public class AuditReportService {
 
   public record HistoricalPeriodOption(
       String billingPointPeriodId, String period, String overLimitType, BigDecimal maxRatio) {}
+
   public record FileAccess(
       com.threefees.file.domain.StoredFile file,
       org.springframework.core.io.InputStreamResource resource) {}
