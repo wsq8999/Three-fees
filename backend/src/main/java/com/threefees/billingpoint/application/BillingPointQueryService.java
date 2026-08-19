@@ -48,13 +48,17 @@ public class BillingPointQueryService {
   public PageResult findPage(BillingPointFilter filter, int page, int size, CurrentUser actor) {
     String cityScope = cityScope(actor, filter.cityCode());
     String period = filter.period() == null || filter.period().isBlank() ? null : filter.period();
+
     List<BillingPointSummary> all =
         loadSummaries(period, cityScope, filter.focusPeriod(), filter.focusCityCode());
+
     Predicate<BillingPointSummary> predicate = filters(filter);
     List<BillingPointSummary> filtered = all.stream().filter(predicate).toList();
+
     int from = Math.min(Math.multiplyExact(page, size), filtered.size());
     int to = Math.min(from + size, filtered.size());
     int totalPages = filtered.isEmpty() ? 0 : (filtered.size() + size - 1) / size;
+
     return new PageResult(
         filtered.subList(from, to),
         page,
@@ -68,17 +72,22 @@ public class BillingPointQueryService {
   public BillingPointDetail findDetail(String publicId, CurrentUser actor) {
     SnapshotRow snapshot = findSnapshot(publicId);
     requireCityScope(actor, snapshot.cityCode());
+
     BillingPointSummary summary =
         loadSummaries(snapshot.period(), snapshot.cityCode(), null, null).stream()
             .filter(item -> item.id().equals(publicId))
             .findFirst()
             .orElseThrow(() -> new ResourceNotFoundException("报账点账期"));
+
     List<RecordDetail> payments = records(DatasetType.PAYMENT, snapshot);
     List<RecordDetail> meters = records(DatasetType.METER_READING, snapshot);
     List<RecordDetail> benchmarks = records(DatasetType.BENCHMARK, snapshot);
+
     List<FieldValue> overview =
         fieldValues(DatasetType.BILLING_POINT, readMap(snapshot.dataJson()));
+
     JsonNode audit = loadAudit(snapshot);
+
     return new BillingPointDetail(
         summary,
         group(overview),
@@ -94,6 +103,7 @@ public class BillingPointQueryService {
   @Transactional(readOnly = true)
   public FilterOptions filterOptions(CurrentUser actor) {
     String cityScope = actor.roles().contains(Role.SUPER_ADMIN) ? null : actor.cityCode();
+
     var sql = new StringBuilder();
     sql.append(
         """
@@ -102,25 +112,31 @@ public class BillingPointQueryService {
           JOIN city c ON c.code = s.city_code
          WHERE 1 = 1
         """);
+
     var arguments = new ArrayList<>();
+
     if (cityScope != null) {
       sql.append(" AND s.city_code = ?");
       arguments.add(cityScope);
     }
+
     var periods = new java.util.TreeSet<String>(java.util.Comparator.reverseOrder());
     var cities = new LinkedHashMap<String, String>();
     var districts = new java.util.TreeSet<String>();
+
     jdbcTemplate.query(
         sql.toString(),
         resultSet -> {
           periods.add(resultSet.getString("data_period"));
           cities.put(resultSet.getString("city_code"), resultSet.getString("city_name"));
+
           String district = readMap(resultSet.getString("data_json")).get("所属区县");
           if (district != null && !district.isBlank()) {
             districts.add(district);
           }
         },
         arguments.toArray());
+
     return new FilterOptions(
         List.copyOf(periods),
         cities.entrySet().stream()
@@ -131,6 +147,7 @@ public class BillingPointQueryService {
 
   private List<BillingPointSummary> loadSummaries(
       String period, String cityScope, String focusPeriod, String focusCityCode) {
+
     var sql = new StringBuilder();
     sql.append(
         """
@@ -142,52 +159,101 @@ public class BillingPointQueryService {
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
-            ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
-          LEFT JOIN report_draft d ON d.billing_point_snapshot_id = s.id
-          LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
-          LEFT JOIN import_job ij ON ij.id = s.source_import_job_id
+            ON a.billing_point_code = s.billing_point_code
+           AND a.data_period = s.data_period
+           AND a.city_code = s.city_code
+          LEFT JOIN report_draft d
+            ON d.billing_point_snapshot_id = s.id
+          LEFT JOIN audit_report r
+            ON r.billing_point_snapshot_id = s.id
+          LEFT JOIN import_job ij
+            ON ij.id = s.source_import_job_id
          WHERE 1 = 1
         """);
+
     var arguments = new ArrayList<>();
+
     if (period != null && !period.isBlank()) {
       sql.append(" AND s.data_period = ?");
       arguments.add(period);
     }
+
     if (cityScope != null && !cityScope.isBlank()) {
       sql.append(" AND s.city_code = ?");
       arguments.add(cityScope);
     }
+
+    /*
+     * 排序规则：
+     *
+     * 1. 先把操作栏会显示“生成报告”的报账点整体放到最前面。
+     *    前端“生成报告”按钮的条件是 reportStatus = DRAFT；
+     *    后端对应：
+     *      audit_status = OVER_LIMIT
+     *      且尚未存在正式报告 r.id IS NULL
+     *
+     * 2. 在“需要生成报告”和“其他报账点”各自内部，
+     *    完整保留原有排序逻辑：
+     *      - 有 focusPeriod/focusCityCode 时，原焦点排序继续生效；
+     *      - 然后按导入/更新时间倒序；
+     *      - 再按账期倒序、最大超标比例倒序等原规则排序。
+     *
+     * 这样可以保证：
+     * “有生成报告按钮的全部置顶 + 每个分组内部仍按原来的倒序逻辑”。
+     *
+     * 该排序发生在分页之前，所以即使需要生成报告的数据原本在第2页、第3页，
+     * 也会先被整体提到前面的分页中，而不是只对当前10条做前端排序。
+     */
+    sql.append(
+        """
+         ORDER BY
+           CASE
+             WHEN a.audit_status = 'OVER_LIMIT' AND r.id IS NULL THEN 0
+             ELSE 1
+           END,
+        """);
+
     if (focusPeriod != null && !focusPeriod.isBlank()) {
-      sql.append(" ORDER BY CASE WHEN s.data_period = ?");
+      sql.append(" CASE WHEN s.data_period = ?");
       arguments.add(focusPeriod);
+
       if (focusCityCode != null && !focusCityCode.isBlank()) {
         sql.append(" AND s.city_code = ?");
         arguments.add(focusCityCode);
       }
+
       sql.append(" THEN 0 ELSE 1 END,");
-    } else {
-      sql.append(" ORDER BY");
     }
+
     sql.append(
         """
-                  COALESCE(ij.completed_at, ij.updated_at, ij.created_at, s.updated_at) DESC,
-                  CASE WHEN a.audit_status = 'OVER_LIMIT' AND r.id IS NULL THEN 0 ELSE 1 END,
-                  s.data_period DESC, a.max_ratio DESC, s.billing_point_code ASC, s.id ASC
+           COALESCE(ij.completed_at, ij.updated_at, ij.created_at, s.updated_at) DESC,
+           s.data_period DESC,
+           a.max_ratio DESC,
+           s.billing_point_code ASC,
+           s.id ASC
         """);
+
     return jdbcTemplate.query(sql.toString(), this::mapSummary, arguments.toArray());
   }
 
   private BillingPointSummary mapSummary(ResultSet resultSet, int rowNumber) throws SQLException {
     Map<String, String> values = readMap(resultSet.getString("data_json"));
+
     String auditStatus = valueOr(resultSet.getString("audit_status"), "NOT_APPLICABLE");
     String reportId = resultSet.getString("report_id");
+
     String reportStatus =
-        !"OVER_LIMIT".equals(auditStatus) ? "NONE" : reportId == null ? "PENDING" : "GENERATED";
+        !"OVER_LIMIT".equals(auditStatus)
+            ? "NONE"
+            : reportId == null ? "PENDING" : "GENERATED";
+
     List<String> paymentCodes =
         paymentCodes(
             resultSet.getString("data_period"),
             resultSet.getString("city_code"),
             resultSet.getString("billing_point_code"));
+
     return new BillingPointSummary(
         resultSet.getString("public_id"),
         resultSet.getString("billing_point_code"),
@@ -219,7 +285,9 @@ public class BillingPointQueryService {
         """
         SELECT DISTINCT payment_bill_code
           FROM payment_detail
-         WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+         WHERE data_period = ?
+           AND city_code = ?
+           AND billing_point_code = ?
          ORDER BY payment_bill_code
         """,
         String.class,
@@ -248,39 +316,57 @@ public class BillingPointQueryService {
       case PAYMENT ->
           jdbcTemplate.query(
               """
-              SELECT id, payment_bill_code AS payment_code, NULL AS meter_code, values_json
+              SELECT id,
+                     payment_bill_code AS payment_code,
+                     NULL AS meter_code,
+                     values_json
                 FROM payment_detail
-               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               WHERE data_period = ?
+                 AND city_code = ?
+                 AND billing_point_code = ?
                ORDER BY id
               """,
               this::mapRowValue,
               snapshot.period(),
               snapshot.cityCode(),
               snapshot.billingPointCode());
+
       case METER_READING ->
           jdbcTemplate.query(
               """
-              SELECT id, payment_bill_code AS payment_code, meter_code, values_json
+              SELECT id,
+                     payment_bill_code AS payment_code,
+                     meter_code,
+                     values_json
                 FROM meter_reading
-               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               WHERE data_period = ?
+                 AND city_code = ?
+                 AND billing_point_code = ?
                ORDER BY id
               """,
               this::mapRowValue,
               snapshot.period(),
               snapshot.cityCode(),
               snapshot.billingPointCode());
+
       case BENCHMARK ->
           jdbcTemplate.query(
               """
-              SELECT id, NULL AS payment_code, NULL AS meter_code, values_json
+              SELECT id,
+                     NULL AS payment_code,
+                     NULL AS meter_code,
+                     values_json
                 FROM benchmark_value
-               WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+               WHERE data_period = ?
+                 AND city_code = ?
+                 AND billing_point_code = ?
                ORDER BY id
               """,
               this::mapRowValue,
               snapshot.period(),
               snapshot.cityCode(),
               snapshot.billingPointCode());
+
       case BILLING_POINT -> List.of();
     };
   }
@@ -311,9 +397,11 @@ public class BillingPointQueryService {
 
   private List<FieldGroup> group(List<FieldValue> fields) {
     var groups = new LinkedHashMap<String, List<FieldValue>>();
+
     for (FieldValue field : fields) {
       groups.computeIfAbsent(field.group(), ignored -> new ArrayList<>()).add(field);
     }
+
     return groups.entrySet().stream()
         .map(entry -> new FieldGroup(entry.getKey(), List.copyOf(entry.getValue())))
         .toList();
@@ -323,32 +411,55 @@ public class BillingPointQueryService {
     List<JsonNode> audits =
         jdbcTemplate.query(
             """
-            SELECT audit_status, over_limit_type, max_ratio, actual_energy, actual_amount,
-                   rated_benchmark_energy, calculated_at, payment_eligibility_reason,
-                   yoy_reference_period, yoy_reference_energy, yoy_threshold_daily_kwh,
-                   mom_reference_period, mom_reference_energy, mom_threshold_daily_kwh,
+            SELECT audit_status,
+                   over_limit_type,
+                   max_ratio,
+                   actual_energy,
+                   actual_amount,
                    rated_benchmark_energy,
-                   yoy_ratio, mom_ratio, rated_ratio, detail_json,
-                   yoy_result, mom_result, rated_result,
-                   yoy_na_reason, mom_na_reason, rated_na_reason
+                   calculated_at,
+                   payment_eligibility_reason,
+                   yoy_reference_period,
+                   yoy_reference_energy,
+                   yoy_threshold_daily_kwh,
+                   mom_reference_period,
+                   mom_reference_energy,
+                   mom_threshold_daily_kwh,
+                   rated_benchmark_energy,
+                   yoy_ratio,
+                   mom_ratio,
+                   rated_ratio,
+                   detail_json,
+                   yoy_result,
+                   mom_result,
+                   rated_result,
+                   yoy_na_reason,
+                   mom_na_reason,
+                   rated_na_reason
               FROM audit_result
-             WHERE billing_point_code = ? AND data_period = ? AND city_code = ?
+             WHERE billing_point_code = ?
+               AND data_period = ?
+               AND city_code = ?
             """,
             (resultSet, rowNumber) -> normalizedAudit(resultSet),
             snapshot.billingPointCode(),
             snapshot.period(),
             snapshot.cityCode());
+
     return audits.isEmpty() ? pendingAudit() : audits.getFirst();
   }
 
   private JsonNode pendingAudit() {
     var root = objectMapper.createObjectNode();
+
     root.put("finalStatus", "PENDING_REVIEW");
     root.put("finalReason", "当前报账点尚未完成稽核，请确认四类文件已导入成功");
     root.put("ruleVersion", "CURRENT");
     root.putNull("calculatedAt");
     root.put("eligibilityReason", "当前报账点尚未完成稽核");
+
     var comparisons = root.putArray("comparisons");
+
     comparisons.add(
         comparison(
             "YEAR_ON_YEAR",
@@ -361,6 +472,7 @@ public class BillingPointQueryService {
             null,
             "尚未生成同比稽核结果",
             "本期实际用电与去年同月参考阈值比较"));
+
     comparisons.add(
         comparison(
             "MONTH_ON_MONTH",
@@ -373,6 +485,7 @@ public class BillingPointQueryService {
             null,
             "尚未生成环比稽核结果",
             "本期实际用电与上一个自然月参考阈值比较"));
+
     comparisons.add(
         comparison(
             "RATED_BENCHMARK",
@@ -385,21 +498,34 @@ public class BillingPointQueryService {
             null,
             "尚未生成额定标杆稽核结果",
             "本期实际用电与当月日标杆合计比较"));
+
     root.set("raw", objectMapper.createObjectNode());
     return root;
   }
 
   private JsonNode normalizedAudit(ResultSet resultSet) throws SQLException {
     var root = objectMapper.createObjectNode();
-    root.put("finalStatus", valueOr(resultSet.getString("audit_status"), "NOT_APPLICABLE"));
+
+    root.put(
+        "finalStatus",
+        valueOr(resultSet.getString("audit_status"), "NOT_APPLICABLE"));
+
     root.put("finalReason", auditReason(resultSet));
     root.put("ruleVersion", "CURRENT");
+
     var calculatedAt = resultSet.getTimestamp("calculated_at");
-    root.put("calculatedAt", calculatedAt == null ? null : calculatedAt.toInstant().toString());
+    root.put(
+        "calculatedAt",
+        calculatedAt == null ? null : calculatedAt.toInstant().toString());
+
     root.put(
         "eligibilityReason",
-        valueOr(resultSet.getString("payment_eligibility_reason"), "稽核已按当前正式数据计算"));
+        valueOr(
+            resultSet.getString("payment_eligibility_reason"),
+            "稽核已按当前正式数据计算"));
+
     var comparisons = root.putArray("comparisons");
+
     comparisons.add(
         comparison(
             "YEAR_ON_YEAR",
@@ -412,6 +538,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("yoy_ratio"),
             resultSet.getString("yoy_na_reason"),
             "本期实际用电与去年同月参考阈值比较"));
+
     comparisons.add(
         comparison(
             "MONTH_ON_MONTH",
@@ -424,6 +551,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("mom_ratio"),
             resultSet.getString("mom_na_reason"),
             "本期实际用电与上一个自然月参考阈值比较"));
+
     comparisons.add(
         comparison(
             "RATED_BENCHMARK",
@@ -436,6 +564,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("rated_ratio"),
             resultSet.getString("rated_na_reason"),
             "本期实际用电与当月日标杆合计比较"));
+
     root.set("raw", parseAuditDetail(resultSet.getString("detail_json")));
     return root;
   }
@@ -451,11 +580,16 @@ public class BillingPointQueryService {
       BigDecimal ratio,
       String naReason,
       String formula) {
+
     var node = objectMapper.createObjectNode();
+
     String status =
         "OVER_LIMIT".equals(result)
             ? "OVER_LIMIT"
-            : "NORMAL".equals(result) ? "NORMAL" : "NOT_APPLICABLE";
+            : "NORMAL".equals(result)
+                ? "NORMAL"
+                : "NOT_APPLICABLE";
+
     node.put("key", key);
     node.put("label", label);
     node.put("status", status);
@@ -465,12 +599,17 @@ public class BillingPointQueryService {
     node.put("actual", decimalString(actual));
     node.put("difference", difference(actual, threshold));
     node.put("ratio", decimalString(ratio));
+
     node.put(
         "reason",
         status.equals("NOT_APPLICABLE")
             ? valueOr(naReason, "参考数据不足，暂不适用")
-            : status.equals("OVER_LIMIT") ? label + "超标" : label + "正常");
+            : status.equals("OVER_LIMIT")
+                ? label + "超标"
+                : label + "正常");
+
     node.put("formula", formula);
+
     return node;
   }
 
@@ -478,6 +617,7 @@ public class BillingPointQueryService {
     if (value == null || value.isBlank()) {
       return objectMapper.createObjectNode();
     }
+
     try {
       return objectMapper.readTree(value);
     } catch (JacksonException exception) {
@@ -487,12 +627,16 @@ public class BillingPointQueryService {
 
   private String auditReason(ResultSet resultSet) throws SQLException {
     String status = resultSet.getString("audit_status");
+
     if ("OVER_LIMIT".equals(status)) {
-      return "稽核结果超标，超标类型：" + overLimitTypeLabel(resultSet.getString("over_limit_type"));
+      return "稽核结果超标，超标类型："
+          + overLimitTypeLabel(resultSet.getString("over_limit_type"));
     }
+
     if ("NORMAL".equals(status)) {
       return "稽核结果正常";
     }
+
     return "稽核结果暂不适用";
   }
 
@@ -500,6 +644,7 @@ public class BillingPointQueryService {
     if (value == null || value.isBlank()) {
       return "未分类";
     }
+
     return switch (value) {
       case "ONLY_YOY" -> "仅同比超标";
       case "ONLY_MOM" -> "仅环比超标";
@@ -514,6 +659,7 @@ public class BillingPointQueryService {
     if (actual == null || baseline == null) {
       return null;
     }
+
     return decimalString(actual.subtract(baseline));
   }
 
@@ -521,7 +667,11 @@ public class BillingPointQueryService {
     return jdbcTemplate
         .query(
             """
-            SELECT s.public_id, s.billing_point_code, s.city_code, s.data_period, s.data_json
+            SELECT s.public_id,
+                   s.billing_point_code,
+                   s.city_code,
+                   s.data_period,
+                   s.data_json
               FROM billing_point_snapshot s
              WHERE s.public_id = ?
             """,
@@ -555,11 +705,14 @@ public class BillingPointQueryService {
   private boolean contains(String value, String filter) {
     return filter == null
         || filter.isBlank()
-        || (value != null && value.toLowerCase().contains(filter.trim().toLowerCase()));
+        || (value != null
+            && value.toLowerCase().contains(filter.trim().toLowerCase()));
   }
 
   private boolean equalsFilter(String value, String filter) {
-    return filter == null || filter.isBlank() || Objects.equals(value, filter);
+    return filter == null
+        || filter.isBlank()
+        || Objects.equals(value, filter);
   }
 
   private String cityScope(CurrentUser actor, String requestedCityCode) {
@@ -569,13 +722,16 @@ public class BillingPointQueryService {
           && !requestedCityCode.equals(actor.cityCode())) {
         throw new AccessDeniedException("City scope mismatch");
       }
+
       return actor.cityCode();
     }
+
     return requestedCityCode;
   }
 
   private void requireCityScope(CurrentUser actor, String cityCode) {
-    if (!actor.roles().contains(Role.SUPER_ADMIN) && !actor.cityCode().equals(cityCode)) {
+    if (!actor.roles().contains(Role.SUPER_ADMIN)
+        && !actor.cityCode().equals(cityCode)) {
       throw new AccessDeniedException("Billing point is outside city scope");
     }
   }
@@ -584,12 +740,16 @@ public class BillingPointQueryService {
     try {
       return objectMapper.readValue(json, STRING_MAP);
     } catch (JacksonException exception) {
-      throw new IllegalStateException("Persisted billing data is invalid JSON", exception);
+      throw new IllegalStateException(
+          "Persisted billing data is invalid JSON",
+          exception);
     }
   }
 
   private String decimalString(BigDecimal value) {
-    return value == null ? null : value.stripTrailingZeros().toPlainString();
+    return value == null
+        ? null
+        : value.stripTrailingZeros().toPlainString();
   }
 
   private String valueOr(String value, String fallback) {
@@ -657,10 +817,17 @@ public class BillingPointQueryService {
       String draftId,
       String reportId) {}
 
-  public record FieldGroup(String name, List<FieldValue> fields) {}
+  public record FieldGroup(
+      String name,
+      List<FieldValue> fields) {}
 
   public record FieldValue(
-      int order, String name, String sourceName, String group, String type, String value) {}
+      int order,
+      String name,
+      String sourceName,
+      String group,
+      String type,
+      String value) {}
 
   public record RecordDetail(
       String id,
@@ -670,12 +837,24 @@ public class BillingPointQueryService {
       List<FieldValue> fields) {}
 
   public record FilterOptions(
-      List<String> periods, List<CityOption> cities, List<String> districts) {}
+      List<String> periods,
+      List<CityOption> cities,
+      List<String> districts) {}
 
-  public record CityOption(String code, String name) {}
+  public record CityOption(
+      String code,
+      String name) {}
 
   private record SnapshotRow(
-      String publicId, String billingPointCode, String cityCode, String period, String dataJson) {}
+      String publicId,
+      String billingPointCode,
+      String cityCode,
+      String period,
+      String dataJson) {}
 
-  private record RowValue(long id, String paymentCode, String meterCode, String json) {}
+  private record RowValue(
+      long id,
+      String paymentCode,
+      String meterCode,
+      String json) {}
 }
