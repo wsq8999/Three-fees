@@ -26,6 +26,7 @@ type Summary = BillingPointDetail["summary"];
 const route = useRoute();
 const router = useRouter();
 const session = useSessionStore();
+
 const table = ref<TableInstance>();
 const pageData = ref<PageResult<Summary> | null>(null);
 const cities = ref<BusinessCity[]>([]);
@@ -60,24 +61,51 @@ const filters = reactive({
 });
 
 const selectedCount = computed(() => selectedIds.value.size);
-const selectedIdList = computed(() => Array.from(selectedIds.value));
-const selectedRows = computed(() =>
-  (pageData.value?.items ?? []).filter((item) => selectedIds.value.has(item.id)),
+
+const selectedIdList = computed(() =>
+  Array.from(selectedIds.value),
 );
+
+const selectedRows = computed(() =>
+  (pageData.value?.items ?? []).filter((item) =>
+    selectedIds.value.has(item.id),
+  ),
+);
+
 const exportCityCode = computed(() => {
   if (filters.cityCode) return filters.cityCode;
-  const cityCodes = new Set(selectedRows.value.map((item) => item.city.code));
-  return cityCodes.size === 1 ? (Array.from(cityCodes)[0] ?? "") : "";
+
+  const cityCodes = new Set(
+    selectedRows.value.map((item) => item.city.code),
+  );
+
+  return cityCodes.size === 1
+    ? (Array.from(cityCodes)[0] ?? "")
+    : "";
 });
+
 const exportPeriod = computed(() => {
   if (filters.period) return filters.period;
-  const periods = new Set(selectedRows.value.map((item) => item.period));
-  return periods.size === 1 ? (Array.from(periods)[0] ?? "") : "";
+
+  const periods = new Set(
+    selectedRows.value.map((item) => item.period),
+  );
+
+  return periods.size === 1
+    ? (Array.from(periods)[0] ?? "")
+    : "";
 });
-const isCityLocked = computed(() => session.currentUser?.city !== null);
-const visibleCities = computed(() =>
-  session.currentUser?.city ? [session.currentUser.city] : cities.value,
+
+const isCityLocked = computed(
+  () => session.currentUser?.city !== null,
 );
+
+const visibleCities = computed(() =>
+  session.currentUser?.city
+    ? [session.currentUser.city]
+    : cities.value,
+);
+
 const districtOptions = computed(() =>
   Array.from(
     new Set(
@@ -87,11 +115,22 @@ const districtOptions = computed(() =>
     ),
   ),
 );
+
 const rangeLabel = computed(() => {
   const total = pageData.value?.totalElements ?? 0;
-  if (total === 0) return "已显示 0 条，共 0 条";
-  const start = (filters.page - 1) * filters.size + 1;
-  const end = Math.min(filters.page * filters.size, total);
+
+  if (total === 0) {
+    return "已显示 0 条，共 0 条";
+  }
+
+  const start =
+    (filters.page - 1) * filters.size + 1;
+
+  const end = Math.min(
+    filters.page * filters.size,
+    total,
+  );
+
   return `已显示 ${start}-${end} 条，共 ${total} 条`;
 });
 
@@ -100,15 +139,20 @@ function asSummary(row: unknown): Summary {
 }
 
 function queryText(value: unknown): string {
-  return Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
+  return Array.isArray(value)
+    ? String(value[0] ?? "")
+    : String(value ?? "");
 }
 
 function hydrateFromRoute(): void {
   const base = parseBillingPointQuery(route.query);
+
   Object.assign(filters, {
     code: queryText(route.query.code),
     name: queryText(route.query.name),
-    cityCode: session.currentUser?.city?.code ?? base.cityCode,
+    cityCode:
+      session.currentUser?.city?.code ??
+      base.cityCode,
     district: queryText(route.query.district),
     period: base.period,
     reviewStatus: queryText(route.query.review),
@@ -118,57 +162,127 @@ function hydrateFromRoute(): void {
     focusPeriod: queryText(route.query.focusPeriod),
     focusCityCode: queryText(route.query.focusCity),
     page: base.page,
-    size: [10, 20, 50].includes(base.size) ? base.size : 10,
+
+    /*
+     * 报账点管理默认每页固定 10 条。
+     * 进入页面时不再继承 URL 中遗留的 size=20/50。
+     * 用户进入页面后仍可通过分页器手动切换 20/50 条。
+     */
+    size: 10,
   });
-  if (route.query.dialog === "import") importVisible.value = true;
+
+  if (route.query.dialog === "import") {
+    importVisible.value = true;
+  }
 }
 
 function routeQuery(): Record<string, string> {
   return {
-    ...(filters.code ? { code: filters.code } : {}),
-    ...(filters.name ? { name: filters.name } : {}),
-    ...(filters.cityCode ? { city: filters.cityCode } : {}),
-    ...(filters.district ? { district: filters.district } : {}),
-    ...(filters.period ? { period: filters.period } : {}),
-    ...(filters.reviewStatus ? { review: filters.reviewStatus } : {}),
-    ...(filters.pointStatus ? { pointStatus: filters.pointStatus } : {}),
-    ...(filters.auditStatus ? { status: filters.auditStatus } : {}),
-    ...(filters.reportStatus ? { reportStatus: filters.reportStatus } : {}),
-    ...(filters.focusPeriod ? { focusPeriod: filters.focusPeriod } : {}),
-    ...(filters.focusCityCode ? { focusCity: filters.focusCityCode } : {}),
+    ...(filters.code
+      ? { code: filters.code }
+      : {}),
+    ...(filters.name
+      ? { name: filters.name }
+      : {}),
+    ...(filters.cityCode
+      ? { city: filters.cityCode }
+      : {}),
+    ...(filters.district
+      ? { district: filters.district }
+      : {}),
+    ...(filters.period
+      ? { period: filters.period }
+      : {}),
+    ...(filters.reviewStatus
+      ? { review: filters.reviewStatus }
+      : {}),
+    ...(filters.pointStatus
+      ? { pointStatus: filters.pointStatus }
+      : {}),
+    ...(filters.auditStatus
+      ? { status: filters.auditStatus }
+      : {}),
+    ...(filters.reportStatus
+      ? { reportStatus: filters.reportStatus }
+      : {}),
+    ...(filters.focusPeriod
+      ? { focusPeriod: filters.focusPeriod }
+      : {}),
+    ...(filters.focusCityCode
+      ? { focusCity: filters.focusCityCode }
+      : {}),
     page: String(filters.page),
     size: String(filters.size),
   };
 }
 
 function periodText(row: Summary): string {
-  return `${row.periodStart ?? `${row.period}-01`} 至 ${row.periodEnd ?? row.period}`;
+  return `${
+    row.periodStart ?? `${row.period}-01`
+  } 至 ${row.periodEnd ?? row.period}`;
 }
 
 function dayCount(row: Summary): number | null {
-  if (!row.periodStart || !row.periodEnd) return null;
-  return Math.round((Date.parse(row.periodEnd) - Date.parse(row.periodStart)) / 86400000) + 1;
+  if (!row.periodStart || !row.periodEnd) {
+    return null;
+  }
+
+  return (
+    Math.round(
+      (
+        Date.parse(row.periodEnd) -
+        Date.parse(row.periodStart)
+      ) / 86400000,
+    ) + 1
+  );
 }
 
 function dailyEnergy(row: Summary): string {
   const days = dayCount(row);
-  if (!row.actualEnergy || days === null || days <= 0) return "—";
-  return (Number(row.actualEnergy) / days).toFixed(2);
+
+  if (
+    !row.actualEnergy ||
+    days === null ||
+    days <= 0
+  ) {
+    return "—";
+  }
+
+  return (
+    Number(row.actualEnergy) / days
+  ).toFixed(2);
 }
 
-function joinedValues(values: string[] | undefined): string {
+function joinedValues(
+  values: string[] | undefined,
+): string {
   const normalized = Array.from(
-    new Set((values ?? []).map((value) => value.trim()).filter(Boolean)),
+    new Set(
+      (values ?? [])
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
   );
-  return normalized.length === 0 ? "—" : normalized.join("、");
+
+  return normalized.length === 0
+    ? "—"
+    : normalized.join("、");
 }
 
-function paymentEligibilityText(row: Summary): "APPROVED" | "PENDING" {
-  return row.paymentEligibility === "ELIGIBLE" ? "APPROVED" : "PENDING";
+function paymentEligibilityText(
+  row: Summary,
+): "APPROVED" | "PENDING" {
+  return row.paymentEligibility === "ELIGIBLE"
+    ? "APPROVED"
+    : "PENDING";
 }
 
-function billingPointStatusText(row: Summary): string {
-  return row.billingPointStatus === "DISABLED" ? "停用" : "启用";
+function billingPointStatusText(
+  row: Summary,
+): string {
+  return row.billingPointStatus === "DISABLED"
+    ? "停用"
+    : "启用";
 }
 
 async function load(): Promise<void> {
@@ -192,13 +306,14 @@ async function load(): Promise<void> {
         period: filters.period,
 
         paymentEligible,
-
-        billingPointStatus: filters.pointStatus,
+        billingPointStatus:
+          filters.pointStatus,
         auditStatus: filters.auditStatus,
         reportStatus: filters.reportStatus,
 
         focusPeriod: filters.focusPeriod,
-        focusCityCode: filters.focusCityCode,
+        focusCityCode:
+          filters.focusCityCode,
 
         page: filters.page,
         size: filters.size,
@@ -210,7 +325,10 @@ async function load(): Promise<void> {
 
     for (const row of result.items) {
       if (selectedIds.value.has(row.id)) {
-        table.value?.toggleRowSelection(row, true);
+        table.value?.toggleRowSelection(
+          row,
+          true,
+        );
       }
     }
   } catch (error) {
@@ -225,7 +343,12 @@ async function load(): Promise<void> {
 
 async function search(): Promise<void> {
   filters.page = 1;
-  await router.replace({ path: "/billing-points", query: routeQuery() });
+
+  await router.replace({
+    path: "/billing-points",
+    query: routeQuery(),
+  });
+
   await load();
 }
 
@@ -233,7 +356,8 @@ async function reset(): Promise<void> {
   Object.assign(filters, {
     code: "",
     name: "",
-    cityCode: session.currentUser?.city?.code ?? "",
+    cityCode:
+      session.currentUser?.city?.code ?? "",
     district: "",
     period: "",
     reviewStatus: "",
@@ -244,86 +368,160 @@ async function reset(): Promise<void> {
     focusCityCode: "",
     page: 1,
   });
+
   await search();
 }
 
-async function changePage(page: number): Promise<void> {
+async function changePage(
+  page: number,
+): Promise<void> {
   filters.page = page;
-  await router.replace({ path: "/billing-points", query: routeQuery() });
+
+  await router.replace({
+    path: "/billing-points",
+    query: routeQuery(),
+  });
+
   await load();
 }
 
-async function changeSize(size: number): Promise<void> {
+async function changeSize(
+  size: number,
+): Promise<void> {
   filters.size = size;
   filters.page = 1;
-  await router.replace({ path: "/billing-points", query: routeQuery() });
+
+  await router.replace({
+    path: "/billing-points",
+    query: routeQuery(),
+  });
+
   await load();
 }
 
-function selectionChanged(rows: Summary[]): void {
-  const currentIds = new Set(pageData.value?.items.map((item) => item.id) ?? []);
-  for (const id of currentIds) selectedIds.value.delete(id);
-  for (const row of rows) selectedIds.value.add(row.id);
-  selectedIds.value = new Set(selectedIds.value);
+function selectionChanged(
+  rows: Summary[],
+): void {
+  const currentIds = new Set(
+    pageData.value?.items.map(
+      (item) => item.id,
+    ) ?? [],
+  );
+
+  for (const id of currentIds) {
+    selectedIds.value.delete(id);
+  }
+
+  for (const row of rows) {
+    selectedIds.value.add(row.id);
+  }
+
+  selectedIds.value =
+    new Set(selectedIds.value);
 }
 
-async function openDetail(row: Summary): Promise<void> {
+async function openDetail(
+  row: Summary,
+): Promise<void> {
   await router.push({
     name: "billing-point-detail",
-    params: { billingPointCode: row.id, period: row.period },
-    query: { from: route.fullPath },
+    params: {
+      billingPointCode: row.id,
+      period: row.period,
+    },
+    query: {
+      from: route.fullPath,
+    },
   });
 }
 
-async function openDraft(row: Summary): Promise<void> {
-  const draft = await businessApi.drafts.createOrResume(row.id);
+async function openDraft(
+  row: Summary,
+): Promise<void> {
+  const draft =
+    await businessApi.drafts.createOrResume(
+      row.id,
+    );
+
   await router.push({
     name: "report-draft",
-    params: { draftId: draft.id },
-    query: { from: route.fullPath },
+    params: {
+      draftId: draft.id,
+    },
+    query: {
+      from: route.fullPath,
+    },
   });
 }
 
-async function openReport(row: Summary): Promise<void> {
-  const reports = await businessApi.reports.list({
-    cityCode: row.city.code,
-    district: "",
-    period: row.period,
-    keyword: row.code,
-    source: "",
-    page: 1,
-    size: 10,
-  });
-  const report = reports.items.find((item) => item.billingPointCode === row.code);
+async function openReport(
+  row: Summary,
+): Promise<void> {
+  const reports =
+    await businessApi.reports.list({
+      cityCode: row.city.code,
+      district: "",
+      period: row.period,
+      keyword: row.code,
+      source: "",
+      page: 1,
+      size: 10,
+    });
+
+  const report = reports.items.find(
+    (item) =>
+      item.billingPointCode === row.code,
+  );
+
   if (report === undefined) {
-    ElMessage.error("未找到该报账点的正式报告。");
+    ElMessage.error(
+      "未找到该报账点的正式报告。",
+    );
     return;
   }
+
   await router.push({
     name: "report-detail",
-    params: { reportId: report.id },
-    query: { from: route.fullPath },
+    params: {
+      reportId: report.id,
+    },
+    query: {
+      from: route.fullPath,
+    },
   });
 }
 
-function closeImport(visible: boolean): void {
+function closeImport(
+  visible: boolean,
+): void {
   importVisible.value = visible;
-  if (!visible && route.query.dialog === "import") {
-    void router.replace({ path: "/billing-points", query: routeQuery() });
+
+  if (
+    !visible &&
+    route.query.dialog === "import"
+  ) {
+    void router.replace({
+      path: "/billing-points",
+      query: routeQuery(),
+    });
   }
 }
 
-async function handleImported(batches: ImportBatch[]): Promise<void> {
+async function handleImported(
+  batches: ImportBatch[],
+): Promise<void> {
   void batches;
-  selectedIds.value = new Set();
+
+  selectedIds.value =
+    new Set<string>();
+
   Object.assign(filters, {
     code: "",
     name: "",
-    cityCode: session.currentUser?.city?.code ?? "",
+    cityCode:
+      session.currentUser?.city?.code ?? "",
     district: "",
     period: "",
-    siteKeyword: "",
-    meterKeyword: "",
     reviewStatus: "",
     pointStatus: "",
     auditStatus: "",
@@ -332,21 +530,32 @@ async function handleImported(batches: ImportBatch[]): Promise<void> {
     focusCityCode: "",
     page: 1,
   });
+
   importVisible.value = false;
-  await router.replace({ path: "/billing-points", query: routeQuery() });
+
+  await router.replace({
+    path: "/billing-points",
+    query: routeQuery(),
+  });
+
   await load();
 }
 
 onMounted(async () => {
   hydrateFromRoute();
-  cities.value = await businessApi.cities.list();
+
+  cities.value =
+    await businessApi.cities.list();
+
   await load();
 });
 
 watch(
   () => route.query.dialog,
   (value) => {
-    if (value === "import") importVisible.value = true;
+    if (value === "import") {
+      importVisible.value = true;
+    }
   },
 );
 </script>
@@ -354,29 +563,50 @@ watch(
 <template>
   <section
     class="filter-card business-card"
-    :class="{ 'filter-card-collapsed': filterCollapsed }"
+    :class="{
+      'filter-card-collapsed':
+        filterCollapsed,
+    }"
     aria-label="报账点查询"
   >
     <div class="filter-card-header">
-      <strong class="filter-card-title">查询条件</strong>
+      <strong class="filter-card-title">
+        查询条件
+      </strong>
 
       <ElButton
         class="filter-collapse-button"
         link
         type="primary"
-        @click="filterCollapsed = !filterCollapsed"
+        @click="
+          filterCollapsed =
+            !filterCollapsed
+        "
       >
-        {{ filterCollapsed ? "展开" : "收起" }}
+        {{
+          filterCollapsed
+            ? "展开"
+            : "收起"
+        }}
+
         <span class="collapse-arrow">
-        {{ filterCollapsed ? "⌄" : "⌃" }}
-      </span>
+          {{
+            filterCollapsed
+              ? "⌄"
+              : "⌃"
+          }}
+        </span>
       </ElButton>
     </div>
 
     <ElCollapseTransition>
-      <div v-show="!filterCollapsed" class="filter-grid">
+      <div
+        v-show="!filterCollapsed"
+        class="filter-grid"
+      >
         <label>
           <span>报账点编码</span>
+
           <ElInput
             v-model="filters.code"
             placeholder="请输入编码"
@@ -386,6 +616,7 @@ watch(
 
         <label>
           <span>报账点名称</span>
+
           <ElInput
             v-model="filters.name"
             placeholder="请输入名称"
@@ -395,6 +626,7 @@ watch(
 
         <label>
           <span>所属城市</span>
+
           <ElSelect
             v-model="filters.cityCode"
             :disabled="isCityLocked"
@@ -412,6 +644,7 @@ watch(
 
         <label>
           <span>所属区县</span>
+
           <ElSelect
             v-model="filters.district"
             placeholder="全部区县"
@@ -428,6 +661,7 @@ watch(
 
         <label>
           <span>账期</span>
+
           <ElDatePicker
             v-model="filters.period"
             type="month"
@@ -440,6 +674,7 @@ watch(
 
         <label>
           <span>审核状态</span>
+
           <ElSelect
             v-model="filters.reviewStatus"
             placeholder="全部"
@@ -458,6 +693,7 @@ watch(
 
         <label>
           <span>报账点状态</span>
+
           <ElSelect
             v-model="filters.pointStatus"
             placeholder="全部"
@@ -476,6 +712,7 @@ watch(
 
         <label>
           <span>稽核状态</span>
+
           <ElSelect
             v-model="filters.auditStatus"
             placeholder="全部"
@@ -502,6 +739,7 @@ watch(
 
         <label>
           <span>报告状态</span>
+
           <ElSelect
             v-model="filters.reportStatus"
             placeholder="全部"
@@ -545,26 +783,52 @@ watch(
 
   <div class="business-toolbar">
     <div>
-      <ElButton type="primary" :icon="Upload" @click="importVisible = true">
+      <ElButton
+        type="primary"
+        :icon="Upload"
+        @click="importVisible = true"
+      >
         导入数据
       </ElButton>
+
       <ElButton
         :icon="Download"
-        :disabled="selectedCount === 0"
+        :disabled="
+          selectedCount === 0
+        "
         @click="exportVisible = true"
       >
         导出Excel
       </ElButton>
     </div>
+
     <span>
-      <template v-if="selectedCount > 0">
-        已选择 <b class="number-emphasis">{{ selectedCount }}</b> 条，
+      <template
+        v-if="selectedCount > 0"
+      >
+        已选择
+        <b class="number-emphasis">
+          {{ selectedCount }}
+        </b>
+        条，
       </template>
-      共 <b class="number-emphasis">{{ pageData?.totalElements ?? 0 }}</b> 个报账点
+
+      共
+      <b class="number-emphasis">
+        {{
+          pageData?.totalElements ??
+          0
+        }}
+      </b>
+      个报账点
     </span>
   </div>
 
-  <PageState v-if="!pageData && loading" kind="loading" />
+  <PageState
+    v-if="!pageData && loading"
+    kind="loading"
+  />
+
   <PageState
     v-else-if="errorMessage"
     kind="error"
@@ -573,121 +837,307 @@ watch(
     @retry="load"
   />
 
-  <section v-else class="table-card business-card">
+  <section
+    v-else
+    class="table-card business-card"
+  >
     <ElTable
       ref="table"
       v-loading="loading"
       :data="pageData?.items ?? []"
       row-key="id"
-      height="515"
-      @selection-change="selectionChanged"
+      @selection-change="
+        selectionChanged
+      "
     >
-      <ElTableColumn type="selection" width="48" fixed="left" />
-      <ElTableColumn prop="code" label="报账点编码" width="205" fixed="left" />
-      <ElTableColumn prop="name" label="报账点名称" min-width="180" fixed="left" />
-      <ElTableColumn prop="city.name" label="所属地市" width="110" />
-      <ElTableColumn label="所属区县" width="110">
-        <template #default="scope">{{ asSummary(scope.row).district ?? "—" }}</template>
-      </ElTableColumn>
-      <ElTableColumn label="缴费单编码" min-width="220">
+      <ElTableColumn
+        type="selection"
+        width="48"
+        fixed="left"
+      />
+
+      <ElTableColumn
+        prop="code"
+        label="报账点编码"
+        width="205"
+        fixed="left"
+      />
+
+      <ElTableColumn
+        prop="name"
+        label="报账点名称"
+        min-width="180"
+        fixed="left"
+      />
+
+      <ElTableColumn
+        prop="city.name"
+        label="所属地市"
+        width="110"
+      />
+
+      <ElTableColumn
+        label="所属区县"
+        width="110"
+      >
         <template #default="scope">
-          <span class="multi-value-cell">{{ joinedValues(asSummary(scope.row).paymentCodes) }}</span>
+          {{
+            asSummary(scope.row)
+              .district ?? "—"
+          }}
         </template>
       </ElTableColumn>
-      <ElTableColumn label="账期" width="190">
-        <template #default="scope">{{ periodText(asSummary(scope.row)) }}</template>
-      </ElTableColumn>
-      <ElTableColumn label="缴费天数" width="95" align="right">
-        <template #default="scope">{{ dayCount(asSummary(scope.row)) ?? "—" }}</template>
-      </ElTableColumn>
-      <ElTableColumn label="日均耗电量" width="120" align="right">
-        <template #default="scope">{{ dailyEnergy(asSummary(scope.row)) }}</template>
-      </ElTableColumn>
-      <ElTableColumn prop="actualEnergy" label="实际总耗电量" width="130" align="right" />
-      <ElTableColumn label="实际报账金额" width="135" align="right">
+
+      <ElTableColumn
+        label="缴费单编码"
+        min-width="220"
+      >
         <template #default="scope">
-          ¥{{ asSummary(scope.row).actualAmount ?? "—" }}
+          <span class="multi-value-cell">
+            {{
+              joinedValues(
+                asSummary(scope.row)
+                  .paymentCodes,
+              )
+            }}
+          </span>
         </template>
       </ElTableColumn>
-      <ElTableColumn label="审核状态" width="115">
+
+      <ElTableColumn
+        label="账期"
+        width="190"
+      >
         <template #default="scope">
-          <StatusTag :value="paymentEligibilityText(asSummary(scope.row))" />
+          {{
+            periodText(
+              asSummary(scope.row),
+            )
+          }}
         </template>
       </ElTableColumn>
-      <ElTableColumn label="报账点状态" width="115">
+
+      <ElTableColumn
+        label="缴费天数"
+        width="95"
+        align="right"
+      >
+        <template #default="scope">
+          {{
+            dayCount(
+              asSummary(scope.row),
+            ) ?? "—"
+          }}
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn
+        label="日均耗电量"
+        width="120"
+        align="right"
+      >
+        <template #default="scope">
+          {{
+            dailyEnergy(
+              asSummary(scope.row),
+            )
+          }}
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn
+        prop="actualEnergy"
+        label="实际总耗电量"
+        width="130"
+        align="right"
+      />
+
+      <ElTableColumn
+        label="实际报账金额"
+        width="135"
+        align="right"
+      >
+        <template #default="scope">
+          ¥{{
+            asSummary(scope.row)
+              .actualAmount ?? "—"
+          }}
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn
+        label="审核状态"
+        width="115"
+      >
+        <template #default="scope">
+          <StatusTag
+            :value="
+              paymentEligibilityText(
+                asSummary(scope.row),
+              )
+            "
+          />
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn
+        label="报账点状态"
+        width="115"
+      >
         <template #default="scope">
           <ElTag
-            :type="billingPointStatusText(asSummary(scope.row)) === '启用' ? 'success' : 'info'"
+            :type="
+              billingPointStatusText(
+                asSummary(scope.row),
+              ) === '启用'
+                ? 'success'
+                : 'info'
+            "
             size="small"
           >
-            {{ billingPointStatusText(asSummary(scope.row)) }}
+            {{
+              billingPointStatusText(
+                asSummary(scope.row),
+              )
+            }}
           </ElTag>
         </template>
       </ElTableColumn>
-      <ElTableColumn label="稽核状态" width="115">
+
+      <ElTableColumn
+        label="稽核状态"
+        width="115"
+      >
         <template #default="scope">
-          <StatusTag :value="asSummary(scope.row).auditStatus" />
+          <StatusTag
+            :value="
+              asSummary(scope.row)
+                .auditStatus
+            "
+          />
         </template>
       </ElTableColumn>
-      <ElTableColumn label="超标类型" width="130">
+
+      <ElTableColumn
+        label="超标类型"
+        width="130"
+      >
         <template #default="scope">
           <ElTag
-            v-if="asSummary(scope.row).auditStatus === 'OVER_LIMIT'"
+            v-if="
+              asSummary(scope.row)
+                .auditStatus ===
+              'OVER_LIMIT'
+            "
             type="danger"
             size="small"
           >
-            {{ asSummary(scope.row).overLimitType ?? "超标" }}
+            {{
+              asSummary(scope.row)
+                .overLimitType ??
+              "超标"
+            }}
           </ElTag>
+
           <span v-else>—</span>
         </template>
       </ElTableColumn>
-      <ElTableColumn label="报告状态" width="115">
+
+      <ElTableColumn
+        label="报告状态"
+        width="115"
+      >
         <template #default="scope">
-          <StatusTag :value="asSummary(scope.row).reportStatus" />
+          <StatusTag
+            :value="
+              asSummary(scope.row)
+                .reportStatus
+            "
+          />
         </template>
       </ElTableColumn>
-      <ElTableColumn label="操作" width="128" fixed="right">
+
+      <ElTableColumn
+        label="操作"
+        width="128"
+        fixed="right"
+      >
         <template #default="scope">
-          <div class="text-link-actions row-command-actions">
-            <ElButton link type="primary" @click="openDetail(asSummary(scope.row))">
+          <div
+            class="text-link-actions row-command-actions"
+          >
+            <ElButton
+              link
+              type="primary"
+              @click="
+                openDetail(
+                  asSummary(scope.row),
+                )
+              "
+            >
               查看
             </ElButton>
+
             <ElButton
-              v-if="asSummary(scope.row).reportStatus === 'DRAFT'"
+              v-if="
+                asSummary(scope.row)
+                  .reportStatus ===
+                'DRAFT'
+              "
               link
               type="danger"
-              @click="openDraft(asSummary(scope.row))"
+              @click="
+                openDraft(
+                  asSummary(scope.row),
+                )
+              "
             >
               生成报告
             </ElButton>
+
             <ElButton
               v-if="
-                asSummary(scope.row).reportStatus === 'FINAL' ||
-                asSummary(scope.row).reportStatus === 'CORRECTED'
+                asSummary(scope.row)
+                  .reportStatus ===
+                  'FINAL' ||
+                asSummary(scope.row)
+                  .reportStatus ===
+                  'CORRECTED'
               "
               link
               type="success"
-              @click="openReport(asSummary(scope.row))"
+              @click="
+                openReport(
+                  asSummary(scope.row),
+                )
+              "
             >
               查看报告
             </ElButton>
           </div>
         </template>
       </ElTableColumn>
+
       <template #empty>
-        <ElEmpty description="当前条件下没有报账点数据" />
+        <ElEmpty
+          description="当前条件下没有报账点数据"
+        />
       </template>
     </ElTable>
 
     <footer class="table-footer">
       <span>{{ rangeLabel }}</span>
+
       <ElPagination
         background
         layout="sizes, prev, pager, next"
         :current-page="filters.page"
         :page-size="filters.size"
         :page-sizes="[10, 20, 50]"
-        :total="pageData?.totalElements ?? 0"
+        :total="
+          pageData?.totalElements ??
+          0
+        "
         @current-change="changePage"
         @size-change="changeSize"
       />
@@ -700,12 +1150,15 @@ watch(
     @update:model-value="closeImport"
     @imported="handleImported"
   />
+
   <ExportDataDialog
     v-model="exportVisible"
     :scope-label="`当前已选择 ${selectedCount} 条记录`"
     :period="exportPeriod"
     :city-code="exportCityCode"
-    :billing-point-ids="selectedIdList"
+    :billing-point-ids="
+      selectedIdList
+    "
     :selected-count="selectedCount"
   />
 </template>
@@ -713,26 +1166,25 @@ watch(
 <style scoped>
 .filter-card {
   padding: 12px 16px 14px;
+
   transition:
     padding 0.2s ease,
     min-height 0.2s ease;
 }
 
-/*
- * 查询区顶部：
- * 左侧“查询条件”，右侧“展开/收起”
- */
 .filter-card-header {
   display: flex;
+
   min-height: 28px;
+
   align-items: center;
   justify-content: space-between;
 }
 
-/*
- * 展开状态下，标题与下面查询字段保持一定距离。
- */
-.filter-card:not(.filter-card-collapsed) .filter-card-header {
+.filter-card:not(
+    .filter-card-collapsed
+  )
+  .filter-card-header {
   margin-bottom: 12px;
 }
 
@@ -742,26 +1194,22 @@ watch(
   font-weight: 700;
 }
 
-/*
- * 展开/收起按钮采用轻量文字样式，
- * 不做成醒目的大按钮。
- */
 .filter-collapse-button {
   height: 28px;
   padding: 0 2px;
+
   font-size: 13px;
 }
 
 .collapse-arrow {
   display: inline-block;
+
   margin-left: 5px;
+
   font-size: 15px;
   line-height: 1;
 }
 
-/*
- * 收起后整张查询卡只保留标题这一行。
- */
 .filter-card-collapsed {
   padding-top: 10px;
   padding-bottom: 10px;
@@ -769,21 +1217,35 @@ watch(
 
 .multi-value-cell {
   display: inline-block;
+
   white-space: normal;
   overflow-wrap: anywhere;
+
   line-height: 1.45;
 }
 
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+
+  grid-template-columns:
+    repeat(
+      auto-fit,
+      minmax(
+        min(100%, 150px),
+        1fr
+      )
+    );
+
   gap: 12px 14px;
 }
 
 .filter-grid label {
   display: grid;
+
   min-width: 0;
+
   gap: 6px;
+
   color: #1f2d3d;
   font-size: 14px;
   font-weight: 600;
@@ -797,13 +1259,17 @@ watch(
 
 .filter-actions {
   display: flex;
+
   grid-column: -2 / -1;
+
   gap: 10px;
   align-items: end;
   justify-content: flex-end;
   justify-self: end;
   align-self: end;
+
   padding-top: 4px;
+
   white-space: nowrap;
 }
 
@@ -811,39 +1277,75 @@ watch(
   min-width: 78px;
 }
 
+/*
+ * 列表保留横向滚动，
+ * 不再设置固定高度和内部纵向滚动。
+ * 当前页仍由分页控制，只展示当前页数据。
+ */
 .table-card {
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
 }
 
-.table-card :deep(.el-table__empty-block) {
-  min-height: 420px;
+.table-card :deep(.el-table),
+.table-card :deep(.el-table__inner-wrapper),
+.table-card :deep(.el-table__body-wrapper) {
+  height: auto !important;
+  max-height: none !important;
 }
 
-.table-card :deep(td.el-table__fixed-column--right .cell) {
+.table-card
+  :deep(
+    .el-table__body-wrapper
+  ) {
+  overflow-y: visible !important;
+}
+
+.table-card
+  :deep(
+    .el-table__empty-block
+  ) {
+  min-height: 220px;
+}
+
+.table-card
+  :deep(
+    td.el-table__fixed-column--right
+      .cell
+  ) {
   min-width: 0;
 }
 
 .row-command-actions {
   width: 100%;
+
   justify-content: space-between;
 }
 
 .table-footer {
   display: flex;
+
   min-height: 58px;
+
   gap: 16px;
   align-items: center;
   justify-content: space-between;
+
   padding: 10px 16px;
+
   color: #607089;
-  border-top: 1px solid #edf1f5;
   font-size: 14px;
+
+  border-top: 1px solid #edf1f5;
 }
 
 @media (width <= 1280px) {
   .filter-grid {
-    grid-template-columns: repeat(4, minmax(150px, 1fr));
+    grid-template-columns:
+      repeat(
+        4,
+        minmax(150px, 1fr)
+      );
   }
 }
 
@@ -854,9 +1356,10 @@ watch(
 
   .business-toolbar,
   .table-footer {
+    width: 100%;
+
     align-items: flex-start;
     flex-direction: column;
-    width: 100%;
   }
 
   .filter-actions,

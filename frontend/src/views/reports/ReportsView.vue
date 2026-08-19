@@ -654,7 +654,6 @@ onMounted(async () => {
       ref="tableRef"
       v-loading="loading"
       :data="pageData?.items ?? []"
-      height="535"
       table-layout="fixed"
       @selection-change="selectRows"
     >
@@ -1207,6 +1206,10 @@ onMounted(async () => {
   }
 }
 
+/*
+ * 你截图中的窄页面宽度也保持一行。
+ * 此时进一步压缩四个字段，不再改成两列或单列。
+ */
 @media (width <= 820px) {
   .report-filter {
     gap: 6px;
@@ -1420,6 +1423,29 @@ onMounted(async () => {
   padding: 0 10px !important;
   font-size: 14px !important;
   box-sizing: border-box !important;
+}
+
+
+/* 历史报告列表：保留分页和横向宽表，取消列表内部纵向滚动 */
+.report-table {
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+}
+
+.report-table :deep(.el-table),
+.report-table :deep(.el-table__inner-wrapper),
+.report-table :deep(.el-table__body-wrapper) {
+  height: auto !important;
+  max-height: none !important;
+}
+
+.report-table :deep(.el-table__body-wrapper) {
+  overflow-y: visible !important;
+}
+
+/* 横向滚动继续保留，字段多时仍可左右查看 */
+.report-table :deep(.el-scrollbar__wrap) {
+  max-height: none !important;
 }
 
 </style>
