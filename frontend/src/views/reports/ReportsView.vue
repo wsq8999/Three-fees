@@ -357,7 +357,9 @@ async function importHistorical(): Promise<void> {
     focusedReport.value = imported;
     await loadOptions();
     Object.assign(filters, {
-      keyword: "",
+      reportNumber: "",
+      billingPointCode: "",
+      billingPointName: "",
       period: "",
       cityCode: cityLocked.value ? (session.currentUser?.city?.code ?? "") : "",
       district: "",
@@ -529,7 +531,7 @@ onMounted(async () => {
       <span>报告编号</span>
       <ElInput
         v-model="filters.reportNumber"
-        placeholder="请输入报告编号"
+        placeholder="请输入编号"
         clearable
       />
     </label>
@@ -538,7 +540,7 @@ onMounted(async () => {
       <span>报账点编码</span>
       <ElInput
         v-model="filters.billingPointCode"
-        placeholder="请输入报账点编码"
+        placeholder="请输入编码"
         clearable
       />
     </label>
@@ -547,7 +549,7 @@ onMounted(async () => {
       <span>报账点名称</span>
       <ElInput
         v-model="filters.billingPointName"
-        placeholder="请输入报账点名称"
+        placeholder="请输入名称"
         clearable
       />
     </label>

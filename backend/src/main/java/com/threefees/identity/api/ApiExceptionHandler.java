@@ -25,6 +25,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.util.DisconnectedClientHelper;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
@@ -227,11 +228,30 @@ public class ApiExceptionHandler {
   @ExceptionHandler(Exception.class)
   ResponseEntity<ProblemDetail> internalError(Exception exception, HttpServletRequest request) {
     String traceId = traceId(request);
+
+    /*
+     * 浏览器刷新、跳转、主动取消请求时，Tomcat/Spring 可能抛出
+     * ClientAbortException、AsyncRequestNotUsableException、
+     * broken pipe、connection reset by peer 等异常。
+     *
+     * 这类异常代表“客户端已经断开”，不是业务处理失败。
+     * 此时响应流通常已经不可写，不能再尝试返回 ProblemDetail，
+     * 否则会继续触发 HttpMessageNotWritableException。
+     */
+    if (DisconnectedClientHelper.isClientDisconnectedException(exception)) {
+      LOGGER.debug(
+          "Client disconnected before response completed traceId={} exceptionType={}",
+          traceId,
+          exception.getClass().getName());
+      return null;
+    }
+
     LOGGER.error(
         "Unhandled request failure traceId={} exceptionType={}",
         traceId,
         exception.getClass().getName(),
         exception);
+
     return problem(
         HttpStatus.INTERNAL_SERVER_ERROR,
         "internal-error",
@@ -257,6 +277,7 @@ public class ApiExceptionHandler {
     problem.setProperty("code", code);
     problem.setProperty("traceId", traceId(request));
     problem.setProperty("fieldErrors", fieldErrors);
+
     return ResponseEntity.status(status)
         .contentType(MediaType.APPLICATION_PROBLEM_JSON)
         .body(problem);
