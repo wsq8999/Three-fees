@@ -297,139 +297,262 @@ public class AuditReportService {
     }
   }
 
-  @Transactional(readOnly = true)
-  public ReportPage findPage(
-      String keyword,
-      String period,
-      String cityCode,
-      String district,
-      int page,
-      int size,
-      CurrentUser actor) {
-    String scopedCity = scopeCity(actor, cityCode);
-    var arguments = new java.util.ArrayList<Object>();
-    StringBuilder where = new StringBuilder(" WHERE 1=1");
-    if (scopedCity != null && !scopedCity.isBlank()) {
-      where.append(" AND s.city_code = ?");
-      arguments.add(scopedCity);
-    }
-    if (district != null && !district.isBlank()) {
-      where.append(
-          """
-               AND COALESCE(
-                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''),
-                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."区县"')), ''),
-                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."行政区"')), ''),
-                 NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区域"')), '')
-               ) = ?
-              """);
+    @Transactional(readOnly = true)
+    public ReportPage findPage(
+        String reportNumber,
+        String billingPointCode,
+        String billingPointName,
+        String period,
+        String cityCode,
+        String district,
+        int page,
+        int size,
+        CurrentUser actor) {
 
-      arguments.add(district.trim());
-    }
-    if (period != null && !period.isBlank()) {
-      where.append(" AND s.data_period = ?");
-      arguments.add(period);
-    }
-    if (keyword != null && !keyword.isBlank()) {
-      where.append(
-          " AND (r.report_number LIKE ? OR s.billing_point_code LIKE ? OR s.billing_point_name LIKE ?)");
-      String pattern = "%" + keyword.trim() + "%";
-      arguments.add(pattern);
-      arguments.add(pattern);
-      arguments.add(pattern);
-    }
-    long total =
-        jdbcTemplate.queryForObject(
-            "SELECT COUNT(*) FROM audit_report r JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id"
-                + where,
-            Long.class,
-            arguments.toArray());
-    var pageArguments = new java.util.ArrayList<>(arguments);
-    pageArguments.add(size);
-    pageArguments.add(Math.multiplyExact(page, size));
-    List<ReportSummary> items =
-        jdbcTemplate.query(
-            """
-            SELECT r.public_id, r.report_number, r.source_type, r.status, r.generated_at,
-                   r.updated_at, r.version, s.billing_point_code, s.billing_point_name,
-                   s.city_code, c.name AS city_name, s.data_period, s.data_json,
-                   COALESCE(
-                     (SELECT SUM(m.allocated_kwh)
-                        FROM meter_reading m
-                       WHERE m.billing_point_code = s.billing_point_code
-                         AND m.data_period = s.data_period
-                         AND m.city_code = s.city_code),
-                     a.actual_energy
-                   ) AS actual_energy,
-                   COALESCE(
-                     (SELECT SUM(p.actual_report_amount)
-                        FROM payment_detail p
-                       WHERE p.billing_point_code = s.billing_point_code
-                         AND p.data_period = s.data_period
-                         AND p.city_code = s.city_code
-                         AND p.id IN (
-                           SELECT MIN(p2.id)
-                             FROM payment_detail p2
-                            WHERE p2.billing_point_code = s.billing_point_code
-                              AND p2.data_period = s.data_period
-                              AND p2.city_code = s.city_code
-                            GROUP BY p2.payment_bill_code
-                         )),
-                     a.actual_amount
-                   ) AS actual_amount,
-                   a.over_limit_type, a.max_ratio,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.overLimitType')) AS snapshot_over_limit_type,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.overLimitType')) AS snapshot_result_over_limit_type,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.maxRatioPercent')) AS snapshot_max_ratio,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.maxRatioPercent')) AS snapshot_result_max_ratio,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualEnergy')) AS snapshot_actual_energy,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.actualEnergy')) AS snapshot_result_actual_energy,
-                   JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.currentActualAmount')) AS snapshot_actual_amount
-              FROM audit_report r
-              JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
-              JOIN city c ON c.code = s.city_code
-              LEFT JOIN audit_result a
-                ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
-            """
-                + where
-                + " ORDER BY r.generated_at DESC, r.id DESC LIMIT ? OFFSET ?",
-            (resultSet, rowNumber) ->
-                new ReportSummary(
-                    resultSet.getString("public_id"),
-                    resultSet.getString("report_number"),
-                    resultSet.getString("billing_point_code"),
-                    resultSet.getString("billing_point_name"),
-                    resultSet.getString("city_code"),
-                    resultSet.getString("city_name"),
-                    district(parseJson(resultSet.getString("data_json"))),
-                    resultSet.getString("data_period"),
-                    resultSet.getString("source_type"),
-                    resultSet.getString("status"),
-                    decimalOr(
+        String scopedCity = scopeCity(actor, cityCode);
+
+        var arguments =
+            new java.util.ArrayList<Object>();
+
+        StringBuilder where =
+            new StringBuilder(" WHERE 1=1");
+
+        /*
+         * 所属地市
+         */
+        if (scopedCity != null && !scopedCity.isBlank()) {
+            where.append(" AND s.city_code = ?");
+            arguments.add(scopedCity);
+        }
+
+        /*
+         * 所属区县
+         */
+        if (district != null && !district.isBlank()) {
+            where.append(
+                """
+                     AND COALESCE(
+                       NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''),
+                       NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."区县"')), ''),
+                       NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."行政区"')), ''),
+                       NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区域"')), '')
+                     ) = ?
+                    """);
+
+            arguments.add(district.trim());
+        }
+
+        /*
+         * 账期
+         */
+        if (period != null && !period.isBlank()) {
+            where.append(" AND s.data_period = ?");
+            arguments.add(period.trim());
+        }
+
+        /*
+         * 报告编号
+         */
+        if (reportNumber != null && !reportNumber.isBlank()) {
+            where.append(
+                " AND r.report_number LIKE ?");
+
+            arguments.add(
+                "%" + reportNumber.trim() + "%");
+        }
+
+        /*
+         * 报账点编码
+         */
+        if (billingPointCode != null
+            && !billingPointCode.isBlank()) {
+
+            where.append(
+                " AND s.billing_point_code LIKE ?");
+
+            arguments.add(
+                "%" + billingPointCode.trim() + "%");
+        }
+
+        /*
+         * 报账点名称
+         */
+        if (billingPointName != null
+            && !billingPointName.isBlank()) {
+
+            where.append(
+                " AND s.billing_point_name LIKE ?");
+
+            arguments.add(
+                "%" + billingPointName.trim() + "%");
+        }
+
+        long total =
+            jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) "
+                    + "FROM audit_report r "
+                    + "JOIN billing_point_snapshot s "
+                    + "ON s.id = r.billing_point_snapshot_id"
+                    + where,
+                Long.class,
+                arguments.toArray());
+
+        var pageArguments =
+            new java.util.ArrayList<>(arguments);
+
+        pageArguments.add(size);
+        pageArguments.add(
+            Math.multiplyExact(page, size));
+
+        List<ReportSummary> items =
+            jdbcTemplate.query(
+                """
+                SELECT r.public_id, r.report_number, r.source_type, r.status, r.generated_at,
+                       r.updated_at, r.version, s.billing_point_code, s.billing_point_name,
+                       s.city_code, c.name AS city_name, s.data_period, s.data_json,
+                       COALESCE(
+                         (SELECT SUM(m.allocated_kwh)
+                            FROM meter_reading m
+                           WHERE m.billing_point_code = s.billing_point_code
+                             AND m.data_period = s.data_period
+                             AND m.city_code = s.city_code),
+                         a.actual_energy
+                       ) AS actual_energy,
+                       COALESCE(
+                         (SELECT SUM(p.actual_report_amount)
+                            FROM payment_detail p
+                           WHERE p.billing_point_code = s.billing_point_code
+                             AND p.data_period = s.data_period
+                             AND p.city_code = s.city_code
+                             AND p.id IN (
+                               SELECT MIN(p2.id)
+                                 FROM payment_detail p2
+                                WHERE p2.billing_point_code = s.billing_point_code
+                                  AND p2.data_period = s.data_period
+                                  AND p2.city_code = s.city_code
+                                GROUP BY p2.payment_bill_code
+                             )),
+                         a.actual_amount
+                       ) AS actual_amount,
+                       a.over_limit_type,
+                       a.max_ratio,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.overLimitType'
+                         )
+                       ) AS snapshot_over_limit_type,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.result.overLimitType'
+                         )
+                       ) AS snapshot_result_over_limit_type,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.maxRatioPercent'
+                         )
+                       ) AS snapshot_max_ratio,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.result.maxRatioPercent'
+                         )
+                       ) AS snapshot_result_max_ratio,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.currentActualEnergy'
+                         )
+                       ) AS snapshot_actual_energy,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.result.actualEnergy'
+                         )
+                       ) AS snapshot_result_actual_energy,
+                       JSON_UNQUOTE(
+                         JSON_EXTRACT(
+                           r.business_snapshot_json,
+                           '$.audit.currentActualAmount'
+                         )
+                       ) AS snapshot_actual_amount
+                  FROM audit_report r
+                  JOIN billing_point_snapshot s
+                    ON s.id = r.billing_point_snapshot_id
+                  JOIN city c
+                    ON c.code = s.city_code
+                  LEFT JOIN audit_result a
+                    ON a.billing_point_code = s.billing_point_code
+                   AND a.data_period = s.data_period
+                   AND a.city_code = s.city_code
+                """
+                    + where
+                    + " ORDER BY r.generated_at DESC, r.id DESC LIMIT ? OFFSET ?",
+
+                (resultSet, rowNumber) ->
+                    new ReportSummary(
+                        resultSet.getString("public_id"),
+                        resultSet.getString("report_number"),
+                        resultSet.getString("billing_point_code"),
+                        resultSet.getString("billing_point_name"),
+                        resultSet.getString("city_code"),
+                        resultSet.getString("city_name"),
+                        district(
+                            parseJson(
+                                resultSet.getString("data_json"))),
+                        resultSet.getString("data_period"),
+                        resultSet.getString("source_type"),
+                        resultSet.getString("status"),
                         decimalOr(
-                            resultSet.getBigDecimal("actual_energy"),
-                            resultSet.getString("snapshot_actual_energy")),
-                        resultSet.getString("snapshot_result_actual_energy")),
-                    decimalOr(
-                        resultSet.getBigDecimal("actual_amount"),
-                        resultSet.getString("snapshot_actual_amount")),
-                    valueOr(
+                            decimalOr(
+                                resultSet.getBigDecimal("actual_energy"),
+                                resultSet.getString(
+                                    "snapshot_actual_energy")),
+                            resultSet.getString(
+                                "snapshot_result_actual_energy")),
+                        decimalOr(
+                            resultSet.getBigDecimal("actual_amount"),
+                            resultSet.getString(
+                                "snapshot_actual_amount")),
                         valueOr(
-                            resultSet.getString("over_limit_type"),
-                            resultSet.getString("snapshot_over_limit_type")),
-                        resultSet.getString("snapshot_result_over_limit_type")),
-                    decimalOr(
+                            valueOr(
+                                resultSet.getString(
+                                    "over_limit_type"),
+                                resultSet.getString(
+                                    "snapshot_over_limit_type")),
+                            resultSet.getString(
+                                "snapshot_result_over_limit_type")),
                         decimalOr(
-                            resultSet.getBigDecimal("max_ratio"),
-                            resultSet.getString("snapshot_max_ratio")),
-                        resultSet.getString("snapshot_result_max_ratio")),
-                    resultSet.getObject("generated_at", LocalDateTime.class),
-                    resultSet.getObject("updated_at", LocalDateTime.class),
-                    resultSet.getLong("version")),
-            pageArguments.toArray());
-    return new ReportPage(
-        items, page, size, total, total == 0 ? 0 : (int) ((total + size - 1) / size));
-  }
+                            decimalOr(
+                                resultSet.getBigDecimal("max_ratio"),
+                                resultSet.getString(
+                                    "snapshot_max_ratio")),
+                            resultSet.getString(
+                                "snapshot_result_max_ratio")),
+                        resultSet.getObject(
+                            "generated_at",
+                            LocalDateTime.class),
+                        resultSet.getObject(
+                            "updated_at",
+                            LocalDateTime.class),
+                        resultSet.getLong("version")),
+
+                pageArguments.toArray());
+
+        int totalPages =
+            total == 0
+                ? 0
+                : (int) ((total + size - 1) / size);
+
+        return new ReportPage(
+            items,
+            page,
+            size,
+            total,
+            totalPages);
+    }
 
   @Transactional(readOnly = true)
   public ReportDetail find(String publicId, CurrentUser actor) {

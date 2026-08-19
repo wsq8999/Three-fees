@@ -260,18 +260,30 @@ function handleUserCommand(command: string): void {
 .brand-lockup {
   display: flex;
   height: var(--topbar-height);
-  gap: var(--space-3);
+
+  /* 缩小图标与标题之间的间距 */
+  gap: 8px;
+
   align-items: center;
-  padding: var(--space-2) var(--space-4);
+
+  /* 原来左右16px，改成12px，给完整系统名称腾出空间 */
+  padding: var(--space-2) 12px;
+
   color: var(--color-neutral-900);
   border-bottom: 1px solid var(--color-neutral-200);
 }
 
 .brand-lockup strong {
-  overflow: hidden;
-  font-size: var(--font-size-md);
+  flex: 1 1 auto;
+  min-width: 0;
+
+  /*
+   * 不再使用 ... 截断系统名称
+   */
+  overflow: visible;
+  font-size: 15px;
   font-weight: 800;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
 }
 

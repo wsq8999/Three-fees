@@ -365,11 +365,16 @@ export interface HistoricalReportCandidate {
 }
 
 export interface ReportQuery {
+  reportNumber: string;
+  billingPointCode: string;
+  billingPointName: string;
+
+  period: string;
   cityCode: string;
   district: string;
-  period: string;
-  keyword: string;
+
   source: ReportSummary["source"] | "";
+
   page: number;
   size: number;
 }

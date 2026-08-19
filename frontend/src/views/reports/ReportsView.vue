@@ -46,13 +46,32 @@ const importForm = reactive({
 });
 
 const filters = reactive({
-  keyword: String(route.query.keyword ?? ""),
-  period: String(route.query.period ?? ""),
-  cityCode: session.currentUser?.city?.code ?? String(route.query.city ?? ""),
-  district: String(route.query.district ?? ""),
+  reportNumber:
+    String(route.query.reportNumber ?? ""),
+
+  billingPointCode:
+    String(route.query.billingPointCode ?? ""),
+
+  billingPointName:
+    String(route.query.billingPointName ?? ""),
+
+  period:
+    String(route.query.period ?? ""),
+
+  cityCode:
+    session.currentUser?.city?.code ??
+    String(route.query.city ?? ""),
+
+  district:
+    String(route.query.district ?? ""),
+
   source: "" as ReportSummary["source"] | "",
-  page: Number(route.query.page ?? 1),
-  size: Number(route.query.size ?? 10),
+
+  page:
+    Number(route.query.page ?? 1),
+
+  size:
+    Number(route.query.size ?? 10),
 });
 
 const cityLocked = computed(() => session.currentUser?.city != null);
@@ -95,29 +114,57 @@ function hasText(value: unknown): value is string {
 }
 
 
-function reportQuery(page = filters.page, size = filters.size) {
+function reportQuery(
+  page = filters.page,
+  size = filters.size,
+) {
   return {
-    cityCode: filters.cityCode,
-    district: filters.district,
-    period: filters.period,
-    keyword: filters.keyword,
-    source: filters.source,
+    reportNumber:
+      filters.reportNumber.trim(),
+
+    billingPointCode:
+      filters.billingPointCode.trim(),
+
+    billingPointName:
+      filters.billingPointName.trim(),
+
+    period:
+    filters.period,
+
+    cityCode:
+    filters.cityCode,
+
+    district:
+    filters.district,
+
+    source:
+    filters.source,
+
     page,
     size,
   };
 }
 
 async function loadOptions(): Promise<void> {
-  const result = await businessApi.reports.list({
-    cityCode: session.currentUser?.city?.code ?? "",
-    district: "",
-    period: "",
-    keyword: "",
-    source: "",
-    page: 1,
-    size: 100,
-  });
-  optionReports.value = result.items;
+  const result =
+    await businessApi.reports.list({
+      reportNumber: "",
+      billingPointCode: "",
+      billingPointName: "",
+
+      cityCode:
+        session.currentUser?.city?.code ?? "",
+
+      district: "",
+      period: "",
+      source: "",
+
+      page: 1,
+      size: 100,
+    });
+
+  optionReports.value =
+    result.items;
 }
 
 async function load(): Promise<void> {
@@ -148,12 +195,44 @@ async function syncRouteAndLoad(resetPage = false): Promise<void> {
   await router.replace({
     path: "/reports/history",
     query: {
-      ...(filters.keyword ? { keyword: filters.keyword } : {}),
-      ...(filters.period ? { period: filters.period } : {}),
-      ...(filters.cityCode ? { city: filters.cityCode } : {}),
-      ...(filters.district ? { district: filters.district } : {}),
-      page: String(filters.page),
-      size: String(filters.size),
+      ...(filters.reportNumber
+        ? {
+          reportNumber:
+          filters.reportNumber,
+        }
+        : {}),
+
+      ...(filters.billingPointCode
+        ? {
+          billingPointCode:
+          filters.billingPointCode,
+        }
+        : {}),
+
+      ...(filters.billingPointName
+        ? {
+          billingPointName:
+          filters.billingPointName,
+        }
+        : {}),
+
+      ...(filters.period
+        ? { period: filters.period }
+        : {}),
+
+      ...(filters.cityCode
+        ? { city: filters.cityCode }
+        : {}),
+
+      ...(filters.district
+        ? { district: filters.district }
+        : {}),
+
+      page:
+        String(filters.page),
+
+      size:
+        String(filters.size),
     },
   });
   await load();
@@ -161,13 +240,20 @@ async function syncRouteAndLoad(resetPage = false): Promise<void> {
 
 function reset(): void {
   Object.assign(filters, {
-    keyword: "",
+    reportNumber: "",
+    billingPointCode: "",
+    billingPointName: "",
+
     period: "",
-    cityCode: session.currentUser?.city?.code ?? "",
+
+    cityCode:
+      session.currentUser?.city?.code ?? "",
+
     district: "",
     source: "",
     page: 1,
   });
+
   void syncRouteAndLoad();
 }
 
@@ -326,9 +412,17 @@ async function importHistorical(): Promise<void> {
     focusedReport.value = imported;
     await loadOptions();
     Object.assign(filters, {
-      keyword: "",
+      reportNumber: "",
+      billingPointCode: "",
+      billingPointName: "",
+
       period: "",
-      cityCode: cityLocked.value ? (session.currentUser?.city?.code ?? "") : "",
+
+      cityCode:
+        cityLocked.value
+          ? (session.currentUser?.city?.code ?? "")
+          : "",
+
       district: "",
       source: "",
       page: 1,
@@ -491,52 +585,93 @@ onMounted(async () => {
 
 <template>
   <section class="report-filter business-card">
-    <label>
-      <span>关键字</span>
-      <ElInput
-        v-model="filters.keyword"
-        placeholder="报告编号、报账点编码或报账点名称"
-        clearable
-      />
-    </label>
-    <label>
-      <span>账期</span>
-      <ElSelect v-model="filters.period" placeholder="全部账期" clearable>
-        <ElOption
-          v-for="period in periodOptions"
-          :key="period"
-          :label="period"
-          :value="period"
+    <div class="report-filter-fields">
+      <label>
+        <span>报告编号</span>
+
+        <ElInput
+          v-model="filters.reportNumber"
+          placeholder="请输入报告编号"
+          clearable
+          @keyup.enter="syncRouteAndLoad(true)"
         />
-      </ElSelect>
-    </label>
-    <label>
-      <span>所属地市</span>
-      <ElSelect
-        v-model="filters.cityCode"
-        :disabled="cityLocked"
-        placeholder="全部地市"
-        clearable
-      >
-        <ElOption
-          v-for="city in cityOptions"
-          :key="city.code"
-          :label="city.name"
-          :value="city.code"
+      </label>
+
+      <label>
+        <span>报账点编码</span>
+
+        <ElInput
+          v-model="filters.billingPointCode"
+          placeholder="请输入报账点编码"
+          clearable
+          @keyup.enter="syncRouteAndLoad(true)"
         />
-      </ElSelect>
-    </label>
-    <label>
-      <span>所属区县</span>
-      <ElSelect v-model="filters.district" placeholder="全部区县" clearable>
-        <ElOption
-          v-for="district in districtOptions"
-          :key="district"
-          :label="district"
-          :value="district"
+      </label>
+
+      <label>
+        <span>报账点名称</span>
+
+        <ElInput
+          v-model="filters.billingPointName"
+          placeholder="请输入报账点名称"
+          clearable
+          @keyup.enter="syncRouteAndLoad(true)"
         />
-      </ElSelect>
-    </label>
+      </label>
+
+      <label>
+        <span>账期</span>
+
+        <ElSelect
+          v-model="filters.period"
+          placeholder="全部账期"
+          clearable
+        >
+          <ElOption
+            v-for="period in periodOptions"
+            :key="period"
+            :label="period"
+            :value="period"
+          />
+        </ElSelect>
+      </label>
+
+      <label>
+        <span>所属地市</span>
+
+        <ElSelect
+          v-model="filters.cityCode"
+          :disabled="cityLocked"
+          placeholder="全部地市"
+          clearable
+        >
+          <ElOption
+            v-for="city in cityOptions"
+            :key="city.code"
+            :label="city.name"
+            :value="city.code"
+          />
+        </ElSelect>
+      </label>
+
+      <label>
+        <span>所属区县</span>
+
+        <ElSelect
+          v-model="filters.district"
+          placeholder="全部区县"
+          clearable
+        >
+          <ElOption
+            v-for="district in districtOptions"
+            :key="district"
+            :label="district"
+            :value="district"
+          />
+        </ElSelect>
+      </label>
+    </div>
+
     <div class="query-actions">
       <ElButton
         class="query-button"
@@ -547,7 +682,12 @@ onMounted(async () => {
       >
         查询
       </ElButton>
-      <ElButton class="reset-button" :icon="Refresh" @click="reset">
+
+      <ElButton
+        class="reset-button"
+        :icon="Refresh"
+        @click="reset"
+      >
         重置
       </ElButton>
     </div>
@@ -796,41 +936,109 @@ onMounted(async () => {
 
 <style scoped>
 .report-filter {
-  display: grid;
-  grid-template-columns:
-    minmax(min(100%, 280px), 1.8fr) minmax(150px, 0.8fr) minmax(150px, 0.8fr)
-    minmax(150px, 0.8fr);
+  display: flex;
+  width: 100%;
   gap: 12px;
-  align-items: end;
+  align-items: flex-end;
   padding: 14px 16px;
   margin-bottom: 12px;
+  box-sizing: border-box;
+  flex-wrap: nowrap;
 }
 
-.report-filter label {
+.report-filter-fields {
+  display: grid;
+  flex: 1 1 0;
+  min-width: 0;
+
+  /*
+   * 6个字段完全等宽，
+   * 自动把按钮以外的剩余空间全部铺满。
+   */
+  grid-template-columns:
+    repeat(6, minmax(0, 1fr));
+
+  gap: 10px;
+  align-items: end;
+}
+
+.report-filter-fields label {
   display: grid;
   min-width: 0;
   gap: 6px;
+
   color: #1f2d3d;
   font-size: 13px;
   font-weight: 700;
 }
 
-.report-filter :deep(.el-input),
-.report-filter :deep(.el-select),
-.report-filter :deep(.el-date-editor) {
-  width: 100%;
+.report-filter-fields :deep(.el-input),
+.report-filter-fields :deep(.el-select),
+.report-filter-fields :deep(.el-date-editor) {
+  width: 100% !important;
+  min-width: 0 !important;
 }
 
-.query-button,
-.reset-button {
-  min-width: 76px;
+.report-filter-fields :deep(.el-input__wrapper),
+.report-filter-fields :deep(.el-select__wrapper) {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .query-actions {
   display: flex;
-  grid-column: 1 / -1;
-  gap: 10px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+
+  gap: 8px;
+  align-items: center;
   justify-content: flex-end;
+
+  margin-left: auto;
+
+  white-space: nowrap;
+}
+
+.query-actions .el-button,
+.query-button,
+.reset-button {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 68px;
+
+  padding-right: 10px;
+  padding-left: 10px;
+
+  margin-left: 0;
+}
+
+/*
+ * 较窄页面仍然保持一行。
+ * 输入框自动继续压缩。
+ */
+@media (width <= 1200px) {
+  .report-filter {
+    gap: 8px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .report-filter-fields {
+    gap: 7px;
+  }
+
+  .query-actions {
+    gap: 6px;
+  }
+
+  .query-actions .el-button,
+  .query-button,
+  .reset-button {
+    min-width: 60px;
+    padding-right: 7px;
+    padding-left: 7px;
+  }
 }
 
 .report-toolbar {
@@ -1063,19 +1271,103 @@ onMounted(async () => {
   font-style: normal;
 }
 
-@media (width <= 1280px) {
+/*
+ * 中等宽度：继续保持一行，只缩短字段。
+ */
+@media (width <= 1180px) {
   .report-filter {
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+    gap: 10px;
   }
 
+  .report-filter-fields {
+    grid-template-columns:
+      minmax(150px, 1.45fr)
+      repeat(3, minmax(90px, 0.85fr));
+    gap: 8px;
+  }
+
+  .query-actions {
+    gap: 6px;
+  }
+
+  .query-actions .el-button,
   .query-button,
   .reset-button {
-    width: auto;
+    min-width: 62px;
+    padding-right: 8px;
+    padding-left: 8px;
   }
 }
 
-@media (width <= 720px) {
-  .report-filter,
+/*
+ * 你截图中的窄页面宽度也保持一行。
+ * 此时进一步压缩四个字段，不再改成两列或单列。
+ */
+@media (width <= 820px) {
+  .report-filter {
+    gap: 6px;
+    padding: 12px 10px;
+  }
+
+  .report-filter-fields {
+    grid-template-columns:
+      minmax(115px, 1.35fr)
+      repeat(3, minmax(64px, 0.72fr));
+    gap: 6px;
+  }
+
+  .report-filter-fields label {
+    gap: 4px;
+    font-size: 13px;
+  }
+
+  .query-actions {
+    gap: 4px;
+  }
+
+  .query-actions .el-button,
+  .query-button,
+  .reset-button {
+    min-width: 54px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+}
+
+/*
+ * 极窄宽度仍然不纵向堆叠查询条件。
+ * 如果设备宽度实在不足，则允许查询卡片内部横向滚动，
+ * 而不是把四个字段变成四行。
+ */
+@media (width <= 560px) {
+  .report-filter {
+    overflow-x: auto;
+  }
+
+  .report-filter-fields {
+    flex: 1 0 360px;
+    grid-template-columns:
+      minmax(105px, 1.3fr)
+      repeat(3, minmax(58px, 0.7fr));
+    gap: 5px;
+  }
+
+  .query-actions {
+    flex: 0 0 auto;
+  }
+
+  .query-actions .el-button,
+  .query-button,
+  .reset-button {
+    min-width: 50px;
+    padding-right: 5px;
+    padding-left: 5px;
+  }
+
+  /*
+   * 下面这些区域仍可按移动端方式布局；
+   * 只是不再影响历史报告查询区。
+   */
   .import-fields,
   .upload-box {
     grid-template-columns: 1fr;
@@ -1089,17 +1381,9 @@ onMounted(async () => {
     gap: 10px;
   }
 
-  .query-actions,
-  .query-button,
-  .reset-button,
   .toolbar-left,
   .toolbar-left .el-button {
     width: 100%;
-  }
-
-  .query-actions {
-    align-items: stretch;
-    flex-direction: column;
   }
 }
 </style>

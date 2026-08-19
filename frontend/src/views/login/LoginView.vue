@@ -38,14 +38,39 @@ async function handleSubmit(): Promise<void> {
   });
   isSubmitting.value = false;
   if (result.ok) {
+    /*
+     * “暂无报账点，请导入数据”的提醒只在
+     * 当前一次登录期间关闭。
+     *
+     * 每次重新登录时清除上一次登录留下的
+     * sessionStorage 标记。
+     *
+     * Dashboard 仍然会根据 billingPointCount 判断：
+     * - 有报账点：不弹；
+     * - 没有报账点：本次登录弹一次。
+     */
+    const loggedInUser = session.currentUser;
+
+    const importGuideUserId =
+      loggedInUser?.id ??
+      loggedInUser?.username ??
+      form.username.trim();
+
+    sessionStorage.removeItem(
+      `three-fees-import-guide-dismissed:${importGuideUserId}`,
+    );
+
     if (rememberUsername.value) {
       localStorage.setItem(
         "three-fees-remembered-username",
         form.username.trim(),
       );
     } else {
-      localStorage.removeItem("three-fees-remembered-username");
+      localStorage.removeItem(
+        "three-fees-remembered-username",
+      );
     }
+
     form.password = "";
     await router.replace("/dashboard");
     return;

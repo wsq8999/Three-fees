@@ -1078,17 +1078,24 @@ export const businessApi = {
   reports: {
     async list(query: ReportQuery): Promise<PageResult<ReportSummary>> {
       const params = queryString({
+        reportNumber: query.reportNumber,
+        billingPointCode: query.billingPointCode,
+        billingPointName: query.billingPointName,
+
+        period: query.period,
         cityCode: query.cityCode,
         district: query.district,
-        period: query.period,
-        keyword: query.keyword,
+
         source: query.source,
+
         page: Math.max(0, query.page - 1),
         size: query.size,
       });
+
       const result = asResult<BackendPage<BackendReportSummary>>(
         await httpClient.get(`/api/v1/reports?${params}`),
       );
+
       return {
         items: (result.items ?? []).map(mapReport),
         page: result.page + 1,
