@@ -49,6 +49,18 @@ public class ReportDraftService {
   private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
   private static final Pattern INLINE_FIGURE =
       Pattern.compile("(?is)<figure\\b[^>]*data-file-id=[\"']([^\"']+)[\"'][^>]*>.*?</figure>");
+  private static final Pattern INLINE_FILE_REFERENCE =
+      Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
+  private static final Pattern INLINE_BASE64_FIGURE =
+      Pattern.compile(
+          "(?is)<figure\\b[^>]*>\\s*"
+              + "<img\\b[^>]*src=[\"']data:image/(png|jpe?g);base64,([^\"']+)[\"'][^>]*?/?>"
+              + "\\s*</figure>");
+  private static final Pattern INLINE_BASE64_IMAGE =
+      Pattern.compile(
+          "(?is)<img\\b[^>]*src=[\"']data:image/(png|jpe?g);base64,([^\"']+)[\"'][^>]*?/?>");
+  private static final Pattern BASE64_IMAGE_MARKER =
+      Pattern.compile("(?is)data:image/(?:png|jpe?g);base64,");
   private static final Pattern HTML_ELEMENT = Pattern.compile("(?is)<[a-z][^>]*>");
 
   private final JdbcTemplate jdbcTemplate;
@@ -127,8 +139,9 @@ public class ReportDraftService {
     }
     SourceReport source = sourceReport(reportId);
     requireScope(actor, source.cityCode());
-    ReportSections sections = reportSections(source);
-    List<String> imageIds = extractInlineImages(source.html(), actor.username());
+    CorrectionContent correctionContent = prepareCorrectionContent(source, actor.username());
+    ReportSections sections = correctionContent.sections();
+    List<String> imageIds = correctionContent.imageIds();
     Draft existing = findBySnapshotId(source.snapshotId());
     if (existing == null) {
       String publicId = UUID.randomUUID().toString();
@@ -1446,8 +1459,188 @@ public class ReportDraftService {
     return value == null || value.isBlank() ? fallback : value;
   }
 
-  private ReportSections reportSections(SourceReport source) {
-    String html = source.html();
+  private CorrectionContent prepareCorrectionContent(SourceReport source, String actor) {
+    String originalHtml = source.html();
+
+    if (originalHtml == null || originalHtml.isBlank()) {
+      return new CorrectionContent(reportSections(source, originalHtml), List.of());
+    }
+
+    var generatedImageIds = new java.util.ArrayList<String>();
+
+    String rewrittenHtml = rewriteBase64Figures(originalHtml, actor, generatedImageIds);
+
+    rewrittenHtml = rewriteStandaloneBase64Images(rewrittenHtml, actor, generatedImageIds);
+
+    rewrittenHtml = cloneExistingInlineImages(rewrittenHtml, actor, generatedImageIds);
+
+    if (BASE64_IMAGE_MARKER.matcher(rewrittenHtml).find()) {
+      throw new BusinessRuleException(
+          "CORRECTION_IMAGE_CONVERSION_FAILED", "原报告中仍存在未转换的内嵌图片，已停止创建更正工作稿");
+    }
+
+    List<String> orderedImageIds = inlineFileIdsInOrder(rewrittenHtml);
+
+    if (orderedImageIds.size() > 10) {
+      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "原报告图片超过 10 张，暂无法进入更正工作稿");
+    }
+
+    ReportSections sections = reportSections(source, rewrittenHtml);
+
+    return new CorrectionContent(sections, orderedImageIds);
+  }
+
+  private String rewriteBase64Figures(
+      String html, String actor, java.util.List<String> generatedImageIds) {
+
+    var matcher = INLINE_BASE64_FIGURE.matcher(html);
+    var output = new StringBuffer();
+
+    while (matcher.find()) {
+      ensureCorrectionImageCapacity(generatedImageIds);
+
+      String fileId =
+          storeCorrectionInlineImage(
+              matcher.group(1), matcher.group(2), actor, generatedImageIds.size() + 1);
+
+      generatedImageIds.add(fileId);
+
+      matcher.appendReplacement(
+          output, java.util.regex.Matcher.quoteReplacement(inlineImageHtml(fileId)));
+    }
+
+    matcher.appendTail(output);
+    return output.toString();
+  }
+
+  private String rewriteStandaloneBase64Images(
+      String html, String actor, java.util.List<String> generatedImageIds) {
+
+    var matcher = INLINE_BASE64_IMAGE.matcher(html);
+    var output = new StringBuffer();
+
+    while (matcher.find()) {
+      ensureCorrectionImageCapacity(generatedImageIds);
+
+      String fileId =
+          storeCorrectionInlineImage(
+              matcher.group(1), matcher.group(2), actor, generatedImageIds.size() + 1);
+
+      generatedImageIds.add(fileId);
+
+      matcher.appendReplacement(
+          output, java.util.regex.Matcher.quoteReplacement(inlineImageHtml(fileId)));
+    }
+
+    matcher.appendTail(output);
+    return output.toString();
+  }
+
+  private String cloneExistingInlineImages(
+      String html, String actor, java.util.List<String> generatedImageIds) {
+
+    var existingIds = new java.util.LinkedHashSet<String>();
+    var matcher = INLINE_FILE_REFERENCE.matcher(html);
+
+    while (matcher.find()) {
+      existingIds.add(matcher.group(1));
+    }
+
+    String rewritten = html;
+
+    for (String existingId : existingIds) {
+      if (generatedImageIds.contains(existingId)) {
+        continue;
+      }
+
+      ensureCorrectionImageCapacity(generatedImageIds);
+
+      var sourceFile = storedFileService.find(existingId);
+
+      if (!("image/png".equals(sourceFile.mediaType())
+          || "image/jpeg".equals(sourceFile.mediaType()))) {
+        throw new BusinessRuleException(
+            "CORRECTION_IMAGE_TYPE_INVALID", "原报告中存在非 PNG/JPEG 图片，暂无法进入更正工作稿");
+      }
+
+      String extension = "image/png".equals(sourceFile.mediaType()) ? "png" : "jpg";
+
+      var copied =
+          storedFileService.storeGenerated(
+              storedFileService.readBytes(sourceFile),
+              "更正报告图片-" + (generatedImageIds.size() + 1) + "." + extension,
+              sourceFile.mediaType(),
+              "DRAFT_IMAGE",
+              actor);
+
+      String newId = copied.publicId();
+      rewritten = rewritten.replace(existingId, newId);
+      generatedImageIds.add(newId);
+    }
+
+    return rewritten;
+  }
+
+  private String storeCorrectionInlineImage(
+      String imageType, String base64, String actor, int imageNumber) {
+
+    String extension = "png".equalsIgnoreCase(imageType) ? "png" : "jpg";
+    String mediaType = "png".equals(extension) ? "image/png" : "image/jpeg";
+
+    byte[] bytes;
+    try {
+      bytes = Base64.getMimeDecoder().decode(base64);
+    } catch (IllegalArgumentException exception) {
+      throw new BusinessRuleException("CORRECTION_IMAGE_INVALID", "原报告中存在无法读取的内嵌图片");
+    }
+
+    if (bytes.length == 0) {
+      throw new BusinessRuleException("CORRECTION_IMAGE_INVALID", "原报告中存在空图片");
+    }
+
+    var stored =
+        storedFileService.storeGenerated(
+            bytes, "更正报告图片-" + imageNumber + "." + extension, mediaType, "DRAFT_IMAGE", actor);
+
+    return stored.publicId();
+  }
+
+  private void ensureCorrectionImageCapacity(java.util.List<String> generatedImageIds) {
+    if (generatedImageIds.size() >= 10) {
+      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "一份报告最多包含 10 张图片");
+    }
+  }
+
+  private List<String> inlineFileIdsInOrder(String html) {
+    if (html == null || html.isBlank()) {
+      return List.of();
+    }
+
+    var orderedIds = new java.util.LinkedHashSet<String>();
+    var matcher = INLINE_FILE_REFERENCE.matcher(html);
+
+    while (matcher.find()) {
+      orderedIds.add(matcher.group(1));
+    }
+
+    return List.copyOf(orderedIds);
+  }
+
+  private String inlineImageHtml(String fileId) {
+    String safeId = htmlEscape(fileId);
+
+    return """
+        <figure class="inline-report-image" data-file-id="%s">
+          <img src="/api/v1/files/%s?inline=true"
+               data-file-id="%s"
+               alt="稽核证据图片" />
+        </figure>
+        """
+        .formatted(safeId, safeId, safeId)
+        .trim();
+  }
+
+  private ReportSections reportSections(SourceReport source, String html) {
     if (looksLikeHtml(html)) {
       return new ReportSections(
           cleanReportText(firstMatch(html, "(?is)<h1[^>]*>(.*?)</h1>", source.title())),
@@ -1455,10 +1648,12 @@ public class ReportDraftService {
           nonBlank(cleanReportText(source.analysis()), "请在此补充更正后的排查分析。"),
           nonBlank(cleanReportText(source.rectification()), "请在此补充更正后的整改建议。"));
     }
+
     String title = cleanReportText(source.title());
     String situation = cleanReportText(source.situation());
     String analysis = cleanReportText(source.analysis());
     String rectification = cleanReportText(source.rectification());
+
     return new ReportSections(
         nonBlank(title, source.title()),
         nonBlank(situation, "原报告正文待补充。"),
@@ -1477,28 +1672,6 @@ public class ReportDraftService {
   private String firstMatch(String value, String pattern, String fallback) {
     var matcher = Pattern.compile(pattern).matcher(value == null ? "" : value);
     return matcher.find() ? matcher.group(1) : fallback;
-  }
-
-  private List<String> extractInlineImages(String html, String actor) {
-    if (html == null || html.isBlank()) {
-      return List.of();
-    }
-    var imageIds = new java.util.ArrayList<String>();
-    var matcher =
-        Pattern.compile("(?is)<img[^>]+src=[\"']data:image/(png|jpe?g);base64,([^\"']+)[\"'][^>]*>")
-            .matcher(html);
-    int index = 1;
-    while (matcher.find() && imageIds.size() < 10) {
-      String extension = "png".equalsIgnoreCase(matcher.group(1)) ? "png" : "jpg";
-      String mediaType = "png".equals(extension) ? "image/png" : "image/jpeg";
-      byte[] bytes = Base64.getMimeDecoder().decode(matcher.group(2));
-      var stored =
-          storedFileService.storeGenerated(
-              bytes, "更正报告图片-" + index + "." + extension, mediaType, "DRAFT_IMAGE", actor);
-      imageIds.add(stored.publicId());
-      index++;
-    }
-    return List.copyOf(imageIds);
   }
 
   private String cleanReportText(String value) {
@@ -1559,6 +1732,8 @@ public class ReportDraftService {
       String createdBy) {}
 
   public record UploadedImage(String fileId, long entityVersion) {}
+
+  private record CorrectionContent(ReportSections sections, List<String> imageIds) {}
 
   private record Snapshot(
       long id,

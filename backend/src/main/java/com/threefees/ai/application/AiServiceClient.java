@@ -2,6 +2,7 @@ package com.threefees.ai.application;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -22,6 +23,9 @@ import org.springframework.util.MimeType;
 public class AiServiceClient {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(AiServiceClient.class);
+
+  private static final Pattern BASE64_IMAGE_DATA =
+      Pattern.compile("(?is)data:image/[^;\\s]+;base64,[a-z0-9+/=\\r\\n]+");
 
   private static final String SYSTEM_PROMPT =
       """
@@ -186,6 +190,15 @@ public class AiServiceClient {
 
   private <T> T call(String prompt, List<AiImage> images, Class<T> responseType) {
     try {
+      String sanitizedPrompt = promptSafe(prompt);
+
+      if (!sanitizedPrompt.equals(safe(prompt))) {
+        LOGGER.warn(
+            "Inline base64 image data was removed before Kimi model call: model={}, responseType={}",
+            model,
+            responseType.getSimpleName());
+      }
+
       Media[] media =
           images.stream()
               .map(
@@ -198,7 +211,7 @@ public class AiServiceClient {
           chatClient
               .prompt()
               .system(SYSTEM_PROMPT)
-              .user(user -> user.text(prompt).media(media))
+              .user(user -> user.text(sanitizedPrompt).media(media))
               .call()
               .entity(responseType, spec -> spec.validateSchema());
       if (response == null) {
@@ -271,6 +284,18 @@ public class AiServiceClient {
         .map(value -> value.role() + "：" + value.content())
         .reduce((a, b) -> a + "\n" + b)
         .orElse("（无）");
+  }
+
+  private String promptSafe(String value) {
+
+    String text = safe(value);
+
+    if (text.isBlank()) {
+
+      return text;
+    }
+
+    return BASE64_IMAGE_DATA.matcher(text).replaceAll("[报告图片已单独保存，不在文本 Prompt 中传输]");
   }
 
   private String safe(String value) {
