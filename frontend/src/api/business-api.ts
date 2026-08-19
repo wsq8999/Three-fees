@@ -835,27 +835,116 @@ export const businessApi = {
     async list(
       query: BillingPointQuery,
     ): Promise<PageResult<BillingPointDetail["summary"]>> {
+      /**
+       * 前端报告状态与后端报告状态并不完全一致：
+       *
+       * 前端：
+       * NONE      未生成
+       * DRAFT     待生成
+       * FINAL     已生成
+       * CORRECTED 已更正
+       *
+       * 后端报账点列表：
+       * NONE
+       * PENDING
+       * GENERATED
+       *
+       * 因此在请求后端之前统一转换。
+       */
+      const backendReportStatus =
+        query.reportStatus === "DRAFT"
+          ? "PENDING"
+          : query.reportStatus === "FINAL" ||
+          query.reportStatus === "CORRECTED"
+            ? "GENERATED"
+            : query.reportStatus === "NONE"
+              ? "NONE"
+              : "";
+
+      /**
+       * 所有查询条件都必须交给后端。
+       *
+       * 不能再：
+       * 1. 后端先分页；
+       * 2. 前端再对当前页 result.items 过滤。
+       *
+       * 否则会造成：
+       * - 列表只有几条；
+       * - totalElements 仍然是查询前数量；
+       * - totalPages 仍然是查询前页数；
+       * - 后面的分页全部为空。
+       *
+       * 正确流程：
+       * 后端全量过滤
+       * → 计算 totalElements
+       * → 计算 totalPages
+       * → 最后分页
+       */
       const params = queryString({
+        code: query.code,
+        name: query.name,
         cityCode: query.cityCode,
+        district: query.district,
         period: query.period,
-        keyword: query.keyword,
+
+        paymentEligible:
+          query.paymentEligible === undefined
+            ? ""
+            : query.paymentEligible
+              ? "true"
+              : "false",
+
+        billingPointStatus: query.billingPointStatus,
         auditStatus: query.auditStatus,
+        reportStatus: backendReportStatus,
+
+        focusPeriod: query.focusPeriod,
+        focusCityCode: query.focusCityCode,
+
         page: Math.max(0, query.page - 1),
         size: query.size,
       });
-      const result = asResult<BackendPage<BackendBillingPointSummary>>(
-        await httpClient.get(`/api/v1/billing-point-periods?${params}`),
+
+      const result = asResult<
+        BackendPage<BackendBillingPointSummary>
+      >(
+        await httpClient.get(
+          `/api/v1/billing-point-periods?${params}`,
+        ),
       );
+
       return {
         items: (result.items ?? []).map(mapBillingSummary),
+
+        // 后端页码从0开始，前端从1开始。
         page: result.page + 1,
+
         size: result.size,
-        totalElements: result.totalElements ?? result.total ?? 0,
+
+        /**
+         * 总条数必须完全使用后端过滤后的结果。
+         * 禁止使用：
+         *
+         * result.items.length
+         *
+         * 因为那只能表示“当前页有多少条”，
+         * 不能表示整个查询结果有多少条。
+         */
+        totalElements:
+          result.totalElements ??
+          result.total ??
+          0,
+
+        /**
+         * 总页数同样必须使用后端过滤后的 totalPages。
+         */
         totalPages: result.totalPages,
       };
     },
 
-    async get(id: string): Promise<BillingPointDetail | undefined> {
+    async get(
+      id: string,
+    ): Promise<BillingPointDetail | undefined> {
       return mapBillingDetail(
         asResult<BackendBillingPointDetail>(
           await httpClient.get(

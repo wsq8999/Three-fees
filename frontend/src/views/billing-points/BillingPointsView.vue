@@ -18,6 +18,7 @@ import type {
   BusinessCity,
   ImportBatch,
   PageResult,
+  ReportStatus,
 } from "@/types/business";
 
 type Summary = BillingPointDetail["summary"];
@@ -43,7 +44,7 @@ const filters = reactive({
   reviewStatus: "",
   pointStatus: "",
   auditStatus: "" as AuditStatus | "",
-  reportStatus: "",
+  reportStatus: "" as ReportStatus | "",
   focusPeriod: "",
   focusCityCode: "",
   page: 1,
@@ -165,34 +166,40 @@ function billingPointStatusText(row: Summary): string {
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
+
   try {
-    const keywords = [
-      filters.code,
-      filters.name,
-    ]
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const result = await businessApi.billingPoints.list({
-      cityCode: filters.cityCode,
-      period: filters.period,
-      keyword: keywords[0] ?? "",
-      auditStatus: filters.auditStatus,
-      focusPeriod: filters.focusPeriod,
-      focusCityCode: filters.focusCityCode,
-      page: filters.page,
-      size: filters.size,
-    });
-    result.items = result.items.filter((item) => {
-      if (filters.code && !item.code.includes(filters.code.trim())) return false;
-      if (filters.name && !item.name.includes(filters.name.trim())) return false;
-      if (filters.district && item.district !== filters.district) return false;
-      if (filters.reportStatus && item.reportStatus !== filters.reportStatus) return false;
-      if (filters.reviewStatus === "APPROVED" && item.paymentEligibility !== "ELIGIBLE") return false;
-      if (filters.reviewStatus === "PENDING" && item.paymentEligibility !== "PENDING") return false;
-      return true;
-    });
+    const paymentEligible =
+      filters.reviewStatus === "APPROVED"
+        ? true
+        : filters.reviewStatus === "PENDING"
+          ? false
+          : undefined;
+
+    const result =
+      await businessApi.billingPoints.list({
+        code: filters.code.trim(),
+        name: filters.name.trim(),
+        cityCode: filters.cityCode,
+        district: filters.district,
+        period: filters.period,
+
+        paymentEligible,
+
+        billingPointStatus: filters.pointStatus,
+        auditStatus: filters.auditStatus,
+        reportStatus: filters.reportStatus,
+
+        focusPeriod: filters.focusPeriod,
+        focusCityCode: filters.focusCityCode,
+
+        page: filters.page,
+        size: filters.size,
+      });
+
     pageData.value = result;
+
     await nextTick();
+
     for (const row of result.items) {
       if (selectedIds.value.has(row.id)) {
         table.value?.toggleRowSelection(row, true);
@@ -200,7 +207,9 @@ async function load(): Promise<void> {
     }
   } catch (error) {
     errorMessage.value =
-      error instanceof Error ? error.message : "报账点列表加载失败";
+      error instanceof Error
+        ? error.message
+        : "报账点列表加载失败";
   } finally {
     loading.value = false;
   }

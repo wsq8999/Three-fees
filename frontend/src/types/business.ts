@@ -68,10 +68,15 @@ export interface PageResult<T> {
 }
 
 export interface BillingPointQuery {
+  code: string;
+  name: string;
   cityCode: string;
+  district: string;
   period: string;
-  keyword: string;
+  paymentEligible?: boolean;
+  billingPointStatus: string;
   auditStatus: AuditStatus | "";
+  reportStatus: ReportStatus | "";
   focusPeriod?: string;
   focusCityCode?: string;
   page: number;
