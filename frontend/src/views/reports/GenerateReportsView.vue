@@ -511,26 +511,58 @@ onMounted(load);
 <style scoped>
 .generation-head {
   display: grid;
-  grid-template-columns: max-content max-content max-content;
-  gap: 16px;
+
+  /*
+   * 第一列报账点占剩余空间；
+   * 后面两个状态只占实际需要的宽度。
+   */
+  grid-template-columns:
+    minmax(0, 1fr)
+    max-content
+    max-content;
+
+  width: 100%;
+  gap: 14px;
+
   align-items: center;
-  padding: 16px 20px;
+
+  padding: 14px 18px;
   margin-bottom: 16px;
-  overflow-x: auto;
+
+  /*
+   * 禁止顶部卡片产生横向滚动条。
+   */
+  overflow: hidden;
+
+  box-sizing: border-box;
 }
 
 .generation-head label,
-.generation-head div {
+.generation-head > div {
   display: flex;
+
+  min-width: 0;
+
   gap: 8px;
   align-items: center;
-  white-space: nowrap;
+}
+
+.generation-head label {
+  /*
+   * 报账点区域允许真正缩小。
+   */
+  width: 100%;
 }
 
 .generation-head small {
   flex: 0 0 auto;
+
   color: #7d8ca1;
+
+  font-size: 13px;
   font-weight: 700;
+
+  white-space: nowrap;
 }
 
 .generation-head small::after {
@@ -538,22 +570,65 @@ onMounted(load);
 }
 
 .generation-head strong {
+  min-width: 0;
+
   color: #001733;
+
+  font-size: 14px;
+  font-weight: 700;
+
   white-space: nowrap;
 }
 
+/*
+ * 报账点下拉框不再使用：
+ *
+ * min-width: 560px
+ * max-width: calc(...)
+ *
+ * 而是完全跟随第一列剩余宽度。
+ */
 .candidate-select {
-  width: var(--candidate-select-width);
-  min-width: 560px;
-  max-width: calc(100vw - 520px);
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+
+  flex: 1 1 auto;
 }
 
 .candidate-select :deep(.el-select__wrapper) {
-  min-width: 100%;
+  width: 100%;
+  min-width: 0;
+}
+
+/*
+ * 当前选中的报账点信息过长时，
+ * 只在选择框内部省略，
+ * 不再把整个顶部卡片撑宽。
+ */
+.candidate-select :deep(.el-select__selection) {
+  min-width: 0;
 }
 
 .candidate-select :deep(.el-select__selected-item) {
-  max-width: none;
+  display: block;
+
+  min-width: 0;
+  max-width: 100%;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-select :deep(.el-select__placeholder) {
+  min-width: 0;
+
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .danger-text {
@@ -679,21 +754,79 @@ onMounted(load);
     grid-template-columns: 1fr;
   }
 
+  /*
+   * 小屏仍然保持顶部一行，
+   * 通过压缩间距和报账点选择框适应宽度。
+   */
+  .generation-head {
+    grid-template-columns:
+      minmax(0, 1fr)
+      max-content
+      max-content;
+
+    gap: 10px;
+
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .generation-head label,
+  .generation-head > div {
+    gap: 5px;
+  }
+
+  .generation-head small {
+    font-size: 12px;
+  }
+
+  .generation-head strong {
+    font-size: 13px;
+  }
+
   .candidate-select {
-    min-width: 420px;
-    max-width: calc(100vw - 180px);
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
   }
 }
 
 @media (max-width: 640px) {
+  /*
+   * 真正手机宽度才改成两行，
+   * 但仍然绝不出现横向滚动。
+   */
   .generation-head {
-    grid-template-columns: 1fr;
+    grid-template-columns:
+      minmax(0, 1fr)
+      max-content;
+
+    gap: 10px 8px;
+
+    padding: 12px;
+  }
+
+  /*
+   * 报账点单独占第一行。
+   */
+  .generation-head label {
+    grid-column: 1 / -1;
+  }
+
+  /*
+   * 超标类型、超标率放第二行。
+   */
+  .generation-head > div {
+    min-width: 0;
+  }
+
+  .generation-head > div:last-child {
+    justify-self: end;
   }
 
   .candidate-select {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
   }
 
   .report-editor {
@@ -701,4 +834,5 @@ onMounted(load);
     padding: 24px 18px;
   }
 }
+
 </style>

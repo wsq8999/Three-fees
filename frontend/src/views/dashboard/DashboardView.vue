@@ -50,7 +50,7 @@ const statusChartData = computed(() => {
   return [
     { name: "正常", count: data.normalBillingPointCount, color: "#19a873" },
     { name: "超标", count: data.overLimitBillingPointCount, color: "#f02f44" },
-    { name: "待稽核/不适用", count: data.pendingReviewCount, color: "#d98b00" },
+    { name: "待稽核", count: data.pendingReviewCount, color: "#d98b00" },
   ];
 });
 
@@ -192,31 +192,91 @@ onMounted(load);
           />
         </ElSelect>
       </header>
-      <ElTable :data="dashboard.pendingTasks" height="310">
-        <ElTableColumn prop="billingPointCode" label="报账点编码" min-width="190" />
-        <ElTableColumn prop="billingPointName" label="报账点名称" min-width="210" />
-        <ElTableColumn prop="county" label="所属区县" width="120" />
-        <ElTableColumn prop="period" label="账期" width="110" />
-        <ElTableColumn label="实际报账金额" width="135">
-          <template #default="scope">¥{{ scope.row.actualAmount }}</template>
-        </ElTableColumn>
-        <ElTableColumn label="超标类型" width="150">
+      <ElTable
+        class="task-table"
+        :data="dashboard.pendingTasks"
+        height="310"
+        table-layout="fixed"
+      >
+        <ElTableColumn
+          prop="billingPointCode"
+          label="报账点编码"
+          width="145"
+          show-overflow-tooltip
+        />
+
+        <ElTableColumn
+          prop="billingPointName"
+          label="报账点名称"
+          min-width="160"
+          show-overflow-tooltip
+        />
+
+        <ElTableColumn
+          prop="county"
+          label="所属区县"
+          width="88"
+          show-overflow-tooltip
+        />
+
+        <ElTableColumn
+          prop="period"
+          label="账期"
+          width="88"
+        />
+
+        <ElTableColumn
+          label="实际报账金额"
+          width="112"
+          align="right"
+        >
           <template #default="scope">
-            <ElTag type="danger" size="small">{{ scope.row.overLimitType }}</ElTag>
+            ¥{{ scope.row.actualAmount }}
           </template>
         </ElTableColumn>
-        <ElTableColumn label="最大超标比例" width="130">
+
+        <ElTableColumn
+          label="超标类型"
+          width="118"
+          align="center"
+        >
           <template #default="scope">
-            <b class="number-emphasis">{{ formatPercent(scope.row.maximumRatio) }}</b>
+            <ElTag
+              type="danger"
+              size="small"
+              class="task-overlimit-tag"
+            >
+              {{ scope.row.overLimitType }}
+            </ElTag>
           </template>
         </ElTableColumn>
-        <ElTableColumn label="操作" width="105">
+
+        <ElTableColumn
+          label="最大超标比例"
+          width="108"
+          align="right"
+        >
+          <template #default="scope">
+            <b class="number-emphasis">
+              {{ formatPercent(scope.row.maximumRatio) }}
+            </b>
+          </template>
+        </ElTableColumn>
+
+        <ElTableColumn
+          label="操作"
+          width="86"
+          align="center"
+        >
           <template #default="scope">
             <ElButton
               link
               type="danger"
               :loading="openingTaskId === scope.row.id"
-              :disabled="openingTaskId !== null && openingTaskId !== scope.row.id"
+              :disabled="
+        openingTaskId !== null &&
+        openingTaskId !== scope.row.id
+      "
               @click="openTask(asPendingTask(scope.row))"
             >
               生成报告
@@ -232,34 +292,56 @@ onMounted(load);
     <section class="chart-grid">
       <article class="chart-card">
         <h3>各区县超标报账点数量</h3>
-        <div
-          v-for="(item, index) in districtChartData"
-          :key="item.name"
-          class="bar-row"
-          :title="`${item.name}：${item.count}`"
-        >
-          <span>{{ item.name }}</span>
-          <i
-            :style="{
-              width: `${Math.max(8, (item.count / maxDistrictCount) * 100)}%`,
-              opacity: String(Math.max(0.35, 1 - index * 0.1)),
-            }"
-          />
-          <b>{{ item.count }}</b>
+
+        <div v-if="hasDistrictChart" class="district-chart-scroll">
+          <div
+            v-for="(item, index) in districtChartData"
+            :key="item.name"
+            class="bar-row"
+            :title="`${item.name}：${item.count}`"
+          >
+            <span>{{ item.name }}</span>
+            <i
+              :style="{
+                width: `${Math.max(8, (item.count / maxDistrictCount) * 100)}%`,
+                opacity: String(Math.max(0.35, 1 - index * 0.1)),
+              }"
+            />
+            <b>{{ item.count }}</b>
+          </div>
         </div>
-        <ElEmpty v-if="!hasDistrictChart" :image-size="50" description="当前账期暂无图表数据" />
+
+        <ElEmpty
+          v-else
+          class="chart-empty"
+          :image-size="42"
+          description="当前账期暂无图表数据"
+        />
       </article>
 
       <article class="chart-card">
         <h3>超标类型分布</h3>
         <div v-if="hasOverLimitTypeChart" class="columns">
-          <span v-for="item in overLimitTypeChartData" :key="item.name" :title="`${item.name}：${item.count}`">
+          <span
+            v-for="item in overLimitTypeChartData"
+            :key="item.name"
+            :title="`${item.name}：${item.count}`"
+          >
             <b>{{ item.count }}</b>
-            <i :style="{ height: `${Math.max(8, (item.count / maxTypeCount) * 92)}px` }" />
+            <i
+              :style="{
+                height: `${Math.max(8, (item.count / maxTypeCount) * 52)}px`,
+              }"
+            />
             <small>{{ item.name }}</small>
           </span>
         </div>
-        <ElEmpty v-else :image-size="50" description="当前账期暂无图表数据" />
+        <ElEmpty
+          v-else
+          class="chart-empty"
+          :image-size="42"
+          description="当前账期暂无图表数据"
+        />
       </article>
 
       <article class="chart-card">
@@ -272,7 +354,12 @@ onMounted(load);
           </div>
           <p>合计：{{ dashboard.billingPointCount }} 个报账点</p>
         </div>
-        <ElEmpty v-else :image-size="50" description="当前账期暂无图表数据" />
+        <ElEmpty
+          v-else
+          class="chart-empty"
+          :image-size="42"
+          description="当前账期暂无图表数据"
+        />
       </article>
     </section>
 
@@ -300,9 +387,9 @@ onMounted(load);
 <style scoped>
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  gap: 14px;
-  margin-bottom: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .stat-card,
@@ -314,25 +401,37 @@ onMounted(load);
   box-shadow: 0 6px 18px rgb(25 42 70 / 6%);
 }
 
+/*
+ * 顶部四张统计卡固定为紧凑高度。
+ * 小屏也只缩小，不会再被媒体查询改成更高的 124/132px。
+ */
 .stat-card {
   display: grid;
-  min-height: 82px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 14px;
+  height: 88px;
+  min-height: 88px;
+  grid-template-columns: 34px minmax(0, 1fr) 46px;
+  gap: 9px;
   align-items: center;
-  padding: 18px 20px;
+  padding: 10px 12px;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.stat-card > div {
+  min-width: 0;
 }
 
 .stat-icon {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
+  flex: none;
   place-items: center;
-  border-radius: 11px;
+  border-radius: 10px;
 }
 
 .stat-icon svg {
-  width: 22px;
+  width: 18px;
 }
 
 .stat-icon.red {
@@ -361,22 +460,36 @@ onMounted(load);
 }
 
 .stat-card h3 {
+  overflow: hidden;
   color: #17243a;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stat-card small {
+  display: -webkit-box;
+  max-height: 28px;
+  margin-top: 3px;
+  overflow: hidden;
   color: #66758a;
-  font-size: 12px;
+  font-size: 10px;
+  line-height: 14px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
 }
 
 .stat-card strong {
+  display: block;
+  width: 46px;
   color: #ef3146;
-  font-size: 30px;
+  font-size: 24px;
   font-weight: 800;
   line-height: 1;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .stat-card strong.orange {
@@ -387,6 +500,9 @@ onMounted(load);
   color: #16a56f;
 }
 
+/*
+ * ↓↓↓ 待生成报告任务区域保持用户当前代码的尺寸与表格风格，不再改动。 ↓↓↓
+ */
 .task-card {
   overflow: hidden;
   min-height: 388px;
@@ -395,63 +511,143 @@ onMounted(load);
 
 .task-card > header {
   display: flex;
+  gap: 10px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-bottom: 1px solid #e4eaf2;
-}
-
-.task-card h2,
-.task-card p {
-  margin: 0;
 }
 
 .task-card h2 {
   color: #111d31;
-  font-size: 18px;
+  font-size: 17px;
 }
 
 .task-card p {
+  margin-top: 3px;
   color: #66758a;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .task-card :deep(.el-select) {
-  width: 252px;
+  width: 210px;
+  flex: 0 0 210px;
 }
 
 .number-emphasis {
   color: #f02f44;
 }
 
+.task-table :deep(.el-table__cell) {
+  padding: 7px 0;
+}
+
+.task-table :deep(.el-table__header .cell) {
+  padding-right: 6px;
+  padding-left: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.task-table :deep(.el-table__body .cell) {
+  padding-right: 6px;
+  padding-left: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.task-table :deep(.el-tag) {
+  max-width: 100%;
+  padding: 0 5px;
+  font-size: 11px;
+}
+
+.task-overlimit-tag {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 图表区固定为三列，三张卡固定为相同的紧凑高度。
+ * 不允许第一张内容多时把整排卡片一起撑高。
+ */
 .chart-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) minmax(300px, 0.9fr) minmax(320px, 1fr);
-  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: start;
 }
 
 .chart-card {
-  min-height: 180px;
-  padding: 14px 16px;
+  display: flex;
+  height: 168px !important;
+  min-height: 168px !important;
+  max-height: 168px;
+  min-width: 0;
+  flex-direction: column;
+  padding: 10px 12px;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .chart-card h3 {
-  margin: 0 0 12px;
+  flex: 0 0 auto;
+  margin: 0 0 6px;
   color: #17243a;
   font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+/*
+ * 第一张图：
+ * 条目少时自动平均占满标题下方高度；
+ * 条目多时只在卡片内部右侧出现纵向滚动条。
+ */
+.district-chart-scroll {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-auto-rows: minmax(20px, 1fr);
+  padding-right: 3px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.district-chart-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.district-chart-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.district-chart-scroll::-webkit-scrollbar-thumb {
+  background: #d4dce7;
+  border-radius: 999px;
+}
+
+.district-chart-scroll::-webkit-scrollbar-thumb:hover {
+  background: #b8c2d0;
 }
 
 .bar-row,
 .status-row {
   display: grid;
-  grid-template-columns: minmax(72px, 96px) minmax(0, 1fr) 32px;
-  gap: 10px;
+  min-width: 0;
+  grid-template-columns: minmax(48px, 68px) minmax(0, 1fr) 22px;
+  gap: 5px;
   align-items: center;
-  margin: 9px 0;
   color: #23324a;
   font-size: 13px;
+}
+
+.bar-row {
+  min-height: 20px;
+  margin: 0;
 }
 
 .bar-row span,
@@ -462,9 +658,16 @@ onMounted(load);
   white-space: nowrap;
 }
 
+.bar-row b,
+.status-row b {
+  font-size: 13px;
+  text-align: right;
+  white-space: nowrap;
+}
+
 .bar-row i,
 .status-row i {
-  height: 7px;
+  height: 5px;
   border-radius: 99px;
 }
 
@@ -472,41 +675,102 @@ onMounted(load);
   background: linear-gradient(90deg, #ee3145, #f79aa5);
 }
 
+/*
+ * 第二张图：
+ * 4种类型横向完全等分；
+ * 每一项纵向使用“数字 / 柱体区 / 标签”三段，
+ * 内容从上到下真正占满图表主体，不再只堆在底部。
+ */
 .columns {
   display: grid;
-  min-height: 132px;
-  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
-  gap: 12px;
-  align-items: end;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+  align-items: stretch;
   overflow: hidden;
 }
 
 .columns span {
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
-  align-items: center;
+  height: 100%;
+  grid-template-rows: 16px minmax(0, 1fr) 28px;
+  align-items: end;
+  justify-items: center;
   color: #23324a;
 }
 
+.columns b {
+  align-self: start;
+  margin: 0;
+  font-size: 13px;
+  line-height: 16px;
+}
+
 .columns i {
-  width: 36px;
+  width: 22px;
+  max-height: 52px;
+  align-self: end;
   background: linear-gradient(180deg, #f9a3ad, #ef3146);
-  border-radius: 9px 9px 0 0;
+  border-radius: 6px 6px 0 0;
 }
 
 .columns small {
-  margin-top: 8px;
+  display: -webkit-box;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  overflow: hidden;
+  align-self: end;
   color: #66758a;
-  line-height: 1.3;
+  font-size: 11px;
+  line-height: 14px;
   text-align: center;
-  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   word-break: break-word;
 }
 
+/*
+ * 第三张图：
+ * 正常 / 超标 / 待稽核 / 合计 4行等分整个可用高度。
+ * 这样不会全部挤在上半部分，下方留下大块空白。
+ */
+.status-bars {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-rows: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.status-row {
+  min-height: 0;
+  margin: 0;
+  align-self: center;
+}
+
 .status-bars p {
-  margin: 14px 0 0;
+  margin: 0;
+  align-self: center;
   color: #66758a;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.chart-empty {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.chart-empty :deep(.el-empty) {
+  height: 100%;
+  padding: 0;
+}
+
+.chart-empty :deep(.el-empty__description) {
+  margin-top: 4px;
   font-size: 12px;
 }
 
@@ -517,28 +781,117 @@ onMounted(load);
   line-height: 1.8;
 }
 
-@media (width <= 1100px) {
+/*
+ * 小屏：只继续压缩统计卡和图表内部，不把图表改成单列。
+ * 待生成报告任务表保持当前代码，不在这里改它。
+ */
+@media (width <= 1280px) {
   .stat-grid {
-    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .stat-card {
+    height: 84px;
+    min-height: 84px;
+    grid-template-columns: 30px minmax(0, 1fr) 40px;
+    gap: 7px;
+    padding: 9px 10px;
+  }
+
+  .stat-icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  .stat-icon svg {
+    width: 16px;
+  }
+
+  .stat-card h3 {
+    font-size: 12px;
+  }
+
+  .stat-card small {
+    max-height: 26px;
+    font-size: 9px;
+    line-height: 13px;
+  }
+
+  .stat-card strong {
+    width: 40px;
+    font-size: 22px;
   }
 
   .chart-grid {
-    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .chart-card {
+    height: 158px !important;
+    min-height: 158px !important;
+    max-height: 158px;
+    padding: 9px 10px;
+  }
+
+  .chart-card h3 {
+    margin-bottom: 5px;
+    font-size: 15px;
+  }
+
+  .bar-row,
+  .status-row {
+    grid-template-columns: minmax(42px, 58px) minmax(0, 1fr) 20px;
+    gap: 4px;
+    font-size: 13px;
+  }
+
+  .bar-row b,
+  .status-row b {
+    font-size: 13px;
+  }
+
+  .columns {
+    gap: 4px;
+  }
+
+  .columns span {
+    grid-template-rows: 17px minmax(0, 1fr) 28px;
+  }
+
+  .columns b {
+    font-size: 13px;
+  }
+
+  .columns i {
+    width: 20px;
+  }
+
+  .columns small {
+    min-height: 28px;
+    font-size: 11px;
+    line-height: 14px;
+  }
+
+  .status-bars p {
+    font-size: 12px;
   }
 }
 
 @media (width <= 760px) {
   .stat-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .task-card > header {
-    align-items: flex-start;
-    flex-direction: column;
+  .stat-card {
+    height: 82px;
+    min-height: 82px;
   }
 
-  .task-card :deep(.el-select) {
-    width: 100%;
+  .chart-card {
+    height: 150px !important;
+    min-height: 150px !important;
+    max-height: 150px;
+    padding: 8px;
   }
 }
 </style>

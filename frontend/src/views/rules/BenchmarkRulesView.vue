@@ -6,7 +6,7 @@ import PageState from "@/components/PageState.vue";
 import type { BenchmarkRule } from "@/types/business";
 
 const rules = ref<BenchmarkRule[]>([]);
-const selectedKey = ref<BenchmarkRule["key"]>("RATED_BENCHMARK");
+const selectedKey = ref<BenchmarkRule["key"] | null>(null);
 
 const loading = ref(true);
 const errorMessage = ref("");
@@ -66,18 +66,10 @@ async function load(): Promise<void> {
   try {
     rules.value = await businessApi.rules.list();
 
-    if (
-      rules.value.some(
-        (item) => item.key === "RATED_BENCHMARK",
-      )
-    ) {
-      selectedKey.value = "RATED_BENCHMARK";
-    } else {
-      const firstRule = rules.value[0];
+    const firstRule = rules.value[0];
 
-      if (firstRule !== undefined) {
-        selectedKey.value = firstRule.key;
-      }
+    if (firstRule !== undefined) {
+      selectedKey.value = firstRule.key;
     }
   } catch (error) {
     errorMessage.value =

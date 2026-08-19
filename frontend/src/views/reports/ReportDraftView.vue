@@ -102,7 +102,7 @@ function sanitizeEditableHtml(html: string): string {
   const template = document.createElement("template");
   template.innerHTML = html;
   template.content
-    .querySelectorAll("script,iframe,object,embed,link,meta")
+    .querySelectorAll("script,style,iframe,object,embed,link,meta")
     .forEach((element) => element.remove());
   template.content.querySelectorAll<HTMLElement>("*").forEach((element) => {
     Array.from(element.attributes).forEach((attribute) => {
@@ -712,13 +712,13 @@ onMounted(load);
     </section>
 
     <div
-      class="draft-workspace"
+      class="draft-workspace draft-workspace-flow"
       :class="{ 'assistant-open': assistantVisible }"
     >
       <article
         v-if="htmlReportBlock"
         ref="htmlReportRef"
-        class="report-paper html-report-paper business-card"
+        class="report-paper report-paper-flow html-report-paper business-card"
         aria-label="可编辑报告正文"
         contenteditable="true"
         spellcheck="false"
@@ -732,7 +732,7 @@ onMounted(load);
       <article
         v-else
         ref="reportPaperRef"
-        class="report-paper business-card"
+        class="report-paper report-paper-flow business-card"
         aria-label="可编辑报告正文"
       >
         <h1
@@ -761,7 +761,7 @@ onMounted(load);
         </section>
       </article>
 
-      <aside v-if="assistantVisible" class="assistant-panel business-card">
+      <aside v-if="assistantVisible" class="assistant-panel assistant-panel-flow business-card">
         <header>
           <div>
             <h2>AI报告助手</h2>
@@ -782,7 +782,7 @@ onMounted(load);
           @close="assistantError = ''"
         />
 
-        <div class="chat-list">
+        <div class="chat-list chat-list-flow">
           <ElEmpty
             v-if="draft.messages.length === 0"
             description="点击底部“分析图片”后，AI 助手将在这里给出处理过程"
@@ -885,25 +885,41 @@ onMounted(load);
 <style scoped>
 .draft-summary {
   display: grid;
-  grid-template-columns: max-content max-content max-content;
+  grid-template-columns:
+    minmax(0, 1fr)
+    max-content
+    max-content;
+
+  width: 100%;
   gap: 16px;
   align-items: center;
-  padding: 16px 20px;
+
+  padding: 14px 18px;
   margin-bottom: 16px;
-  overflow-x: auto;
+
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .draft-summary > div {
   display: flex;
+  min-width: 0;
   gap: 8px;
   align-items: center;
   white-space: nowrap;
 }
 
+.draft-summary > div:first-child {
+  width: 100%;
+  min-width: 0;
+}
+
 .draft-summary small {
   flex: 0 0 auto;
   color: #7d8ca1;
+  font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .draft-summary small::after {
@@ -911,8 +927,23 @@ onMounted(load);
 }
 
 .draft-summary strong {
+  min-width: 0;
   color: #001733;
+  font-size: 14px;
+  font-weight: 700;
   white-space: nowrap;
+}
+
+.draft-summary > div:first-child strong {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-summary > div:nth-child(2),
+.draft-summary > div:nth-child(3) {
+  flex: 0 0 auto;
 }
 
 .danger-text {
@@ -921,25 +952,64 @@ onMounted(load);
 
 .draft-workspace {
   display: grid;
-  height: calc(100vh - 212px);
+
+  /*
+   * 大屏和小屏始终保持：
+   * 左侧报告正文 + 右侧 AI 助手。
+   *
+   * 不设置固定视口高度，不设置内部滚动条。
+   * 左右任一侧内容变多时，整行自然变高，
+   * 由整个页面统一上下滚动。
+   */
+  width: 100%;
   min-height: 420px;
+
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+
+  align-items: stretch;
+
   padding-bottom: 72px;
-  overflow: hidden;
+
+  overflow: visible;
+  box-sizing: border-box;
 }
 
 .draft-workspace.assistant-open {
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 430px);
+  /*
+   * 左侧正文占主要空间，右侧 AI 助手保持稳定宽度。
+   * 不设置 min-width，不制造横向滚动。
+   */
+  grid-template-columns:
+    minmax(0, 1fr)
+    clamp(280px, 31vw, 430px);
+}
+
+.draft-workspace > * {
+  min-width: 0;
+  align-self: stretch;
 }
 
 .report-paper {
   position: relative;
-  height: 100%;
-  min-height: 0;
+
+  width: 100%;
+  height: auto;
+
+  min-width: 0;
+  min-height: 420px;
+
   padding: clamp(18px, 3vw, 28px) clamp(16px, 4vw, 36px) 42px;
-  overflow-y: auto;
+
+  /*
+   * 正文完整展开。
+   * 不在正文卡片内部出现滚动条，
+   * 内容有多高，卡片就有多高。
+   */
+  overflow: visible;
+
   background: #fff;
+  box-sizing: border-box;
 }
 
 .report-paper h1 {
@@ -969,8 +1039,9 @@ onMounted(load);
 }
 
 .html-report-paper {
-  width: min(960px, 100%);
-  margin: 0 auto;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
   color: #001733;
   line-height: 1.9;
 }
@@ -993,8 +1064,18 @@ onMounted(load);
 
 .html-report-paper :deep(table) {
   width: 100%;
+  max-width: 100%;
+
   margin: 12px 0;
+
+  table-layout: fixed;
   border-collapse: collapse;
+}
+
+.html-report-paper :deep(td),
+.html-report-paper :deep(th) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .html-report-paper :deep(td),
@@ -1047,14 +1128,28 @@ onMounted(load);
 }
 
 .assistant-panel {
-  position: sticky;
-  top: 0;
-  display: grid;
-  height: 100%;
-  min-height: 0;
-  grid-template-rows: auto 1fr auto;
-  overflow: hidden;
+  position: static;
+
+  display: flex;
+
+  width: 100%;
+  height: auto;
+
+  min-width: 0;
+  min-height: 420px;
+
+  /*
+   * AI 助手与左侧正文处于同一个 Grid 行。
+   * Grid 会让两个卡片外框自动等高。
+   * 不使用 sticky，不设置内部滚动。
+   */
+  flex-direction: column;
+  align-self: stretch;
+
+  overflow: visible;
+
   background: #fff;
+  box-sizing: border-box;
 }
 
 .assistant-panel > header {
@@ -1078,11 +1173,25 @@ onMounted(load);
 
 .chat-list {
   display: flex;
+
+  width: 100%;
+  min-width: 0;
   min-height: 0;
+
+  /*
+   * 当左侧正文更高时，这里自动吃掉右侧剩余高度，
+   * 让底部输入区贴近 AI 卡片底部。
+   * 当聊天消息更多时，右侧卡片自然变高，
+   * 同时带动左侧卡片等高。
+   */
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
+
   padding: 18px;
-  overflow-y: auto;
+
+  overflow: visible;
+  box-sizing: border-box;
 }
 
 .chat-message {
@@ -1126,7 +1235,10 @@ onMounted(load);
 .chat-message p {
   margin: 0 0 5px;
   color: #1f2d3d;
+
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .chat-message small {
@@ -1135,7 +1247,12 @@ onMounted(load);
 
 .prompt-box {
   position: relative;
+
+  flex: 0 0 auto;
+
   padding: 16px;
+
+  background: #fff;
   border-top: 1px solid #edf1f5;
 }
 
@@ -1175,31 +1292,362 @@ onMounted(load);
 }
 
 @media (width <= 1280px) {
-  .draft-workspace,
-  .draft-workspace.assistant-open {
-    height: auto;
-    overflow: visible;
-    grid-template-columns: 1fr;
+  .draft-workspace {
+    gap: 12px;
   }
 
-  .report-paper,
-  .assistant-panel {
-    height: auto;
-    max-height: none;
-    overflow: visible;
+  .draft-workspace.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      clamp(250px, 30vw, 360px);
+  }
+
+  .report-paper {
+    padding: 20px 18px 42px;
+  }
+
+  .assistant-panel > header {
+    padding: 18px 14px 13px;
+  }
+
+  .assistant-panel h2 {
+    font-size: 18px;
+  }
+
+  .chat-list {
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .prompt-box {
+    padding: 14px;
+  }
+
+  .prompt-mode {
+    gap: 8px;
+  }
+
+  .prompt-mode .el-select {
+    width: 138px;
+  }
+
+  .prompt-box .el-button {
+    right: 22px;
+    bottom: 26px;
   }
 }
 
-@media (width <= 640px) {
-  .draft-actions {
-    right: 12px;
-    left: 12px;
+@media (width <= 1024px) {
+  /*
+   * 顶部摘要继续保持紧凑。
+   */
+  .draft-summary {
+    gap: 10px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .draft-summary > div {
+    gap: 5px;
+  }
+
+  .draft-summary small {
+    font-size: 12px;
+  }
+
+  .draft-summary strong {
+    font-size: 13px;
+  }
+
+  /*
+   * 内容区仍然左右排列。
+   * 只压缩右栏宽度和内部间距。
+   */
+  .draft-workspace {
+    gap: 10px;
+  }
+
+  .draft-workspace.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      clamp(220px, 29vw, 300px);
+  }
+
+  .report-paper {
+    padding: 18px 14px 42px;
+  }
+
+  .report-paper h1,
+  .html-report-paper :deep(h1) {
+    font-size: 22px;
+  }
+
+  .report-paper h2,
+  .html-report-paper :deep(h2) {
+    font-size: 17px;
+  }
+
+  .assistant-panel > header {
+    padding: 15px 12px 11px;
+  }
+
+  .assistant-panel h2 {
+    font-size: 17px;
+  }
+
+  .assistant-panel header small {
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .chat-list {
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .chat-message {
+    gap: 7px;
+  }
+
+  .chat-message > div {
+    max-width: 90%;
+    padding: 10px;
+  }
+
+  .prompt-box {
+    padding: 12px;
+  }
+
+  .prompt-mode {
+    gap: 6px;
+  }
+
+  .prompt-mode .el-select {
+    width: 122px;
+  }
+
+  .prompt-box .el-button {
+    right: 20px;
+    bottom: 24px;
+  }
+}
+
+@media (width <= 760px) {
+  /*
+   * 小屏仍然保持“左正文 + 右 AI”。
+   * 不产生横向滚动，也不把 AI 放到下面。
+   */
+  .draft-workspace {
+    gap: 8px;
+  }
+
+  .draft-workspace.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(190px, 36%);
+  }
+
+  .report-paper {
+    padding: 16px 10px 42px;
+  }
+
+  .assistant-panel > header {
+    padding: 12px 10px 9px;
+  }
+
+  .assistant-panel h2 {
+    font-size: 16px;
+  }
+
+  .assistant-panel header small {
+    font-size: 11px;
+  }
+
+  .chat-list {
+    padding: 10px;
+  }
+
+  .chat-message > span {
+    width: 26px;
+    height: 26px;
+    font-size: 11px;
+  }
+
+  .chat-message > div {
+    max-width: 92%;
+    padding: 9px;
+  }
+
+  .prompt-box {
+    padding: 10px;
+  }
+
+  .prompt-mode {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .draft-actions .el-button {
+  .prompt-mode .el-select {
     width: 100%;
   }
+
+  .prompt-box .el-button {
+    right: 18px;
+    bottom: 22px;
+  }
 }
+
+@media (width <= 640px) {
+  /*
+   * 顶部摘要可拆成两行；
+   * 下方内容区仍保持左右布局。
+   */
+  .draft-summary {
+    grid-template-columns:
+      minmax(0, 1fr)
+      max-content;
+
+    gap: 8px;
+  }
+
+  .draft-summary > div:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .draft-summary > div:nth-child(3) {
+    justify-self: end;
+  }
+
+  .draft-workspace.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(170px, 38%);
+  }
+
+  .draft-actions {
+    right: 12px;
+    left: 12px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .draft-actions .el-button {
+    width: auto;
+  }
+}
+
+
+
+/*
+ * ============================================================
+ * AI 草稿页最终布局约束
+ * ============================================================
+ * 1. 页面整体上下滚动；
+ * 2. 左侧报告正文完整展开；
+ * 3. 右侧 AI 助手完整展开；
+ * 4. 左右始终并排且同一行自动等高；
+ * 5. 禁止正文、AI聊天区、工作区产生自己的滚动条。
+ *
+ * 使用专用 *-flow class + !important，
+ * 避免旧样式、全局样式或热更新残留再次把区域变成滚动容器。
+ */
+
+.draft-workspace-flow {
+  width: 100% !important;
+
+  height: auto !important;
+  min-height: 420px !important;
+  max-height: none !important;
+
+  align-items: stretch !important;
+
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+}
+
+.report-paper-flow {
+  width: 100% !important;
+
+  height: auto !important;
+  min-height: 420px !important;
+  max-height: none !important;
+
+  align-self: stretch !important;
+
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+}
+
+.assistant-panel-flow {
+  width: 100% !important;
+
+  height: auto !important;
+  min-height: 420px !important;
+  max-height: none !important;
+
+  align-self: stretch !important;
+
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+}
+
+/*
+ * AI 对话记录不再自己滚动。
+ * 消息越多，右侧卡片越高；
+ * Grid 同时把左侧正文卡片拉到同样高度。
+ */
+.chat-list-flow {
+  width: 100% !important;
+
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+
+  flex: 1 1 auto !important;
+
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+}
+
+/*
+ * 防止 contenteditable 本身因为浏览器/历史样式重新成为滚动容器。
+ */
+.report-paper-flow[contenteditable="true"] {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+/*
+ * 小屏仍然保持左正文 + 右 AI。
+ * 只调整列宽，不切换成上下布局，也不制造横向滚动。
+ */
+@media (width <= 1024px) {
+  .draft-workspace-flow.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      clamp(220px, 29vw, 300px) !important;
+  }
+}
+
+@media (width <= 760px) {
+  .draft-workspace-flow.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(190px, 36%) !important;
+  }
+}
+
+@media (width <= 640px) {
+  .draft-workspace-flow.assistant-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(170px, 38%) !important;
+  }
+}
+
 </style>

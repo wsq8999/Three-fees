@@ -33,6 +33,14 @@ const loading = ref(false);
 const errorMessage = ref("");
 const importVisible = ref(false);
 const exportVisible = ref(false);
+
+/**
+ * 报账点查询区是否收起。
+ * false = 默认展开
+ * true = 收起
+ */
+const filterCollapsed = ref(false);
+
 const selectedIds = ref(new Set<string>());
 
 const filters = reactive({
@@ -344,92 +352,195 @@ watch(
 </script>
 
 <template>
-  <section class="filter-card business-card" aria-label="报账点查询">
-    <div class="filter-grid">
-      <label>
-        <span>报账点编码</span>
-        <ElInput v-model="filters.code" placeholder="请输入编码" clearable />
-      </label>
-      <label>
-        <span>报账点名称</span>
-        <ElInput v-model="filters.name" placeholder="请输入名称" clearable />
-      </label>
-      <label>
-        <span>所属城市</span>
-        <ElSelect
-          v-model="filters.cityCode"
-          :disabled="isCityLocked"
-          placeholder="全部城市"
-          clearable
-        >
-          <ElOption
-            v-for="city in visibleCities"
-            :key="city.code"
-            :label="city.name"
-            :value="city.code"
-          />
-        </ElSelect>
-      </label>
-      <label>
-        <span>所属区县</span>
-        <ElSelect v-model="filters.district" placeholder="全部区县" clearable>
-          <ElOption
-            v-for="district in districtOptions"
-            :key="district"
-            :label="district"
-            :value="district"
-          />
-        </ElSelect>
-      </label>
-      <label>
-        <span>账期</span>
-        <ElDatePicker
-          v-model="filters.period"
-          type="month"
-          value-format="YYYY-MM"
-          format="YYYY年MM月"
-          placeholder="全部账期"
-          clearable
-        />
-      </label>
-      <label>
-        <span>审核状态</span>
-        <ElSelect v-model="filters.reviewStatus" placeholder="全部" clearable>
-          <ElOption label="审核通过" value="APPROVED" />
-          <ElOption label="待审核" value="PENDING" />
-        </ElSelect>
-      </label>
-      <label>
-        <span>报账点状态</span>
-        <ElSelect v-model="filters.pointStatus" placeholder="全部" clearable>
-          <ElOption label="启用" value="ENABLED" />
-          <ElOption label="停用" value="DISABLED" />
-        </ElSelect>
-      </label>
-      <label>
-        <span>稽核状态</span>
-        <ElSelect v-model="filters.auditStatus" placeholder="全部" clearable>
-          <ElOption label="正常" value="NORMAL" />
-          <ElOption label="超标" value="OVER_LIMIT" />
-          <ElOption label="待稽核" value="PENDING_REVIEW" />
-          <ElOption label="不适用" value="NOT_APPLICABLE" />
-        </ElSelect>
-      </label>
-      <label>
-        <span>报告状态</span>
-        <ElSelect v-model="filters.reportStatus" placeholder="全部" clearable>
-          <ElOption label="待生成" value="DRAFT" />
-          <ElOption label="已生成" value="FINAL" />
-          <ElOption label="未生成" value="NONE" />
-        </ElSelect>
-      </label>
-      <div class="filter-actions">
-        <ElButton type="primary" :icon="Search" :loading="loading" @click="search">
-          查询
-        </ElButton>
-        <ElButton :icon="Refresh" @click="reset">重置</ElButton>
-      </div>
+  <section
+    class="filter-card business-card"
+    :class="{ 'filter-card-collapsed': filterCollapsed }"
+    aria-label="报账点查询"
+  >
+    <div class="filter-card-header">
+      <strong class="filter-card-title">查询条件</strong>
+
+      <ElButton
+        class="filter-collapse-button"
+        link
+        type="primary"
+        @click="filterCollapsed = !filterCollapsed"
+      >
+        {{ filterCollapsed ? "展开" : "收起" }}
+        <span class="collapse-arrow">
+        {{ filterCollapsed ? "⌄" : "⌃" }}
+      </span>
+      </ElButton>
     </div>
+
+    <ElCollapseTransition>
+      <div v-show="!filterCollapsed" class="filter-grid">
+        <label>
+          <span>报账点编码</span>
+          <ElInput
+            v-model="filters.code"
+            placeholder="请输入编码"
+            clearable
+          />
+        </label>
+
+        <label>
+          <span>报账点名称</span>
+          <ElInput
+            v-model="filters.name"
+            placeholder="请输入名称"
+            clearable
+          />
+        </label>
+
+        <label>
+          <span>所属城市</span>
+          <ElSelect
+            v-model="filters.cityCode"
+            :disabled="isCityLocked"
+            placeholder="全部城市"
+            clearable
+          >
+            <ElOption
+              v-for="city in visibleCities"
+              :key="city.code"
+              :label="city.name"
+              :value="city.code"
+            />
+          </ElSelect>
+        </label>
+
+        <label>
+          <span>所属区县</span>
+          <ElSelect
+            v-model="filters.district"
+            placeholder="全部区县"
+            clearable
+          >
+            <ElOption
+              v-for="district in districtOptions"
+              :key="district"
+              :label="district"
+              :value="district"
+            />
+          </ElSelect>
+        </label>
+
+        <label>
+          <span>账期</span>
+          <ElDatePicker
+            v-model="filters.period"
+            type="month"
+            value-format="YYYY-MM"
+            format="YYYY年MM月"
+            placeholder="全部账期"
+            clearable
+          />
+        </label>
+
+        <label>
+          <span>审核状态</span>
+          <ElSelect
+            v-model="filters.reviewStatus"
+            placeholder="全部"
+            clearable
+          >
+            <ElOption
+              label="审核通过"
+              value="APPROVED"
+            />
+            <ElOption
+              label="待审核"
+              value="PENDING"
+            />
+          </ElSelect>
+        </label>
+
+        <label>
+          <span>报账点状态</span>
+          <ElSelect
+            v-model="filters.pointStatus"
+            placeholder="全部"
+            clearable
+          >
+            <ElOption
+              label="启用"
+              value="ENABLED"
+            />
+            <ElOption
+              label="停用"
+              value="DISABLED"
+            />
+          </ElSelect>
+        </label>
+
+        <label>
+          <span>稽核状态</span>
+          <ElSelect
+            v-model="filters.auditStatus"
+            placeholder="全部"
+            clearable
+          >
+            <ElOption
+              label="正常"
+              value="NORMAL"
+            />
+            <ElOption
+              label="超标"
+              value="OVER_LIMIT"
+            />
+            <ElOption
+              label="待稽核"
+              value="PENDING_REVIEW"
+            />
+            <ElOption
+              label="不适用"
+              value="NOT_APPLICABLE"
+            />
+          </ElSelect>
+        </label>
+
+        <label>
+          <span>报告状态</span>
+          <ElSelect
+            v-model="filters.reportStatus"
+            placeholder="全部"
+            clearable
+          >
+            <ElOption
+              label="待生成"
+              value="DRAFT"
+            />
+            <ElOption
+              label="已生成"
+              value="FINAL"
+            />
+            <ElOption
+              label="未生成"
+              value="NONE"
+            />
+          </ElSelect>
+        </label>
+
+        <div class="filter-actions">
+          <ElButton
+            type="primary"
+            :icon="Search"
+            :loading="loading"
+            @click="search"
+          >
+            查询
+          </ElButton>
+
+          <ElButton
+            :icon="Refresh"
+            @click="reset"
+          >
+            重置
+          </ElButton>
+        </div>
+      </div>
+    </ElCollapseTransition>
   </section>
 
   <div class="business-toolbar">
@@ -601,7 +712,59 @@ watch(
 
 <style scoped>
 .filter-card {
-  padding: 14px 16px;
+  padding: 12px 16px 14px;
+  transition:
+    padding 0.2s ease,
+    min-height 0.2s ease;
+}
+
+/*
+ * 查询区顶部：
+ * 左侧“查询条件”，右侧“展开/收起”
+ */
+.filter-card-header {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/*
+ * 展开状态下，标题与下面查询字段保持一定距离。
+ */
+.filter-card:not(.filter-card-collapsed) .filter-card-header {
+  margin-bottom: 12px;
+}
+
+.filter-card-title {
+  color: #1f2d3d;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/*
+ * 展开/收起按钮采用轻量文字样式，
+ * 不做成醒目的大按钮。
+ */
+.filter-collapse-button {
+  height: 28px;
+  padding: 0 2px;
+  font-size: 13px;
+}
+
+.collapse-arrow {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/*
+ * 收起后整张查询卡只保留标题这一行。
+ */
+.filter-card-collapsed {
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
 .multi-value-cell {
