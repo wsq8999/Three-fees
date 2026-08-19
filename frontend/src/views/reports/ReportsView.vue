@@ -46,32 +46,15 @@ const importForm = reactive({
 });
 
 const filters = reactive({
-  reportNumber:
-    String(route.query.reportNumber ?? ""),
-
-  billingPointCode:
-    String(route.query.billingPointCode ?? ""),
-
-  billingPointName:
-    String(route.query.billingPointName ?? ""),
-
-  period:
-    String(route.query.period ?? ""),
-
-  cityCode:
-    session.currentUser?.city?.code ??
-    String(route.query.city ?? ""),
-
-  district:
-    String(route.query.district ?? ""),
-
+  reportNumber: String(route.query.reportNumber ?? ""),
+  billingPointCode: String(route.query.billingPointCode ?? ""),
+  billingPointName: String(route.query.billingPointName ?? ""),
+  period: String(route.query.period ?? ""),
+  cityCode: session.currentUser?.city?.code ?? String(route.query.city ?? ""),
+  district: String(route.query.district ?? ""),
   source: "" as ReportSummary["source"] | "",
-
-  page:
-    Number(route.query.page ?? 1),
-
-  size:
-    Number(route.query.size ?? 10),
+  page: Number(route.query.page ?? 1),
+  size: Number(route.query.size ?? 10),
 });
 
 const cityLocked = computed(() => session.currentUser?.city != null);
@@ -114,57 +97,45 @@ function hasText(value: unknown): value is string {
 }
 
 
-function reportQuery(
-  page = filters.page,
-  size = filters.size,
-) {
+function reportQuery(page = filters.page, size = filters.size) {
+  const textFilters = [
+    filters.reportNumber.trim(),
+    filters.billingPointCode.trim(),
+    filters.billingPointName.trim(),
+  ].filter((value) => value.length > 0);
+
   return {
-    reportNumber:
-      filters.reportNumber.trim(),
+    reportNumber: filters.reportNumber.trim(),
+    billingPointCode: filters.billingPointCode.trim(),
+    billingPointName: filters.billingPointName.trim(),
 
-    billingPointCode:
-      filters.billingPointCode.trim(),
+    /*
+     * 兼容仍使用 keyword 的旧接口：
+     * 只有一个文本条件时同步传 keyword；
+     * 新接口直接使用上面三个独立条件。
+     */
+    keyword: textFilters.length === 1 ? textFilters[0] : "",
 
-    billingPointName:
-      filters.billingPointName.trim(),
-
-    period:
-    filters.period,
-
-    cityCode:
-    filters.cityCode,
-
-    district:
-    filters.district,
-
-    source:
-    filters.source,
-
+    cityCode: filters.cityCode,
+    district: filters.district,
+    period: filters.period,
+    source: filters.source,
     page,
     size,
   };
 }
 
 async function loadOptions(): Promise<void> {
-  const result =
-    await businessApi.reports.list({
-      reportNumber: "",
-      billingPointCode: "",
-      billingPointName: "",
-
-      cityCode:
-        session.currentUser?.city?.code ?? "",
-
-      district: "",
-      period: "",
-      source: "",
-
-      page: 1,
-      size: 100,
-    });
-
-  optionReports.value =
-    result.items;
+  const result = await businessApi.reports.list({
+    cityCode: session.currentUser?.city?.code ?? "",
+    district: "",
+    period: "",
+    keyword: "",
+    source: "",
+    page: 1,
+    size: 100,
+  });
+  optionReports.value = result.items;
 }
 
 async function load(): Promise<void> {
@@ -192,49 +163,27 @@ async function load(): Promise<void> {
 
 async function syncRouteAndLoad(resetPage = false): Promise<void> {
   if (resetPage) filters.page = 1;
+
   await router.replace({
     path: "/reports/history",
     query: {
       ...(filters.reportNumber
-        ? {
-          reportNumber:
-          filters.reportNumber,
-        }
+        ? { reportNumber: filters.reportNumber }
         : {}),
-
       ...(filters.billingPointCode
-        ? {
-          billingPointCode:
-          filters.billingPointCode,
-        }
+        ? { billingPointCode: filters.billingPointCode }
         : {}),
-
       ...(filters.billingPointName
-        ? {
-          billingPointName:
-          filters.billingPointName,
-        }
+        ? { billingPointName: filters.billingPointName }
         : {}),
-
-      ...(filters.period
-        ? { period: filters.period }
-        : {}),
-
-      ...(filters.cityCode
-        ? { city: filters.cityCode }
-        : {}),
-
-      ...(filters.district
-        ? { district: filters.district }
-        : {}),
-
-      page:
-        String(filters.page),
-
-      size:
-        String(filters.size),
+      ...(filters.period ? { period: filters.period } : {}),
+      ...(filters.cityCode ? { city: filters.cityCode } : {}),
+      ...(filters.district ? { district: filters.district } : {}),
+      page: String(filters.page),
+      size: String(filters.size),
     },
   });
+
   await load();
 }
 
@@ -243,12 +192,8 @@ function reset(): void {
     reportNumber: "",
     billingPointCode: "",
     billingPointName: "",
-
     period: "",
-
-    cityCode:
-      session.currentUser?.city?.code ?? "",
-
+    cityCode: session.currentUser?.city?.code ?? "",
     district: "",
     source: "",
     page: 1,
@@ -412,17 +357,9 @@ async function importHistorical(): Promise<void> {
     focusedReport.value = imported;
     await loadOptions();
     Object.assign(filters, {
-      reportNumber: "",
-      billingPointCode: "",
-      billingPointName: "",
-
+      keyword: "",
       period: "",
-
-      cityCode:
-        cityLocked.value
-          ? (session.currentUser?.city?.code ?? "")
-          : "",
-
+      cityCode: cityLocked.value ? (session.currentUser?.city?.code ?? "") : "",
       district: "",
       source: "",
       page: 1,
@@ -584,95 +521,87 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="report-filter business-card">
-    <div class="report-filter-fields">
-      <label>
-        <span>报告编号</span>
+  <section
+    class="report-filter history-query-bar business-card"
+    aria-label="历史报告查询"
+  >
+    <label class="history-query-item">
+      <span>报告编号</span>
+      <ElInput
+        v-model="filters.reportNumber"
+        placeholder="请输入报告编号"
+        clearable
+      />
+    </label>
 
-        <ElInput
-          v-model="filters.reportNumber"
-          placeholder="请输入报告编号"
-          clearable
-          @keyup.enter="syncRouteAndLoad(true)"
+    <label class="history-query-item">
+      <span>报账点编码</span>
+      <ElInput
+        v-model="filters.billingPointCode"
+        placeholder="请输入报账点编码"
+        clearable
+      />
+    </label>
+
+    <label class="history-query-item">
+      <span>报账点名称</span>
+      <ElInput
+        v-model="filters.billingPointName"
+        placeholder="请输入报账点名称"
+        clearable
+      />
+    </label>
+
+    <label class="history-query-item">
+      <span>账期</span>
+      <ElSelect
+        v-model="filters.period"
+        placeholder="全部账期"
+        clearable
+      >
+        <ElOption
+          v-for="period in periodOptions"
+          :key="period"
+          :label="period"
+          :value="period"
         />
-      </label>
+      </ElSelect>
+    </label>
 
-      <label>
-        <span>报账点编码</span>
-
-        <ElInput
-          v-model="filters.billingPointCode"
-          placeholder="请输入报账点编码"
-          clearable
-          @keyup.enter="syncRouteAndLoad(true)"
+    <label class="history-query-item">
+      <span>所属地市</span>
+      <ElSelect
+        v-model="filters.cityCode"
+        :disabled="cityLocked"
+        placeholder="全部地市"
+        clearable
+      >
+        <ElOption
+          v-for="city in cityOptions"
+          :key="city.code"
+          :label="city.name"
+          :value="city.code"
         />
-      </label>
+      </ElSelect>
+    </label>
 
-      <label>
-        <span>报账点名称</span>
-
-        <ElInput
-          v-model="filters.billingPointName"
-          placeholder="请输入报账点名称"
-          clearable
-          @keyup.enter="syncRouteAndLoad(true)"
+    <label class="history-query-item">
+      <span>所属区县</span>
+      <ElSelect
+        v-model="filters.district"
+        placeholder="全部区县"
+        clearable
+      >
+        <ElOption
+          v-for="district in districtOptions"
+          :key="district"
+          :label="district"
+          :value="district"
         />
-      </label>
+      </ElSelect>
+    </label>
 
-      <label>
-        <span>账期</span>
-
-        <ElSelect
-          v-model="filters.period"
-          placeholder="全部账期"
-          clearable
-        >
-          <ElOption
-            v-for="period in periodOptions"
-            :key="period"
-            :label="period"
-            :value="period"
-          />
-        </ElSelect>
-      </label>
-
-      <label>
-        <span>所属地市</span>
-
-        <ElSelect
-          v-model="filters.cityCode"
-          :disabled="cityLocked"
-          placeholder="全部地市"
-          clearable
-        >
-          <ElOption
-            v-for="city in cityOptions"
-            :key="city.code"
-            :label="city.name"
-            :value="city.code"
-          />
-        </ElSelect>
-      </label>
-
-      <label>
-        <span>所属区县</span>
-
-        <ElSelect
-          v-model="filters.district"
-          placeholder="全部区县"
-          clearable
-        >
-          <ElOption
-            v-for="district in districtOptions"
-            :key="district"
-            :label="district"
-            :value="district"
-          />
-        </ElSelect>
-      </label>
-    </div>
-
-    <div class="query-actions">
+    <div class="query-actions history-query-actions">
       <ElButton
         class="query-button"
         type="primary"
@@ -940,23 +869,30 @@ onMounted(async () => {
   width: 100%;
   gap: 12px;
   align-items: flex-end;
+  justify-content: space-between;
   padding: 14px 16px;
   margin-bottom: 12px;
   box-sizing: border-box;
+
+  /*
+   * 查询区始终保持一行。
+   * 屏幕较窄时优先压缩输入框，不把查询/重置挤到下一行。
+   */
   flex-wrap: nowrap;
 }
 
 .report-filter-fields {
   display: grid;
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-width: 0;
 
   /*
-   * 6个字段完全等宽，
-   * 自动把按钮以外的剩余空间全部铺满。
+   * 关键字略宽，另外三个查询框适当缩短。
+   * 设置最大宽度后，大屏幕也不会把字段拉得过长。
    */
   grid-template-columns:
-    repeat(6, minmax(0, 1fr));
+    minmax(180px, 420px)
+    repeat(3, minmax(110px, 220px));
 
   gap: 10px;
   align-items: end;
@@ -966,10 +902,9 @@ onMounted(async () => {
   display: grid;
   min-width: 0;
   gap: 6px;
-
   color: #1f2d3d;
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .report-filter-fields :deep(.el-input),
@@ -990,13 +925,16 @@ onMounted(async () => {
   display: flex;
   flex: 0 0 auto;
   flex-wrap: nowrap;
-
+  grid-column: auto !important;
   gap: 8px;
   align-items: center;
   justify-content: flex-end;
+  align-self: flex-end;
 
+  /*
+   * 按钮区域永远贴在最右侧。
+   */
   margin-left: auto;
-
   white-space: nowrap;
 }
 
@@ -1006,39 +944,9 @@ onMounted(async () => {
   flex: 0 0 auto;
   width: auto;
   min-width: 68px;
-
+  margin-left: 0;
   padding-right: 10px;
   padding-left: 10px;
-
-  margin-left: 0;
-}
-
-/*
- * 较窄页面仍然保持一行。
- * 输入框自动继续压缩。
- */
-@media (width <= 1200px) {
-  .report-filter {
-    gap: 8px;
-    padding-right: 12px;
-    padding-left: 12px;
-  }
-
-  .report-filter-fields {
-    gap: 7px;
-  }
-
-  .query-actions {
-    gap: 6px;
-  }
-
-  .query-actions .el-button,
-  .query-button,
-  .reset-button {
-    min-width: 60px;
-    padding-right: 7px;
-    padding-left: 7px;
-  }
 }
 
 .report-toolbar {
@@ -1299,10 +1207,6 @@ onMounted(async () => {
   }
 }
 
-/*
- * 你截图中的窄页面宽度也保持一行。
- * 此时进一步压缩四个字段，不再改成两列或单列。
- */
 @media (width <= 820px) {
   .report-filter {
     gap: 6px;
@@ -1386,4 +1290,136 @@ onMounted(async () => {
     width: 100%;
   }
 }
+
+
+
+/* 历史报告查询区：大屏、小屏统一保持一行、六字段等宽 */
+.history-query-bar {
+  display: grid !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  grid-template-columns: repeat(6, minmax(0, 1fr)) max-content !important;
+  column-gap: 10px !important;
+  row-gap: 0 !important;
+  align-items: end !important;
+  padding: 14px 16px !important;
+  margin-bottom: 12px !important;
+  overflow: visible !important;
+  box-sizing: border-box !important;
+}
+
+.history-query-item {
+  display: grid !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  grid-template-rows: 22px 42px !important;
+  gap: 6px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  align-items: stretch !important;
+  box-sizing: border-box !important;
+}
+
+.history-query-item > span {
+  display: flex !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 22px !important;
+  align-items: center !important;
+  color: #1f2d3d !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  line-height: 22px !important;
+  white-space: nowrap !important;
+}
+
+.history-query-item :deep(.el-input),
+.history-query-item :deep(.el-select),
+.history-query-item :deep(.el-date-editor) {
+  display: block !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: 42px !important;
+  margin: 0 !important;
+  box-sizing: border-box !important;
+}
+
+.history-query-item :deep(.el-input__wrapper),
+.history-query-item :deep(.el-select__wrapper) {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  height: 42px !important;
+  min-height: 42px !important;
+  padding: 0 10px !important;
+  box-sizing: border-box !important;
+}
+
+.history-query-item :deep(.el-input__inner) {
+  width: 100% !important;
+  min-width: 0 !important;
+  color: #344054 !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  line-height: 40px !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+}
+
+.history-query-item :deep(.el-input__inner::placeholder) {
+  color: #98a2b3 !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  opacity: 1 !important;
+}
+
+.history-query-item :deep(.el-select__selection) {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
+.history-query-item :deep(.el-select__placeholder),
+.history-query-item :deep(.el-select__selected-item) {
+  min-width: 0 !important;
+  color: #98a2b3 !important;
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.history-query-actions {
+  display: flex !important;
+  width: auto !important;
+  min-width: max-content !important;
+  height: 42px !important;
+  gap: 8px !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  align-self: end !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  white-space: nowrap !important;
+  box-sizing: border-box !important;
+}
+
+.history-query-actions .el-button,
+.history-query-actions .query-button,
+.history-query-actions .reset-button {
+  width: 76px !important;
+  min-width: 76px !important;
+  height: 42px !important;
+  flex: 0 0 76px !important;
+  margin: 0 !important;
+  padding: 0 10px !important;
+  font-size: 14px !important;
+  box-sizing: border-box !important;
+}
+
 </style>
