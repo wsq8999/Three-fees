@@ -324,7 +324,7 @@ public class ReportDocumentGenerator {
   }
 
   private void appendDocxTable(StringBuilder html, XWPFTable table) {
-    html.append("<table>");
+    html.append("<table class=\"word-table\">");
     for (XWPFTableRow row : table.getRows()) {
       html.append("<tr>");
       for (XWPFTableCell cell : row.getTableCells()) {
@@ -343,10 +343,10 @@ public class ReportDocumentGenerator {
     for (XWPFRun run : paragraph.getRuns()) {
       String runText = cleanWordText(run.text());
       if (!runText.isBlank()) {
-        text.append(runText);
+        appendStyledRun(text, runText, run.isBold(), run.getFontSize(), run.getFontFamily());
       }
       for (XWPFPicture picture : run.getEmbeddedPictures()) {
-        wroteContent |= appendBufferedParagraph(html, text);
+        wroteContent |= appendBufferedParagraph(html, text, paragraphStyle(paragraph));
         XWPFPictureData data = picture.getPictureData();
         if (data != null) {
           appendImage(
@@ -355,11 +355,11 @@ public class ReportDocumentGenerator {
         }
       }
     }
-    if (appendBufferedParagraph(html, text)) {
+    if (appendBufferedParagraph(html, text, paragraphStyle(paragraph))) {
       return;
     }
     if (!wroteContent) {
-      appendParagraph(html, paragraph.getText());
+      appendParagraph(html, paragraph.getText(), paragraphStyle(paragraph));
     }
   }
 
@@ -376,7 +376,7 @@ public class ReportDocumentGenerator {
     for (int runIndex = 0; runIndex < paragraph.numCharacterRuns(); runIndex++) {
       CharacterRun run = paragraph.getCharacterRun(runIndex);
       if (picturesTable.hasPicture(run)) {
-        wroteContent |= appendBufferedParagraph(html, text);
+        wroteContent |= appendBufferedParagraph(html, text, paragraphStyle(paragraph));
         Picture picture = picturesTable.extractPicture(run, false);
         if (picture != null) {
           appendImage(
@@ -386,12 +386,12 @@ public class ReportDocumentGenerator {
       } else {
         String runText = cleanWordText(run.text());
         if (!runText.isBlank()) {
-          text.append(runText);
+          appendStyledRun(text, runText, run.isBold(), run.getFontSize() / 2, null);
         }
       }
     }
-    if (!appendBufferedParagraph(html, text) && !wroteContent) {
-      appendParagraph(html, paragraph.text());
+    if (!appendBufferedParagraph(html, text, paragraphStyle(paragraph)) && !wroteContent) {
+      appendParagraph(html, paragraph.text(), paragraphStyle(paragraph));
     }
   }
 
@@ -420,24 +420,104 @@ public class ReportDocumentGenerator {
         .append("\" /></figure>");
   }
 
-  private boolean appendBufferedParagraph(StringBuilder html, StringBuilder text) {
+  private boolean appendBufferedParagraph(StringBuilder html, StringBuilder text, String style) {
     String cleaned = cleanWordText(text.toString());
     text.setLength(0);
     if (cleaned.isBlank()) {
       return false;
     }
-    appendParagraph(html, cleaned);
+    appendHtmlParagraph(html, cleaned, style);
     return true;
   }
 
   private void appendParagraph(StringBuilder html, String text) {
+    appendParagraph(html, text, "");
+  }
+
+  private void appendParagraph(StringBuilder html, String text, String style) {
     String cleaned = cleanWordText(text);
     if (cleaned.isBlank()) {
       return;
     }
-    html.append("<p>");
+    html.append("<p");
+    if (!style.isBlank()) {
+      html.append(" style=\"").append(escapeHtml(style)).append("\"");
+    }
+    html.append(">");
     appendText(html, cleaned);
     html.append("</p>");
+  }
+
+  private void appendHtmlParagraph(StringBuilder html, String contentHtml, String style) {
+    if (contentHtml == null || contentHtml.isBlank()) {
+      return;
+    }
+    html.append("<p");
+    if (style != null && !style.isBlank()) {
+      html.append(" style=\"").append(escapeHtml(style)).append("\"");
+    }
+    html.append(">");
+    html.append(contentHtml);
+    html.append("</p>");
+  }
+
+  private void appendStyledRun(
+      StringBuilder html, String text, boolean bold, int fontSize, String fontFamily) {
+    String cleaned = cleanWordText(text);
+    if (cleaned.isBlank()) {
+      return;
+    }
+    StringBuilder style = new StringBuilder();
+    if (bold) {
+      style.append("font-weight:700;");
+    }
+    if (fontSize > 0) {
+      style.append("font-size:").append(fontSize).append("pt;");
+    }
+    if (fontFamily != null && !fontFamily.isBlank()) {
+      style.append("font-family:").append(cssFontFamily(fontFamily)).append(";");
+    }
+    if (style.isEmpty()) {
+      appendText(html, cleaned);
+      return;
+    }
+    html.append("<span style=\"")
+        .append(escapeHtml(style.toString()))
+        .append("\">");
+    appendText(html, cleaned);
+    html.append("</span>");
+  }
+
+  private String cssFontFamily(String value) {
+    return "'"
+        + value
+            .replace("\\", "")
+            .replace("'", "")
+            .replace("\"", "")
+            .trim()
+        + "'";
+  }
+
+  private String paragraphStyle(XWPFParagraph paragraph) {
+    ParagraphAlignment alignment = paragraph.getAlignment();
+    if (alignment == ParagraphAlignment.CENTER) {
+      return "text-align:center;";
+    }
+    if (alignment == ParagraphAlignment.RIGHT) {
+      return "text-align:right;";
+    }
+    return "";
+  }
+
+  private String paragraphStyle(Paragraph paragraph) {
+    int justification = paragraph.getJustification();
+    if (justification == 1) {
+      return "text-align:center;";
+    }
+    if (justification == 2) {
+      return "text-align:right;";
+    }
+    return "";
   }
 
   private void appendText(StringBuilder html, String text) {
@@ -572,11 +652,14 @@ public class ReportDocumentGenerator {
       titleRun.setBold(true);
       titleRun.setFontFamily("SimHei");
       titleRun.setFontSize(18);
-      addSection(document, "一、情况说明", sections.situation(), imagesById);
-      addSection(document, "二、排查分析", sections.analysis(), imagesById);
-      addSection(document, "三、整改小结", sections.rectification(), imagesById);
+      String situation = stripLeadingSectionHeading(sections.situation(), "一、情况说明");
+      String analysis = stripLeadingSectionHeading(sections.analysis(), "二、排查分析");
+      String rectification = stripLeadingSectionHeading(sections.rectification(), "三、整改小结");
+      addSection(document, "一、情况说明", situation, imagesById);
+      addSection(document, "二、排查分析", analysis, imagesById);
+      addSection(document, "三、整改小结", rectification, imagesById);
       Set<String> inlineIds =
-          inlineFileIds(sections.situation(), sections.analysis(), sections.rectification());
+          inlineFileIds(situation, analysis, rectification);
       for (ReportImage image : images) {
         if (inlineIds.contains(image.fileId())) continue;
         var paragraph = document.createParagraph();
@@ -632,11 +715,11 @@ public class ReportDocumentGenerator {
       PdfWriter writer = new PdfWriter(document, font);
       writer.centered(sections.title(), 18);
       writer.heading("一、情况说明");
-      writer.paragraph(plainText(sections.situation()));
+      writer.paragraph(plainText(stripLeadingSectionHeading(sections.situation(), "一、情况说明")));
       writer.heading("二、排查分析");
-      writer.paragraph(plainText(sections.analysis()));
+      writer.paragraph(plainText(stripLeadingSectionHeading(sections.analysis(), "二、排查分析")));
       writer.heading("三、整改小结");
-      writer.paragraph(plainText(sections.rectification()));
+      writer.paragraph(plainText(stripLeadingSectionHeading(sections.rectification(), "三、整改小结")));
       for (ReportImage image : images) {
         writer.image(image);
       }
@@ -653,6 +736,37 @@ public class ReportDocumentGenerator {
         .flatMap(content -> INLINE_FILE_ID.matcher(content).results())
         .map(result -> result.group(1))
         .collect(Collectors.toSet());
+  }
+
+  private String stripLeadingSectionHeading(String content, String heading) {
+    if (content == null || content.isBlank()) {
+      return "";
+    }
+    String cleaned = content.stripLeading();
+    String section = sectionHeadingPattern(heading);
+    if (HTML_TAG.matcher(cleaned).find()) {
+      String blockHeading =
+          "(?is)^\\s*(?:<br\\s*/?>\\s*)*(?:<(?:h[1-6]|p|div)[^>]*>\\s*)"
+              + section
+              + "\\s*[：:]?\\s*(?:</(?:h[1-6]|p|div)>\\s*)";
+      String inlineHeading =
+          "(?is)^\\s*(?:<br\\s*/?>\\s*)*(?:<(?:p|div)[^>]*>\\s*)"
+              + section
+              + "\\s*[：:]\\s*";
+      String stripped = cleaned.replaceFirst(blockHeading, "").replaceFirst(inlineHeading, "<p>");
+      return stripped.stripLeading();
+    }
+    return cleaned.replaceFirst("(?s)^\\s*" + section + "\\s*[：:]?\\s*", "");
+  }
+
+  private String sectionHeadingPattern(String heading) {
+    String normalized = heading.replaceAll("[\\s、.．:：]", "");
+    if (normalized.length() < 2) {
+      return Pattern.quote(heading);
+    }
+    String number = Pattern.quote(normalized.substring(0, 1));
+    String title = Pattern.quote(normalized.substring(1));
+    return number + "\\s*[、.．]?\\s*" + title;
   }
 
   private String plainText(String content) {

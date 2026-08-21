@@ -8,10 +8,12 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +32,9 @@ public class TaskWorker {
   private final Map<TaskType, TaskProcessor> processors;
   private final String leaseOwner = "worker-" + UUID.randomUUID();
   private final Duration leaseDuration;
+  private final int concurrency;
+  private final AtomicInteger runningTasks = new AtomicInteger();
+  private final ExecutorService taskExecutor;
   private final ScheduledExecutorService leaseRenewer =
       Executors.newSingleThreadScheduledExecutor(
           runnable -> {
@@ -41,7 +46,8 @@ public class TaskWorker {
   public TaskWorker(
       BusinessTaskRepository repository,
       List<TaskProcessor> processors,
-      @Value("${app.worker.lease-seconds:30}") long leaseSeconds) {
+      @Value("${app.worker.lease-seconds:30}") long leaseSeconds,
+      @Value("${app.worker.concurrency:1}") int concurrency) {
     this.repository = repository;
     var mapped = new EnumMap<TaskType, TaskProcessor>(TaskType.class);
     for (TaskProcessor processor : processors) {
@@ -52,14 +58,38 @@ public class TaskWorker {
     if (leaseSeconds < 3) {
       throw new IllegalArgumentException("WORKER_LEASE_SECONDS must be at least 3");
     }
+    if (concurrency < 1) {
+      throw new IllegalArgumentException("WORKER_CONCURRENCY must be at least 1");
+    }
     this.processors = Map.copyOf(mapped);
     this.leaseDuration = Duration.ofSeconds(leaseSeconds);
+    this.concurrency = concurrency;
+    this.taskExecutor =
+        Executors.newFixedThreadPool(
+            concurrency,
+            runnable -> {
+              Thread thread = new Thread(runnable, "three-fees-task-worker");
+              thread.setDaemon(true);
+              return thread;
+            });
   }
 
   @Scheduled(fixedDelayString = "${app.worker.poll-delay:500}")
   public void poll() {
-    for (BusinessTask task : repository.claimAvailable(leaseOwner, leaseDuration, 1)) {
-      execute(task);
+    int availableSlots = concurrency - runningTasks.get();
+    if (availableSlots <= 0) {
+      return;
+    }
+    for (BusinessTask task : repository.claimAvailable(leaseOwner, leaseDuration, availableSlots)) {
+      runningTasks.incrementAndGet();
+      taskExecutor.submit(
+          () -> {
+            try {
+              execute(task);
+            } finally {
+              runningTasks.decrementAndGet();
+            }
+          });
     }
   }
 
@@ -114,6 +144,7 @@ public class TaskWorker {
 
   @PreDestroy
   void closeLeaseRenewer() {
+    taskExecutor.shutdownNow();
     leaseRenewer.shutdownNow();
   }
 }

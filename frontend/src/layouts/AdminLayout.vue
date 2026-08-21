@@ -28,17 +28,48 @@ const passwordForm = reactive({ current: "", next: "", confirmation: "" });
 const user = computed(() => session.currentUser);
 const avatar = computed(() => user.value?.displayName.slice(0, 1) ?? "超");
 const breadcrumbTitle = computed(() => String(route.meta.title ?? ""));
+
+type BreadcrumbItem = {
+  label: string;
+  path?: string;
+};
+
 const breadcrumbItems = computed(() => {
   if (route.name === "billing-point-detail") {
-    return ["报账点管理", "报账点详情"];
+    return [
+      { label: "报账点管理", path: "/billing-points" },
+      { label: "报账点详情" },
+    ] satisfies BreadcrumbItem[];
   }
   if (route.name === "report-detail") {
-    return ["稽核报告管理", "历史报告", "报告详情"];
+    return [
+      { label: "稽核报告管理", path: "/reports/history" },
+      { label: "历史报告", path: "/reports/history" },
+      { label: "报告详情" },
+    ] satisfies BreadcrumbItem[];
+  }
+  if (route.name === "report-correction") {
+    return [
+      { label: "稽核报告管理", path: "/reports/history" },
+      { label: "历史报告", path: "/reports/history" },
+      { label: "报告更正" },
+    ] satisfies BreadcrumbItem[];
   }
   if (String(route.path).startsWith("/reports/")) {
-    return ["稽核报告管理", breadcrumbTitle.value];
+    const reportPaths: Record<string, string> = {
+      生成报告: "/reports/generate",
+      历史报告: "/reports/history",
+      AI任务进度: "/reports/ai-tasks",
+    };
+    return [
+      { label: "稽核报告管理", path: "/reports/history" },
+      {
+        label: breadcrumbTitle.value,
+        path: reportPaths[breadcrumbTitle.value],
+      },
+    ] satisfies BreadcrumbItem[];
   }
-  return [breadcrumbTitle.value];
+  return [{ label: breadcrumbTitle.value }] satisfies BreadcrumbItem[];
 });
 
 async function handleLogout(): Promise<void> {
@@ -155,8 +186,16 @@ function handleUserCommand(command: string): void {
             <ElBreadcrumbItem :to="{ path: '/dashboard' }">
               <ElIcon><HomeFilled /></ElIcon>
             </ElBreadcrumbItem>
-            <ElBreadcrumbItem v-for="item in breadcrumbItems" :key="item">
-              {{ item }}
+            <ElBreadcrumbItem
+              v-for="(item, index) in breadcrumbItems"
+              :key="`${item.label}-${index}`"
+              :to="
+                item.path && index < breadcrumbItems.length - 1
+                  ? { path: item.path }
+                  : undefined
+              "
+            >
+              {{ item.label }}
             </ElBreadcrumbItem>
           </ElBreadcrumb>
         </div>
@@ -320,6 +359,16 @@ function handleUserCommand(command: string): void {
   background: white;
   border: 0;
   border-top: 1px solid var(--color-neutral-200);
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.collapse-navigation:hover,
+.collapse-navigation:focus-visible {
+  color: var(--color-brand-600);
+  background: var(--color-neutral-50);
 }
 
 .collapsed .brand-lockup {

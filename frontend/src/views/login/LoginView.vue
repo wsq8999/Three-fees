@@ -221,15 +221,20 @@ onMounted(() => {
 <style scoped>
 .login-page {
   display: grid;
-  min-height: 100vh;
+  position: fixed;
+  inset: 0;
+  height: 100dvh;
+  min-height: 0;
   grid-template-columns: 1fr 1fr;
+  overflow: hidden;
   background: #fbfcff;
 }
 
 .login-introduction {
   position: relative;
-  min-height: 100vh;
-  padding: 56px 64px 34px;
+  height: 100%;
+  min-height: 0;
+  padding: clamp(22px, 4.8vh, 56px) clamp(34px, 5vw, 64px) clamp(18px, 3vh, 34px);
   overflow: hidden;
   background:
     radial-gradient(circle at 20% 20%, rgb(245 34 45 / 7%), transparent 34%),
@@ -277,14 +282,14 @@ onMounted(() => {
 .introduction-content {
   position: relative;
   z-index: 1;
-  height: calc(100% - 50px);
-  padding: 120px 34px 0;
+  height: calc(100% - 48px);
+  padding: clamp(30px, 11vh, 120px) 34px 0;
 }
 
 .introduction-content h1 {
   margin: 0;
   color: #152337;
-  font-size: clamp(34px, 3.2vw, 52px);
+  font-size: clamp(28px, min(3.2vw, 5.8vh), 52px);
   letter-spacing: 0.06em;
 }
 
@@ -293,22 +298,22 @@ onMounted(() => {
   display: block;
   width: 54px;
   height: 4px;
-  margin: 26px 0;
+  margin: clamp(12px, 2.4vh, 26px) 0;
   background: var(--color-brand-600);
   border-radius: 99px;
 }
 
 .introduction-content > p {
   color: var(--color-neutral-500);
-  font-size: var(--font-size-xl);
+  font-size: clamp(16px, 2vh, var(--font-size-xl));
 }
 
 .security-illustration {
   position: relative;
   display: grid;
   width: min(100%, 330px);
-  height: 220px;
-  margin: 35px auto 20px;
+  height: clamp(110px, 22vh, 220px);
+  margin: clamp(14px, 3vh, 35px) auto clamp(8px, 2vh, 20px);
   place-items: center;
 }
 
@@ -316,16 +321,16 @@ onMounted(() => {
   position: relative;
   z-index: 2;
   display: grid;
-  width: 116px;
-  height: 136px;
+  width: clamp(74px, 11vh, 116px);
+  height: clamp(86px, 13vh, 136px);
   place-items: center;
   color: white;
   background: linear-gradient(150deg, #ffadb4, var(--color-brand-500));
-  border: 9px solid rgb(255 255 255 / 70%);
+  border: clamp(5px, 1vh, 9px) solid rgb(255 255 255 / 70%);
   border-radius: 55% 55% 48% 48%;
   box-shadow: 0 25px 42px rgb(245 34 45 / 24%);
   clip-path: polygon(50% 0, 100% 18%, 88% 74%, 50% 100%, 12% 74%, 0 18%);
-  font-size: 48px;
+  font-size: clamp(30px, 5vh, 48px);
 }
 
 .orbit {
@@ -347,7 +352,7 @@ onMounted(() => {
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: var(--space-3);
   padding: 0;
-  margin: 24px 0 0;
+  margin: clamp(10px, 2vh, 24px) 0 0;
   list-style: none;
 }
 
@@ -361,9 +366,9 @@ onMounted(() => {
 
 .introduction-content li > span {
   display: grid;
-  width: 46px;
-  height: 46px;
-  margin-bottom: var(--space-2);
+  width: clamp(34px, 5.2vh, 46px);
+  height: clamp(34px, 5.2vh, 46px);
+  margin-bottom: clamp(2px, 0.8vh, var(--space-2));
   place-items: center;
   color: var(--color-brand-600);
   background: white;
@@ -381,8 +386,10 @@ onMounted(() => {
 
 .login-panel {
   display: grid;
-  min-height: 100vh;
-  padding: clamp(20px, 4vw, 48px);
+  height: 100%;
+  min-height: 0;
+  padding: clamp(12px, 3vh, 48px) clamp(14px, 4vw, 48px);
+  overflow: hidden;
   background:
     radial-gradient(circle at 85% 12%, rgb(47 94 158 / 4%), transparent 24%),
     #fbfcff;
@@ -391,7 +398,8 @@ onMounted(() => {
 
 .login-card {
   width: min(100%, 510px);
-  padding: clamp(24px, 4vw, 54px) clamp(22px, 4vw, 58px) clamp(24px, 4vw, 46px);
+  max-height: calc(100dvh - clamp(24px, 6vh, 96px));
+  padding: clamp(16px, 4vh, 54px) clamp(18px, 4vw, 58px) clamp(14px, 3vh, 46px);
   text-align: center;
   background: white;
   border: 1px solid #edf0f4;
@@ -400,24 +408,24 @@ onMounted(() => {
 }
 
 .login-mark {
-  margin: 0 auto 22px;
+  margin: 0 auto clamp(8px, 2vh, 22px);
 }
 
 .login-card h2 {
   margin: 0;
   color: #172438;
-  font-size: 34px;
+  font-size: clamp(24px, 4vh, 34px);
 }
 
 .login-description {
   margin: var(--space-2) 0 0;
   color: var(--color-neutral-500);
-  font-size: var(--font-size-lg);
+  font-size: clamp(14px, 2vh, var(--font-size-lg));
 }
 
 .title-line {
   width: 42px;
-  margin: 22px auto 28px;
+  margin: clamp(8px, 1.8vh, 22px) auto clamp(12px, 2.5vh, 28px);
 }
 
 .login-error {
@@ -432,8 +440,8 @@ onMounted(() => {
 
 .form-field {
   display: grid;
-  gap: var(--space-2);
-  margin-bottom: var(--space-5);
+  gap: clamp(4px, 0.8vh, var(--space-2));
+  margin-bottom: clamp(10px, 2vh, var(--space-5));
   text-align: left;
 }
 
@@ -450,25 +458,26 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin: -4px 0 var(--space-5);
+  margin: -2px 0 clamp(10px, 2vh, var(--space-5));
 }
 
 .login-submit {
   width: 100%;
-  height: 54px;
-  font-size: var(--font-size-lg);
+  height: clamp(42px, 6vh, 54px);
+  font-size: clamp(15px, 2vh, var(--font-size-lg));
   font-weight: 700;
 }
 
 .security-note {
-  margin: var(--space-6) 0 0;
+  margin: clamp(10px, 2.6vh, var(--space-6)) 0 0;
   color: var(--color-neutral-500);
   font-size: var(--font-size-sm);
 }
 
 @media (width <= 980px) {
   .login-page {
-    display: block;
+    display: grid;
+    grid-template-columns: 1fr;
   }
 
   .login-introduction {
@@ -476,19 +485,66 @@ onMounted(() => {
   }
 
   .login-panel {
-    padding: var(--space-5);
+    padding: clamp(10px, 3vh, var(--space-5));
   }
 }
 
 @media (width <= 480px) {
   .login-options {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 10px;
+    align-items: center;
+    flex-direction: row;
+    gap: 8px;
   }
 
   .login-card {
-    padding: var(--space-6);
+    padding: clamp(14px, 4vh, var(--space-6));
+  }
+
+  .security-note {
+    font-size: 12px;
+  }
+}
+
+@media (height <= 760px) {
+  .brand span,
+  .login-mark {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+  }
+
+  .brand svg,
+  .login-mark svg {
+    width: 22px;
+  }
+
+  .introduction-content li small {
+    display: none;
+  }
+}
+
+@media (height <= 640px) {
+  .security-illustration {
+    display: none;
+  }
+
+  .login-description,
+  .security-note {
+    display: none;
+  }
+
+  .login-card {
+    padding-block: 12px;
+  }
+}
+
+@media (height <= 560px) {
+  .title-line {
+    display: none;
+  }
+
+  .form-field label {
+    font-size: 13px;
   }
 }
 </style>

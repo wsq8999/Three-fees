@@ -14,7 +14,6 @@ import { ElMessage } from "element-plus";
 
 import { businessApi, triggerBrowserDownload } from "@/api/business-api";
 import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
-import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import type { ReportSummary } from "@/types/business";
 
@@ -30,12 +29,16 @@ const loading = ref(true);
 const downloading = ref(false);
 const errorMessage = ref("");
 const previewContentRef = ref<HTMLElement>();
+const metadataRef = ref<HTMLElement>();
+const metadataRowRef = ref<HTMLElement>();
+const metadataScale = ref(1);
 const correctionVisible = ref(false);
 const correctionError = ref("");
 const correctionForm = reactive({
   reason: "",
 });
 let previewImageCleanup: Array<() => void> = [];
+let metadataResizeObserver: ResizeObserver | null = null;
 
 const isHistorical = computed(
   () => report.value?.source === "HISTORICAL_IMPORT",
@@ -45,7 +48,7 @@ const sourceLabel = computed(() =>
 );
 const billingPointLabel = computed(() => {
   if (report.value === null) return "—";
-  return `${report.value.billingPointCode} ｜ ${report.value.billingPointName} ｜ ${report.value.city.name}`;
+  return `${report.value.billingPointCode} ｜ ${report.value.billingPointName} ｜ ${report.value.city.name} ｜ ${report.value.period}`;
 });
 const rawContent = computed(
   () => report.value?.previewHtml || report.value?.summary || "",
@@ -261,11 +264,39 @@ async function goBack(): Promise<void> {
   );
 }
 
-onMounted(load);
+function updateMetadataScale(): void {
+  const container = metadataRef.value;
+  const row = metadataRowRef.value;
+  if (!container || !row) return;
+  requestAnimationFrame(() => {
+    const available = container.clientWidth;
+    const needed = row.scrollWidth;
+    const nextScale = needed > available && available > 0
+      ? available / needed
+      : 1;
+    if (Math.abs(metadataScale.value - nextScale) > 0.001) {
+      metadataScale.value = nextScale;
+    }
+  });
+}
+
+onMounted(() => {
+  void load();
+  metadataResizeObserver = new ResizeObserver(updateMetadataScale);
+  if (metadataRef.value) {
+    metadataResizeObserver.observe(metadataRef.value);
+  }
+  void nextTick(updateMetadataScale);
+});
 onUpdated(() => {
   void nextTick(enhanceReportPreviewImages);
+  void nextTick(updateMetadataScale);
 });
-onBeforeUnmount(clearPreviewImageHandlers);
+onBeforeUnmount(() => {
+  clearPreviewImageHandlers();
+  metadataResizeObserver?.disconnect();
+  metadataResizeObserver = null;
+});
 </script>
 
 <template>
@@ -279,25 +310,24 @@ onBeforeUnmount(clearPreviewImageHandlers);
   />
 
   <template v-else-if="report">
-    <section class="report-metadata business-card">
-      <div>
-        <small>报账点：</small>
-        <strong>{{ billingPointLabel }}</strong>
-      </div>
-      <div>
-        <small>超标类型：</small>
-        <OverLimitTypeTags
-          :ratios="report.overLimitRatios"
-          :fallback="report.overLimitType"
-        />
-      </div>
-      <div>
-        <small>超标比例：</small>
-        <OverLimitRatioTags :ratios="report.overLimitRatios" />
-      </div>
-      <div>
-        <small>报告来源：</small>
-        <strong>{{ sourceLabel }}</strong>
+    <section ref="metadataRef" class="report-metadata business-card">
+      <div
+        ref="metadataRowRef"
+        class="report-metadata-row"
+        :style="{ transform: `scale(${metadataScale})` }"
+      >
+        <div>
+          <small>报账点：</small>
+          <strong>{{ billingPointLabel }}</strong>
+        </div>
+        <div>
+          <small>超标比例：</small>
+          <OverLimitRatioTags :ratios="report.overLimitRatios" />
+        </div>
+        <div>
+          <small>报告来源：</small>
+          <strong>{{ sourceLabel }}</strong>
+        </div>
       </div>
     </section>
 
@@ -379,33 +409,56 @@ onBeforeUnmount(clearPreviewImageHandlers);
 
 <style scoped>
 .report-metadata {
-  display: grid;
-  grid-template-columns: minmax(420px, 1.6fr) minmax(260px, 0.8fr) minmax(
-      180px,
-      0.5fr
-    );
-  gap: 16px;
+  display: flex;
   align-items: center;
-  padding: 16px 20px;
+  padding: 14px 18px;
   margin-bottom: 16px;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
-.report-metadata div {
+.report-metadata-row {
   display: flex;
-  gap: 0;
+  gap: clamp(18px, 4vw, 56px);
   align-items: center;
-  min-width: max-content;
+  width: max-content;
+  max-width: none;
+  white-space: nowrap;
+  transform-origin: left center;
+}
+
+.report-metadata-row > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
   white-space: nowrap;
 }
 
+.report-metadata-row > div:first-child {
+  min-width: 620px;
+}
+
+.report-metadata-row > div:nth-child(2) {
+  min-width: 320px;
+}
+
+.report-metadata-row > div:nth-child(3) {
+  min-width: 170px;
+}
+
 .report-metadata small {
+  flex: 0 0 auto;
   color: #7d8ca1;
   font-weight: 700;
 }
 
 .report-metadata strong {
+  flex: 0 0 auto;
   color: #001733;
+}
+
+.report-metadata :deep(.el-tag) {
+  flex: 0 0 auto;
 }
 
 .over-limit-value {
@@ -500,7 +553,7 @@ onBeforeUnmount(clearPreviewImageHandlers);
 
 @media (max-width: 960px) {
   .report-metadata {
-    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   .report-sheet {

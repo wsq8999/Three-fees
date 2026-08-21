@@ -62,6 +62,7 @@ app:
   worker:
     poll-delay: 500
     lease-seconds: 30
+    concurrency: ${WORKER_CONCURRENCY:4}
   ai:
     enabled: ${AI_ENABLED:true}
     model: ${KIMI_MODEL:kimi-k3}

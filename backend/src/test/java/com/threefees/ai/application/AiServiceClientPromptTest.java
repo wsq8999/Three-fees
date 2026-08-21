@@ -34,6 +34,13 @@ class AiServiceClientPromptTest {
         .contains("本城市历史正式报告和用户纠正")
         .contains("江苏其他城市相似案例")
         .contains("禁止出现“同点历史”“本市经验”“同城市历史”“外市参考”“证据来源”等内部检索话术")
+        .contains("禁止把“需复核更新台账”“需复核并更新额定功率台账”“现场设备台账与系统额定功率标杆存在偏差”作为默认结论")
+        .contains("只有当前材料明确支持时，才写台账已更新或分摊比例已更新")
+        .contains("输出 updatedSections 前必须校对中文错别字、业务名词和 HTML 实体残留")
+        .contains("“额亏”必须改为“额定”")
+        .contains("“阙值”必须改为“阈值”或当前口径“正常上限”")
+        .contains("“集稽核”必须改为“稽核”")
+        .contains("不得输出“&#x20;”等 HTML 实体残留")
         .contains("待核实")
         .contains("禁止虚构")
         .doesNotContain("每个 <figure data-file-id=\"...\"> 上方必须紧贴一行简短图片说明");

@@ -40,6 +40,7 @@ class ReportDraftCityMemoryIntegrationTest {
     jdbcTemplate.update("DELETE FROM audit_report WHERE updated_by='city-memory-test'");
     jdbcTemplate.update(
         "DELETE FROM report_draft_version WHERE draft_id IN (SELECT id FROM report_draft WHERE created_by='city-memory-test')");
+    jdbcTemplate.update("DELETE FROM business_task WHERE created_by='city-memory-test'");
     jdbcTemplate.update("DELETE FROM report_draft WHERE created_by='city-memory-test'");
     jdbcTemplate.update(
         """
@@ -305,6 +306,51 @@ class ReportDraftCityMemoryIntegrationTest {
         .doesNotContain(imageIds.get(1));
     assertThat(imageSortNumbers(draft.id())).containsExactly(0);
     assertThat(imageAnalysisJson(draft.id()).getFirst()).contains("IMG-1").doesNotContain("IMG-2");
+  }
+
+  @Test
+  void findSyncsFailedImageAnalysisTaskBackToDraft() {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    String taskId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO business_task
+          (public_id, task_type, business_key, status, attempts, max_attempts,
+           payload_json, error_code, created_by, updated_by)
+        VALUES (?, 'AI_IMAGE_ANALYSIS', ?, 'FAILED', 1, 1, ?, 'KIMI_TIMEOUT',
+                'city-memory-test', 'city-memory-test')
+        """,
+        taskId,
+        "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId(),
+        "{\"draftId\":\"" + draft.publicId() + "\",\"instruction\":\"测试\",\"imageFileIds\":[]}");
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET analysis_status='AI_ANALYZING',
+               analysis_task_public_id=?,
+               analysis_error_code=NULL
+         WHERE id=?
+        """,
+        taskId,
+        draft.id());
+
+    var loaded = service.find(draft.publicId(), actor);
+    String storedStatus =
+        jdbcTemplate.queryForObject(
+            "SELECT analysis_status FROM report_draft WHERE id=?", String.class, draft.id());
+    String storedError =
+        jdbcTemplate.queryForObject(
+            "SELECT analysis_error_code FROM report_draft WHERE id=?", String.class, draft.id());
+
+    assertThat(loaded.analysisStatus()).isEqualTo("AI_FAILED");
+    assertThat(loaded.analysisErrorCode()).isEqualTo("KIMI_TIMEOUT");
+    assertThat(storedStatus).isEqualTo("AI_FAILED");
+    assertThat(storedError).isEqualTo("KIMI_TIMEOUT");
   }
 
   private void insertMemory(String cityCode, String reason) {

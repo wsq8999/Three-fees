@@ -69,6 +69,15 @@ function analysisErrorMessage(errorCode: string | null | undefined): string {
   );
 }
 
+const analysisFailedTitle = computed(() => {
+  if (draft.value?.status !== "AI_FAILED") return "";
+  const message = analysisErrorMessage(draft.value.analysisErrorCode);
+  if (message.includes("正文和图片已保留")) {
+    return `AI分析失败，${message}`;
+  }
+  return `AI分析失败，${message}正文和图片已保留。`;
+});
+
 const chineseNumbers = ["一", "二", "三", "四", "五", "六", "七", "八"];
 
 const headingBlock = computed(
@@ -914,34 +923,44 @@ onUnmounted(stopAnalysisPolling);
       </div>
     </section>
 
-    <ElAlert
+    <div
       v-if="draft.status === 'AI_ANALYZING'"
       class="draft-analysis-alert"
-      type="info"
       title="AI正在后台分析"
-      :closable="false"
-      show-icon
-    />
+    >
+      <ElAlert
+        type="info"
+        title="AI正在后台分析"
+        :closable="false"
+        show-icon
+      />
+    </div>
 
-    <ElAlert
+    <div
       v-else-if="draft.status === 'AI_COMPLETED'"
       class="draft-analysis-alert"
-      type="success"
-      title="AI分析完成，待人工确认"
-      description="请继续检查和修改工作稿，满意后再确认报告并导出 Word。"
-      :closable="false"
-      show-icon
-    />
+      title="AI分析完成，工作稿已更新，请检查修改后再确认导出 Word。"
+    >
+      <ElAlert
+        type="success"
+        title="AI分析完成，工作稿已更新，请检查修改后再确认导出 Word。"
+        :closable="false"
+        show-icon
+      />
+    </div>
 
-    <ElAlert
+    <div
       v-else-if="draft.status === 'AI_FAILED'"
       class="draft-analysis-alert"
-      type="error"
-      title="AI分析失败"
-      :description="analysisErrorMessage(draft.analysisErrorCode)"
-      :closable="false"
-      show-icon
-    />
+      :title="analysisFailedTitle"
+    >
+      <ElAlert
+        type="error"
+        :title="analysisFailedTitle"
+        :closable="false"
+        show-icon
+      />
+    </div>
 
     <div
       class="draft-workspace"
@@ -1066,7 +1085,7 @@ onUnmounted(stopAnalysisPolling);
           <ElInput
             v-model="prompt"
             type="textarea"
-            :rows="4"
+            :rows="2"
             maxlength="1000"
             show-word-limit
             placeholder="输入问题或修改指令；Enter 发送，Shift+Enter 换行"
@@ -1137,7 +1156,38 @@ onUnmounted(stopAnalysisPolling);
 }
 
 .draft-analysis-alert {
-  margin: 12px 0;
+  height: 34px;
+  margin: 6px 0 8px;
+  overflow: hidden;
+}
+
+.draft-analysis-alert :deep(.el-alert) {
+  height: 34px;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.draft-analysis-alert :deep(.el-alert__content) {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.draft-analysis-alert :deep(.el-alert__title) {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  line-height: 34px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-analysis-alert :deep(.el-alert__description) {
+  display: none;
+  max-width: 100%;
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .draft-summary > div {
@@ -1192,8 +1242,8 @@ onUnmounted(stopAnalysisPolling);
 .draft-workspace {
   display: grid;
   width: 100%;
-  height: clamp(520px, calc(100vh - 230px), 820px);
-  min-height: 480px;
+  height: clamp(560px, calc(100vh - 190px), 880px);
+  min-height: 520px;
 
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
@@ -1366,19 +1416,20 @@ onUnmounted(stopAnalysisPolling);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 22px 18px 16px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid #edf1f5;
 }
 
 .assistant-panel h2 {
-  margin: 0 0 6px;
+  margin: 0 0 2px;
   color: #1f2d3d;
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .assistant-panel header small {
   color: #7d8ca1;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .chat-list {
@@ -1391,10 +1442,22 @@ onUnmounted(stopAnalysisPolling);
   flex-direction: column;
   gap: 12px;
 
-  padding: 18px;
+  padding: 12px 14px;
   overflow-x: hidden;
   overflow-y: auto;
   box-sizing: border-box;
+}
+
+.chat-list :deep(.el-empty) {
+  --el-empty-padding: 18px 0;
+}
+
+.chat-list :deep(.el-empty__image) {
+  display: none;
+}
+
+.chat-list :deep(.el-empty__description) {
+  margin-top: 0;
 }
 
 .chat-message {
@@ -1453,7 +1516,7 @@ onUnmounted(stopAnalysisPolling);
 
   flex: 0 0 auto;
 
-  padding: 16px;
+  padding: 10px 12px;
 
   background: #fff;
   border-top: 1px solid #edf1f5;
@@ -1463,7 +1526,7 @@ onUnmounted(stopAnalysisPolling);
   display: flex;
   gap: 10px;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
   color: #66768b;
   font-size: 12px;
 }
@@ -1474,8 +1537,15 @@ onUnmounted(stopAnalysisPolling);
 
 .prompt-box .el-button {
   position: absolute;
-  right: 26px;
-  bottom: 28px;
+  right: 20px;
+  bottom: 20px;
+  width: 34px;
+  height: 34px;
+}
+
+.prompt-box :deep(.el-textarea__inner) {
+  min-height: 70px !important;
+  padding-right: 54px;
 }
 
 .draft-actions {
@@ -1510,20 +1580,16 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .assistant-panel > header {
-    padding: 18px 14px 13px;
-  }
-
-  .assistant-panel h2 {
-    font-size: 18px;
+    padding: 10px 12px 8px;
   }
 
   .chat-list {
     gap: 10px;
-    padding: 14px;
+    padding: 11px 12px;
   }
 
   .prompt-box {
-    padding: 14px;
+    padding: 9px 10px;
   }
 
   .prompt-mode {
@@ -1535,8 +1601,8 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .prompt-box .el-button {
-    right: 22px;
-    bottom: 26px;
+    right: 18px;
+    bottom: 18px;
   }
 }
 
@@ -1591,7 +1657,7 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .assistant-panel > header {
-    padding: 15px 12px 11px;
+    padding: 9px 10px 7px;
   }
 
   .assistant-panel h2 {
@@ -1600,12 +1666,12 @@ onUnmounted(stopAnalysisPolling);
 
   .assistant-panel header small {
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.3;
   }
 
   .chat-list {
     gap: 8px;
-    padding: 12px;
+    padding: 10px;
   }
 
   .chat-message {
@@ -1618,7 +1684,7 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .prompt-box {
-    padding: 12px;
+    padding: 8px 9px;
   }
 
   .prompt-mode {
@@ -1630,8 +1696,8 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .prompt-box .el-button {
-    right: 20px;
-    bottom: 24px;
+    right: 16px;
+    bottom: 16px;
   }
 }
 
@@ -1655,7 +1721,7 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .assistant-panel > header {
-    padding: 12px 10px 9px;
+    padding: 8px 9px 7px;
   }
 
   .assistant-panel h2 {
@@ -1667,7 +1733,7 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .chat-list {
-    padding: 10px;
+    padding: 8px;
   }
 
   .chat-message > span {
@@ -1682,21 +1748,21 @@ onUnmounted(stopAnalysisPolling);
   }
 
   .prompt-box {
-    padding: 10px;
+    padding: 8px;
   }
 
   .prompt-mode {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
   }
 
   .prompt-mode .el-select {
-    width: 100%;
+    width: 110px;
   }
 
   .prompt-box .el-button {
-    right: 18px;
-    bottom: 22px;
+    right: 14px;
+    bottom: 14px;
   }
 }
 

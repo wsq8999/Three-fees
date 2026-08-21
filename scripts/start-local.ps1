@@ -59,6 +59,7 @@ $dbUrl = Get-EnvValue -Name 'DB_URL' -Default 'jdbc:mysql://127.0.0.1:3306/three
 $dbUsername = Get-EnvValue -Name 'DB_USERNAME' -Default 'root'
 $dbPassword = Get-EnvValue -Name 'DB_PASSWORD' -Default '547547'
 $appFileRoot = Get-EnvValue -Name 'APP_FILE_ROOT' -Default (Join-Path $backendRoot 'runtime/files')
+$workerConcurrency = Get-EnvValue -Name 'WORKER_CONCURRENCY' -Default '4'
 
 if (-not $SkipPortCheck) {
     $backendAvailable = Test-PortAvailable -Port 8080 -Name '后端'
@@ -78,6 +79,7 @@ if (-not $SkipPortCheck) {
 [Environment]::SetEnvironmentVariable('DB_USERNAME', $dbUsername, 'Process')
 [Environment]::SetEnvironmentVariable('DB_PASSWORD', $dbPassword, 'Process')
 [Environment]::SetEnvironmentVariable('APP_FILE_ROOT', $appFileRoot, 'Process')
+[Environment]::SetEnvironmentVariable('WORKER_CONCURRENCY', $workerConcurrency, 'Process')
 [Environment]::SetEnvironmentVariable('INITIAL_ACCOUNT_BOOTSTRAP_ENABLED', (Get-EnvValue -Name 'INITIAL_ACCOUNT_BOOTSTRAP_ENABLED' -Default 'true'), 'Process')
 [Environment]::SetEnvironmentVariable('INITIAL_ACCOUNT_PASSWORD', (Get-EnvValue -Name 'INITIAL_ACCOUNT_PASSWORD' -Default '123456'), 'Process')
 [Environment]::SetEnvironmentVariable('VITE_API_PROXY_TARGET', 'http://127.0.0.1:8080', 'Process')
@@ -85,6 +87,7 @@ if (-not $SkipPortCheck) {
 Write-Host '已检测到 Kimi 密钥，已为后端启动进程注入 AI_ENABLED=true。'
 Write-Host ('Kimi 接口：' + $baseUrl)
 Write-Host ('Kimi 模型：' + $model)
+Write-Host ('后台任务并发数：' + $workerConcurrency)
 Write-Host '正在启动后端和前端，请在新打开的两个窗口查看运行日志。'
 
 Start-Process powershell.exe `

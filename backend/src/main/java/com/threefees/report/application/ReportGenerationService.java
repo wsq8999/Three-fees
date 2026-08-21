@@ -75,7 +75,9 @@ public class ReportGenerationService {
         """
         SELECT s.public_id AS billing_point_period_id,
                s.billing_point_code, s.billing_point_name, s.city_code, c.name AS city_name,
-               s.district_name, s.data_period, a.over_limit_type, a.max_ratio
+               s.district_name, s.data_period, a.over_limit_type, a.max_ratio,
+               a.yoy_result, a.mom_result, a.rated_result,
+               a.yoy_ratio, a.mom_ratio, a.rated_ratio
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
           JOIN audit_result a
@@ -95,8 +97,19 @@ public class ReportGenerationService {
                 rs.getString("city_name"),
                 rs.getString("district_name"),
                 rs.getString("data_period"),
-                overLimitTypeLabel(rs.getString("over_limit_type")),
-                rs.getBigDecimal("max_ratio")),
+                overLimitDisplayType(
+                    rs.getString("over_limit_type"),
+                    rs.getString("yoy_result"),
+                    rs.getString("mom_result"),
+                    rs.getString("rated_result")),
+                rs.getBigDecimal("max_ratio"),
+                overLimitRatios(
+                    rs.getString("yoy_result"),
+                    rs.getString("mom_result"),
+                    rs.getString("rated_result"),
+                    rs.getBigDecimal("yoy_ratio"),
+                    rs.getBigDecimal("mom_ratio"),
+                    rs.getBigDecimal("rated_ratio"))),
         args.toArray());
   }
 
@@ -281,9 +294,9 @@ public class ReportGenerationService {
             + "kWh，实际报账金额为"
             + decimal(source.actualAmount())
             + "元。经系统稽核，该报账点本期用电存在超标情况，超标类型为"
-            + overLimitTypeLabel(source.overLimitType())
+            + overLimitDisplayType(source)
             + "，超标比例为"
-            + percent(source.maxRatio())
+            + overLimitRatioText(source)
             + "。";
     return "<h1>"
         + escape(title)
@@ -336,6 +349,8 @@ public class ReportGenerationService {
                s.city_code, c.name AS city_name, s.district_name, s.data_period,
                s.period_start, s.period_end, s.data_json,
                a.audit_status, a.over_limit_type, a.max_ratio,
+               a.yoy_result, a.mom_result, a.rated_result,
+               a.yoy_ratio, a.mom_ratio, a.rated_ratio,
                COALESCE(
                  (SELECT SUM(m.allocated_kwh)
                     FROM meter_reading m
@@ -388,6 +403,12 @@ public class ReportGenerationService {
         rs.getString("audit_status"),
         rs.getString("over_limit_type"),
         rs.getBigDecimal("max_ratio"),
+        rs.getString("yoy_result"),
+        rs.getString("mom_result"),
+        rs.getString("rated_result"),
+        rs.getBigDecimal("yoy_ratio"),
+        rs.getBigDecimal("mom_ratio"),
+        rs.getBigDecimal("rated_ratio"),
         rs.getBigDecimal("actual_energy"),
         rs.getBigDecimal("actual_amount"),
         parseJson(rs.getString("detail_json")),
@@ -439,8 +460,8 @@ public class ReportGenerationService {
         new AiServiceClient.Fact("所属区县", source.district() == null ? "" : source.district()),
         new AiServiceClient.Fact("账期", source.period()),
         new AiServiceClient.Fact("稽核状态", "超标"),
-        new AiServiceClient.Fact("超标类型", overLimitTypeLabel(source.overLimitType())),
-        new AiServiceClient.Fact("超标比例", percent(source.maxRatio())),
+        new AiServiceClient.Fact("超标类型", overLimitDisplayType(source)),
+        new AiServiceClient.Fact("超标比例", overLimitRatioText(source)),
         new AiServiceClient.Fact("实际总耗电量", decimal(source.actualEnergy()) + "kWh"),
         new AiServiceClient.Fact("实际报账金额", decimal(source.actualAmount()) + "元"));
   }
@@ -471,8 +492,9 @@ public class ReportGenerationService {
         source.cityName(),
         source.district(),
         source.period(),
-        overLimitTypeLabel(source.overLimitType()),
-        source.maxRatio());
+        overLimitDisplayType(source),
+        source.maxRatio(),
+        overLimitRatios(source));
   }
 
   private String existingReportForSnapshot(long snapshotId) {
@@ -603,6 +625,75 @@ public class ReportGenerationService {
     };
   }
 
+  private String overLimitDisplayType(GenerationSource source) {
+    return overLimitDisplayType(
+        source.overLimitType(), source.yoyResult(), source.momResult(), source.ratedResult());
+  }
+
+  private String overLimitDisplayType(
+      String overLimitType, String yoyResult, String momResult, String ratedResult) {
+    if (!"MULTIPLE".equals(overLimitType)) {
+      return overLimitTypeLabel(overLimitType);
+    }
+
+    var labels = new ArrayList<String>();
+    if ("OVER_LIMIT".equals(yoyResult)) {
+      labels.add("同比");
+    }
+    if ("OVER_LIMIT".equals(momResult)) {
+      labels.add("环比");
+    }
+    if ("OVER_LIMIT".equals(ratedResult)) {
+      labels.add("额定标杆");
+    }
+    return labels.isEmpty() ? "超标" : String.join("、", labels) + "超标";
+  }
+
+  private String overLimitRatioText(GenerationSource source) {
+    List<OverLimitRatio> ratios = overLimitRatios(source);
+    if (ratios.isEmpty()) {
+      return percent(source.maxRatio());
+    }
+    return ratios.stream()
+        .map(ratio -> ratio.label() + " " + ratio.ratio() + "%")
+        .collect(java.util.stream.Collectors.joining("，"));
+  }
+
+  private List<OverLimitRatio> overLimitRatios(GenerationSource source) {
+    return overLimitRatios(
+        source.yoyResult(),
+        source.momResult(),
+        source.ratedResult(),
+        source.yoyRatio(),
+        source.momRatio(),
+        source.ratedRatio());
+  }
+
+  private List<OverLimitRatio> overLimitRatios(
+      String yoyResult,
+      String momResult,
+      String ratedResult,
+      BigDecimal yoyRatio,
+      BigDecimal momRatio,
+      BigDecimal ratedRatio) {
+    var ratios = new ArrayList<OverLimitRatio>();
+    addOverLimitRatio(ratios, yoyResult, yoyRatio, "YOY", "同比");
+    addOverLimitRatio(ratios, momResult, momRatio, "MOM", "环比");
+    addOverLimitRatio(ratios, ratedResult, ratedRatio, "RATED", "额定标杆");
+    return ratios;
+  }
+
+  private void addOverLimitRatio(
+      List<OverLimitRatio> ratios,
+      String result,
+      BigDecimal ratio,
+      String type,
+      String label) {
+    if ("OVER_LIMIT".equals(result) && ratio != null) {
+      ratios.add(new OverLimitRatio(type, label, ratio.stripTrailingZeros().toPlainString()));
+    }
+  }
+
   private String escape(String value) {
     return value == null
         ? ""
@@ -618,7 +709,10 @@ public class ReportGenerationService {
       String district,
       String period,
       String overLimitType,
-      BigDecimal maxExceedRatio) {}
+      BigDecimal maxExceedRatio,
+      List<OverLimitRatio> overLimitRatios) {}
+
+  public record OverLimitRatio(String type, String label, String ratio) {}
 
   public record InitialContent(Candidate candidate, String contentHtml) {}
 
@@ -655,6 +749,12 @@ public class ReportGenerationService {
       String auditStatus,
       String overLimitType,
       BigDecimal maxRatio,
+      String yoyResult,
+      String momResult,
+      String ratedResult,
+      BigDecimal yoyRatio,
+      BigDecimal momRatio,
+      BigDecimal ratedRatio,
       BigDecimal actualEnergy,
       BigDecimal actualAmount,
       JsonNode auditJson,

@@ -201,10 +201,13 @@ public class ReportDraftService {
     return find(existing.publicId(), actor);
   }
 
-  @Transactional(readOnly = true)
+  @Transactional
   public Draft find(String publicId, CurrentUser actor) {
     Draft draft = loadDraft(publicId);
     requireScope(actor, draft.cityCode());
+    if (syncImageAnalysisTaskStatus(draft, actor.username())) {
+      draft = loadDraft(publicId);
+    }
     return draft;
   }
 
@@ -422,6 +425,35 @@ public class ReportDraftService {
 
   private String imageAnalysisBusinessKey(Draft draft) {
     return "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId();
+  }
+
+  private boolean syncImageAnalysisTaskStatus(Draft draft, String actor) {
+    if (!"AI_ANALYZING".equals(draft.analysisStatus())) {
+      return false;
+    }
+    java.util.Optional<BusinessTask> task =
+        draft.analysisTaskId() == null || draft.analysisTaskId().isBlank()
+            ? taskRepository.findByTypeAndBusinessKey(
+                TaskType.AI_IMAGE_ANALYSIS, imageAnalysisBusinessKey(draft))
+            : taskRepository.findByPublicId(draft.analysisTaskId());
+    if (task.isEmpty()) {
+      return false;
+    }
+    BusinessTask current = task.get();
+    if (current.status() == TaskStatus.FAILED) {
+      markImageAnalysisFailed(
+          draft.id(),
+          current.errorCode() == null || current.errorCode().isBlank()
+              ? "AI_IMAGE_ANALYSIS_FAILED"
+              : current.errorCode(),
+          actor);
+      return true;
+    }
+    if (current.status() == TaskStatus.SUCCEEDED) {
+      markImageAnalysisSucceeded(draft.id(), actor);
+      return true;
+    }
+    return false;
   }
 
   private void markImageAnalysisQueued(

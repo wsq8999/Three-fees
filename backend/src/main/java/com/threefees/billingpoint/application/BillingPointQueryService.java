@@ -7,6 +7,8 @@ import com.threefees.importing.application.FieldCatalogService;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.FieldDefinition;
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
@@ -30,6 +32,8 @@ public class BillingPointQueryService {
 
   private static final TypeReference<LinkedHashMap<String, String>> STRING_MAP =
       new TypeReference<>() {};
+  private static final BigDecimal HISTORICAL_MARGIN = new BigDecimal("1.20");
+  private static final MathContext INTERNAL_CONTEXT = MathContext.DECIMAL128;
 
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
@@ -422,14 +426,19 @@ public class BillingPointQueryService {
                    max_ratio,
                    actual_energy,
                    actual_amount,
+                   current_daily_avg_kwh,
                    rated_benchmark_energy,
                    calculated_at,
                    payment_eligibility_reason,
                    yoy_reference_period,
                    yoy_reference_energy,
+                   yoy_reference_daily_kwh_c,
+                   yoy_factor_k,
                    yoy_threshold_daily_kwh,
                    mom_reference_period,
                    mom_reference_energy,
+                   mom_reference_daily_kwh_c,
+                   mom_factor_k,
                    mom_threshold_daily_kwh,
                    rated_benchmark_energy,
                    yoy_ratio,
@@ -538,12 +547,14 @@ public class BillingPointQueryService {
             "同比",
             resultSet.getString("yoy_result"),
             resultSet.getString("yoy_reference_period"),
-            resultSet.getBigDecimal("yoy_reference_energy"),
-            resultSet.getBigDecimal("yoy_threshold_daily_kwh"),
-            resultSet.getBigDecimal("actual_energy"),
+            resultSet.getBigDecimal("yoy_reference_daily_kwh_c"),
+            displayHistoricalThreshold(
+                resultSet.getBigDecimal("yoy_reference_daily_kwh_c"),
+                resultSet.getBigDecimal("yoy_factor_k")),
+            resultSet.getBigDecimal("current_daily_avg_kwh"),
             resultSet.getBigDecimal("yoy_ratio"),
             resultSet.getString("yoy_na_reason"),
-            "本期实际用电与去年同月正常上限比较"));
+            "本期日均用电与去年同月日均正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -551,12 +562,14 @@ public class BillingPointQueryService {
             "环比",
             resultSet.getString("mom_result"),
             resultSet.getString("mom_reference_period"),
-            resultSet.getBigDecimal("mom_reference_energy"),
-            resultSet.getBigDecimal("mom_threshold_daily_kwh"),
-            resultSet.getBigDecimal("actual_energy"),
+            resultSet.getBigDecimal("mom_reference_daily_kwh_c"),
+            displayHistoricalThreshold(
+                resultSet.getBigDecimal("mom_reference_daily_kwh_c"),
+                resultSet.getBigDecimal("mom_factor_k")),
+            resultSet.getBigDecimal("current_daily_avg_kwh"),
             resultSet.getBigDecimal("mom_ratio"),
             resultSet.getString("mom_na_reason"),
-            "本期实际用电与上一个自然月正常上限比较"));
+            "本期日均用电与环比参考日均正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -569,7 +582,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("actual_energy"),
             resultSet.getBigDecimal("rated_ratio"),
             resultSet.getString("rated_na_reason"),
-            "本期实际用电与当月日标杆合计比较"));
+            "本期总电量与额定标杆总量比较"));
 
     root.set("raw", parseAuditDetail(resultSet.getString("detail_json")));
     return root;
@@ -619,6 +632,16 @@ public class BillingPointQueryService {
     return node;
   }
 
+  private BigDecimal displayHistoricalThreshold(BigDecimal referenceDaily, BigDecimal factorK) {
+    if (referenceDaily == null || factorK == null) {
+      return null;
+    }
+    return referenceDaily
+        .multiply(factorK, INTERNAL_CONTEXT)
+        .multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT)
+        .setScale(2, RoundingMode.HALF_UP);
+  }
+
   private JsonNode parseAuditDetail(String value) {
     if (value == null || value.isBlank()) {
       return objectMapper.createObjectNode();
@@ -636,7 +659,7 @@ public class BillingPointQueryService {
 
     if ("OVER_LIMIT".equals(status)) {
       return "稽核结果超标，超标类型："
-          + overLimitTypeLabel(resultSet.getString("over_limit_type"));
+          + overLimitDisplayType(resultSet);
     }
 
     if ("NORMAL".equals(status)) {

@@ -274,14 +274,35 @@ const auditRows = computed(() =>
     ...row,
     label: cleanText(row.label, auditLabel(row.key)),
     referencePeriod: cleanText(row.referencePeriod),
-    baseline: formatKwh(row.baseline),
-    threshold: formatKwh(row.threshold),
-    actual: formatKwh(row.actual),
+    baseline: formatAuditBaseline(row),
+    normalRange: formatNormalRange(row),
+    actual: formatAuditActual(row),
     reason: cleanText(row.reason, auditReasonByKey(row.key)),
     ratio: formatRatio(row.ratio),
     formula: cleanText(row.formula, auditReasonByKey(row.key)),
   })),
 );
+
+function isDailyAudit(key: AuditComparison["key"]): boolean {
+  return key === "YEAR_ON_YEAR" || key === "MONTH_ON_MONTH";
+}
+
+function formatAuditBaseline(row: AuditComparison): string {
+  const value = isDailyAudit(row.key) ? formatKwhPerDay(row.baseline) : formatKwh(row.baseline);
+  if (value === "—") return "参考数据不足";
+  return value;
+}
+
+function formatNormalRange(row: AuditComparison): string {
+  const value = isDailyAudit(row.key) ? formatKwhPerDay(row.threshold) : formatKwh(row.threshold);
+  return value === "—" ? "参考数据不足" : `≤ ${value}`;
+}
+
+function formatAuditActual(row: AuditComparison): string {
+  const value = isDailyAudit(row.key) ? formatKwhPerDay(row.actual) : formatKwh(row.actual);
+  if (value === "—") return "本期数据不足";
+  return value;
+}
 
 function formatKwh(value: string | null | undefined): string {
   const text = cleanText(value);
@@ -289,6 +310,14 @@ function formatKwh(value: string | null | undefined): string {
   const number = numeric(text);
   if (number === 0 && !/^0(?:\.0+)?$/.test(text.replace(/,/g, ""))) return text;
   return `${number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}度`;
+}
+
+function formatKwhPerDay(value: string | null | undefined): string {
+  const text = cleanText(value);
+  if (text === "—") return text;
+  const number = numeric(text);
+  if (number === 0 && !/^0(?:\.0+)?$/.test(text.replace(/,/g, ""))) return text;
+  return `${number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}度/日`;
 }
 
 function formatRatio(value: string | null | undefined): string {
@@ -417,7 +446,7 @@ function translateOverLimitType(value: string): string {
     ONLY_YOY: "仅同比超标",
     ONLY_MOM: "仅环比超标",
     ONLY_RATED: "仅额定标杆超标",
-    MULTIPLE: "多项超标",
+    MULTIPLE: detail.value?.summary.overLimitType ?? "超标",
     NONE: "未超标",
   };
   return Object.entries(labels).reduce(
@@ -858,12 +887,12 @@ onMounted(load);
             :closable="false"
             show-icon
           />
-          <ElTable :data="auditRows" class="audit-table">
+          <ElTable :data="auditRows" class="audit-table" table-layout="auto">
             <ElTableColumn prop="label" label="分析类型" width="110" />
             <ElTableColumn prop="referencePeriod" label="参考账期" width="110" />
-            <ElTableColumn prop="baseline" label="参考电量" width="130" />
-            <ElTableColumn prop="threshold" label="正常上限" width="130" />
-            <ElTableColumn prop="actual" label="本期实际" width="130" />
+            <ElTableColumn prop="baseline" label="参考值（日均/总量）" width="190" />
+            <ElTableColumn prop="normalRange" label="正常范围" width="170" />
+            <ElTableColumn prop="actual" label="本期值（日均/总量）" width="190" />
             <ElTableColumn label="结果" width="100">
               <template #default="scope">
                 <span class="audit-status" :class="auditStatusClass(scope.row.status)">
@@ -1195,6 +1224,16 @@ onMounted(load);
 
 .audit-table :deep(.el-table__cell) {
   vertical-align: top;
+}
+
+.audit-table :deep(.el-table__body .el-table__cell:not(:last-child) .cell),
+.audit-table :deep(.el-table__header .el-table__cell:not(:last-child) .cell) {
+  white-space: nowrap;
+}
+
+.audit-table :deep(.el-table__body .el-table__cell:not(:last-child) .cell) {
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .audit-status {

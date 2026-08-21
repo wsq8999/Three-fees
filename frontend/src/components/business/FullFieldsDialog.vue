@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { BusinessField, FieldGroup } from "@/types/business";
 
@@ -13,6 +13,9 @@ const props = defineProps<{
 
 defineEmits<{ "update:modelValue": [value: boolean] }>();
 
+const keyword = ref("");
+const currentPage = ref(1);
+const pageSize = ref(5);
 const fields = computed(() => props.groups.flatMap((group) => group.fields));
 const displayFields = computed(() => {
   if (fields.value.length >= props.expectedCount) return fields.value;
@@ -26,30 +29,60 @@ const displayFields = computed(() => {
   );
   return [...fields.value, ...padding];
 });
+const filteredFields = computed(() => {
+  const query = keyword.value.trim().toLowerCase();
+  if (!query) return displayFields.value;
+  return displayFields.value.filter((field) =>
+    field.label.toLowerCase().includes(query),
+  );
+});
+const pagedFields = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return filteredFields.value.slice(start, start + pageSize.value);
+});
+
+watch(keyword, () => {
+  currentPage.value = 1;
+});
+
+watch(pageSize, () => {
+  currentPage.value = 1;
+});
+
+watch(
+  () => props.modelValue,
+  (visible) => {
+    if (visible) {
+      keyword.value = "";
+      currentPage.value = 1;
+      pageSize.value = 5;
+    }
+  },
+);
 </script>
 
 <template>
   <ElDialog
     :model-value="modelValue"
     :title="`完整字段（${dataLabel} ${expectedCount}项）`"
-    width="min(920px, 92vw)"
-    top="7vh"
+    width="min(720px, 92vw)"
+    top="12vh"
+    class="full-fields-dialog"
     destroy-on-close
     @update:model-value="$emit('update:modelValue', $event)"
   >
-    <p class="dialog-description">
-      仅展示当前报账点、当前账期和当前所选记录的源字段值
-    </p>
-    <h4>搜索字段</h4>
-    <div class="summary-fields">
-      <div v-for="field in summary" :key="field.key">
-        <small>{{ field.label }}</small
-        ><strong>{{ field.value || "—" }}</strong>
-      </div>
+    <div class="field-query">
+      <label for="full-field-keyword">字段</label>
+      <ElInput
+        id="full-field-keyword"
+        v-model="keyword"
+        clearable
+        placeholder="请输入字段名称"
+      />
     </div>
     <h4>字段与数值</h4>
-    <div class="field-table-scroll">
-      <ElTable :data="displayFields" size="small" height="430">
+    <div class="field-table-panel">
+      <ElTable :data="pagedFields" size="small">
         <ElTableColumn prop="label" label="字段" min-width="180" />
         <ElTableColumn label="数值" min-width="260">
           <template #default="scope">
@@ -61,6 +94,16 @@ const displayFields = computed(() => {
         </ElTableColumn>
       </ElTable>
     </div>
+    <div class="field-pagination">
+      <ElPagination
+        v-model:current-page="currentPage"
+        v-model:page-size="pageSize"
+        :page-sizes="[5, 10, 20, 50]"
+        :total="filteredFields.length"
+        layout="total, sizes, prev, pager, next"
+        background
+      />
+    </div>
     <template #footer>
       <ElButton @click="$emit('update:modelValue', false)">关闭</ElButton>
     </template>
@@ -68,63 +111,63 @@ const displayFields = computed(() => {
 </template>
 
 <style scoped>
-.dialog-description {
-  margin: -10px 0 var(--space-4);
-  color: var(--color-neutral-500);
-  font-size: var(--font-size-sm);
+:global(.full-fields-dialog .el-dialog__body) {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+:global(.full-fields-dialog .el-dialog__footer) {
+  padding-top: 8px;
 }
 
 h4 {
-  margin: var(--space-3) 0 var(--space-2);
+  margin: 10px 0 8px;
 }
 
-.summary-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
-  gap: 0;
-  padding: var(--space-3) 0;
-  background: #f7f9fc;
-  border: 1px solid var(--color-neutral-200);
-  border-radius: var(--radius-lg);
-}
-
-.summary-fields > div {
+.field-query {
   display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: 0 var(--space-4);
-  border-right: 1px solid var(--color-neutral-200);
+  gap: var(--space-3);
+  align-items: center;
 }
 
-.summary-fields > div:last-child {
-  border-right: 0;
+.field-query label {
+  flex: 0 0 auto;
+  color: #1f2d3d;
+  font-weight: 700;
 }
 
-.summary-fields small {
-  color: var(--color-neutral-500);
-}
-
-.summary-fields strong,
 .field-value {
+  display: inline-block;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.field-table-scroll {
+.field-table-panel {
   border: 1px solid var(--color-neutral-200);
+  border-radius: var(--radius-md);
+}
+
+.field-table-panel :deep(.el-table__cell) {
+  padding: 5px 0;
+}
+
+.field-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 @media (width <= 640px) {
-  .summary-fields {
-    grid-template-columns: 1fr;
+  .field-query {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
-  .summary-fields > div {
-    padding-block: var(--space-2);
-    border-right: 0;
-    border-bottom: 1px solid var(--color-neutral-200);
+  .field-pagination {
+    justify-content: flex-start;
   }
 }
 </style>

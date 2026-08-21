@@ -323,7 +323,7 @@ onBeforeUnmount(stopRefresh);
               {{
                 (scope.row as AiTaskListItem).status === "SUCCEEDED"
                   ? "查看并确认"
-                  : "查看工作稿"
+                  : "查看草稿"
               }}
             </ElButton>
             <span v-else class="muted">暂无可跳转</span>

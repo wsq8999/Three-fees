@@ -13,6 +13,7 @@ import javax.imageio.ImageIO;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.xwpf.usermodel.ParagraphAlignment;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.junit.jupiter.api.Test;
 
@@ -49,6 +50,55 @@ class ReportDocumentGeneratorTest {
   }
 
   @Test
+  void keepsBasicWordStylesInHistoricalPreviewHtml() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    byte[] wordBytes;
+    try (var document = new XWPFDocument();
+        var output = new ByteArrayOutputStream()) {
+      var title = document.createParagraph();
+      title.setAlignment(ParagraphAlignment.CENTER);
+      var titleRun = title.createRun();
+      titleRun.setText("陈堡花沈搬迁电费稽核说明");
+      titleRun.setBold(true);
+      titleRun.setFontSize(18);
+      var body = document.createParagraph();
+      body.createRun().setText("与标杆电量对比，差异情况");
+      document.write(output);
+      wordBytes = output.toByteArray();
+    }
+
+    String html = generator.extractWordPreviewHtml(wordBytes, "历史报告.docx");
+
+    assertThat(html)
+        .contains("陈堡花沈搬迁电费稽核说明", "与标杆电量对比，差异情况")
+        .contains("text-align:center")
+        .contains("font-weight:700")
+        .contains("font-size:18pt");
+  }
+
+  @Test
+  void doesNotDuplicateSectionHeadingsWhenContentAlreadyContainsThem() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    var sections =
+        new ReportSections(
+            "陈堡花沈搬迁电费稽核说明",
+            "一、情况说明：与标杆电量对比，差异情况",
+            "<h2>二、排查分析</h2><p>排查正文</p>",
+            "<p>三整改小结：整改正文</p>");
+
+    var generated = generator.generate(sections, List.of());
+
+    try (var word = new XWPFDocument(new ByteArrayInputStream(generated.word()));
+        var extractor = new XWPFWordExtractor(word)) {
+      String text = extractor.getText();
+      assertThat(countOccurrences(text, "一、情况说明")).isEqualTo(1);
+      assertThat(countOccurrences(text, "二、排查分析")).isEqualTo(1);
+      assertThat(countOccurrences(text, "三、整改小结")).isEqualTo(1);
+      assertThat(text).contains("与标杆电量对比，差异情况", "排查正文", "整改正文");
+    }
+  }
+
+  @Test
   void keepsInlineEditedTextAndImageInGeneratedWord() throws Exception {
     var generator = new ReportDocumentGenerator("");
     String imageId = "inline-image-1";
@@ -79,6 +129,16 @@ class ReportDocumentGeneratorTest {
           .doesNotContain("<figure", "data-file-id");
       assertThat(word.getAllPictures()).hasSize(1);
     }
+  }
+
+  private int countOccurrences(String value, String needle) {
+    int count = 0;
+    int index = 0;
+    while ((index = value.indexOf(needle, index)) >= 0) {
+      count++;
+      index += needle.length();
+    }
+    return count;
   }
 
   @Test
