@@ -366,13 +366,19 @@ onBeforeUnmount(stopRefresh);
 .ai-task-filter {
   padding: 14px 16px;
   margin-bottom: 14px;
-  overflow-x: auto;
+  overflow: visible;
 }
 
 .ai-task-filter-row {
-  display: flex;
+  display: grid;
   width: 100%;
-  min-width: 1080px;
+  min-width: 0;
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(0, 1.25fr)
+    minmax(0, 0.9fr)
+    minmax(0, 0.9fr)
+    max-content;
   gap: 12px;
   align-items: center;
   white-space: nowrap;
@@ -380,7 +386,6 @@ onBeforeUnmount(stopRefresh);
 
 .ai-task-filter-row label {
   display: flex;
-  flex: 1 1 0;
   min-width: 0;
   gap: 8px;
   align-items: center;
@@ -400,7 +405,6 @@ onBeforeUnmount(stopRefresh);
 
 .ai-task-query-actions {
   display: flex;
-  flex: 0 0 244px;
   flex-direction: row !important;
   flex-wrap: nowrap !important;
   gap: 8px;
@@ -461,16 +465,32 @@ onBeforeUnmount(stopRefresh);
 
 @media (width <= 960px) {
   .ai-task-filter {
-    padding-bottom: 12px;
+    padding: 12px;
   }
 
   .ai-task-filter-row {
-    min-width: 1080px;
+    gap: 8px;
+  }
+
+  .ai-task-filter-row span {
+    font-size: 12px;
+  }
+
+  .ai-task-filter-row :deep(.el-input__wrapper),
+  .ai-task-filter-row :deep(.el-select__wrapper) {
+    padding-right: 6px;
+    padding-left: 6px;
   }
 
   .ai-task-query-actions {
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
+    gap: 6px;
+  }
+
+  .ai-task-query-actions :deep(.el-button),
+  .ai-task-query-button {
+    width: 58px !important;
+    min-width: 58px !important;
+    padding: 0 6px !important;
   }
 }
 </style>

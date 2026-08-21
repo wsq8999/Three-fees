@@ -863,21 +863,18 @@ watch(
       <ElTableColumn
         type="selection"
         width="48"
-        fixed="left"
       />
 
       <ElTableColumn
         prop="code"
         label="报账点编码"
         width="205"
-        fixed="left"
       />
 
       <ElTableColumn
         prop="name"
         label="报账点名称"
         min-width="180"
-        fixed="left"
       />
 
       <ElTableColumn

@@ -671,24 +671,21 @@ onMounted(async () => {
       table-layout="fixed"
       @selection-change="selectRows"
     >
-      <ElTableColumn type="selection" width="48" fixed="left" />
+      <ElTableColumn type="selection" width="48" />
       <ElTableColumn
         prop="reportNumber"
         label="报告编号"
         width="175"
-        fixed="left"
       />
       <ElTableColumn
         prop="billingPointCode"
         label="报账点编码"
         width="170"
-        fixed="left"
       />
       <ElTableColumn
         prop="billingPointName"
         label="报账点名称"
         width="190"
-        fixed="left"
         show-overflow-tooltip
       />
       <ElTableColumn prop="period" label="账期" width="120" />
@@ -759,7 +756,7 @@ onMounted(async () => {
   <ElDialog
     v-model="importVisible"
     title="导入历史报告"
-    width="min(720px, calc(100vw - 32px))"
+    width="min(640px, calc(100vw - 24px))"
     class="history-import-dialog"
     append-to-body
     align-center
@@ -768,7 +765,7 @@ onMounted(async () => {
   >
     <section class="dialog-section">
       <h3>基本信息</h3>
-      <ElForm label-position="top">
+      <ElForm class="history-import-form" label-position="top">
         <ElFormItem label="报账点">
           <ElSelect
             v-model="importForm.pointKey"
@@ -834,7 +831,6 @@ onMounted(async () => {
             <strong>点击或将 Word 文件拖到此处上传</strong>
             <small>支持 .doc、.docx 格式文件，且只能上传 1 个文件</small>
           </div>
-          <ElButton>选择文件</ElButton>
         </div>
       </ElUpload>
     </section>
@@ -1015,17 +1011,17 @@ onMounted(async () => {
 }
 
 .dialog-section + .dialog-section {
-  padding-top: 18px;
-  margin-top: 18px;
+  padding-top: 10px;
+  margin-top: 10px;
   border-top: 1px solid #edf1f5;
 }
 
 .dialog-section h3 {
   position: relative;
-  margin: 0 0 16px;
+  margin: 0 0 10px;
   padding-left: 12px;
   color: #1f2d3d;
-  font-size: 18px;
+  font-size: 15px;
 }
 
 .dialog-section h3::before {
@@ -1045,6 +1041,35 @@ onMounted(async () => {
   gap: 14px;
 }
 
+.history-import-dialog :deep(.el-dialog__body) {
+  padding-top: 10px;
+  padding-bottom: 8px;
+  overflow: visible;
+}
+
+.history-import-dialog :deep(.el-dialog__header) {
+  padding-bottom: 8px;
+}
+
+.history-import-dialog :deep(.el-dialog__footer) {
+  padding-top: 8px;
+}
+
+.history-import-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(112px, 0.7fr);
+  gap: 10px;
+}
+
+.history-import-form :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+
+.history-import-form :deep(.el-form-item__label) {
+  margin-bottom: 4px;
+  line-height: 20px;
+}
+
 .import-fields :deep(.el-select),
 .dialog-section :deep(.el-date-editor) {
   width: 100%;
@@ -1055,7 +1080,7 @@ onMounted(async () => {
 }
 
 .full-point-select :deep(.el-select__wrapper) {
-  min-height: 42px;
+  min-height: 36px;
   height: auto;
 }
 
@@ -1071,7 +1096,7 @@ onMounted(async () => {
 }
 
 .upload-section :deep(.el-upload-dragger) {
-  min-height: 126px;
+  min-height: 82px;
   border: 1px dashed #cbd3dd;
   border-radius: 8px;
   background: #fff;
@@ -1079,23 +1104,23 @@ onMounted(async () => {
 
 .upload-box {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 18px;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
   align-items: center;
-  min-height: 126px;
-  padding: 0 28px;
+  min-height: 82px;
+  padding: 0 16px;
   text-align: left;
 }
 
 .file-icon {
   display: grid;
-  width: 44px;
-  height: 44px;
+  width: 34px;
+  height: 34px;
   place-items: center;
   color: #f5223d;
-  border: 3px solid #f5223d;
-  border-radius: 8px;
-  font-size: 20px;
+  border: 2px solid #f5223d;
+  border-radius: 7px;
+  font-size: 16px;
   font-weight: 800;
 }
 
@@ -1106,16 +1131,16 @@ onMounted(async () => {
 
 .upload-box strong {
   color: #1f2d3d;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .upload-box small {
-  margin-top: 8px;
+  margin-top: 4px;
   color: #607089;
 }
 
 .import-error {
-  margin-top: 14px;
+  margin-top: 8px;
 }
 
 .success-message {
@@ -1259,8 +1284,19 @@ onMounted(async () => {
    * 只是不再影响历史报告查询区。
    */
   .import-fields,
-  .upload-box {
-    grid-template-columns: 1fr;
+  .history-import-form {
+    grid-template-columns: minmax(0, 1.6fr) minmax(90px, 0.72fr);
+    gap: 8px;
+  }
+
+  .history-import-dialog .upload-box {
+    grid-template-columns: auto 1fr;
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .history-import-dialog .upload-box small {
+    display: none;
   }
 
   .report-toolbar,
