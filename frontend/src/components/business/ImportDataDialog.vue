@@ -4,7 +4,7 @@ import type { UploadFile, UploadInstance } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
-import type { DatasetType, ImportBatch } from "@/types/business";
+import type { DatasetType, ImportBatch, ImportSessionItem } from "@/types/business";
 
 /* =========================================================
  * Props / Emits
@@ -109,6 +109,10 @@ const pendingImportedBatches = ref<ImportBatch[]>([]);
 
 const isSubmitting = ref(false);
 
+const isRestoringSession = ref(false);
+
+const shouldAutoCompleteCurrentSession = ref(false);
+
 const errorMessage = ref("");
 
 const progressIssue = ref<{
@@ -120,6 +124,19 @@ const uploadRef = ref<UploadInstance>();
 
 const uploadKey = ref(0);
 
+type DatasetImportState = {
+  status: "idle" | "uploading" | "success" | "failed";
+  batches: ImportBatch[];
+  error: string;
+};
+
+const importStates = ref<Record<DatasetType, DatasetImportState>>({
+  BILLING_POINT: { status: "idle", batches: [], error: "" },
+  PAYMENT: { status: "idle", batches: [], error: "" },
+  METER_READING: { status: "idle", batches: [], error: "" },
+  BENCHMARK: { status: "idle", batches: [], error: "" },
+});
+
 /* =========================================================
  * 计算属性
  * ========================================================= */
@@ -128,7 +145,21 @@ const canSubmit = computed(
   () =>
     selectedFile.value !== null &&
     !isSubmitting.value &&
-    !progressVisible.value,
+    !isRestoringSession.value &&
+    !progressVisible.value &&
+    canImportDataset(selectedType.value),
+);
+
+const successfulTypes = computed(() =>
+  datasetTypes.filter((type) => importStates.value[type].status === "success"),
+);
+
+const successfulLabels = computed(() =>
+  successfulTypes.value.map((type) => datasetMeta[type].label).join("、"),
+);
+
+const allDatasetsImported = computed(
+  () => successfulTypes.value.length === datasetTypes.length,
 );
 
 /**
@@ -457,8 +488,30 @@ function selectDataset(datasetType: DatasetType): void {
   if (progressVisible.value) {
     return;
   }
+  if (!canImportDataset(datasetType)) {
+    return;
+  }
 
   selectedType.value = datasetType;
+}
+
+function canImportDataset(datasetType: DatasetType): boolean {
+  if (importStates.value[datasetType].status === "success") {
+    return false;
+  }
+  return (
+    datasetType === "BILLING_POINT" ||
+    importStates.value.BILLING_POINT.status === "success"
+  );
+}
+
+function datasetStateLabel(datasetType: DatasetType): string {
+  const state = importStates.value[datasetType];
+  if (state.status === "success") return "已成功";
+  if (state.status === "uploading") return "导入中";
+  if (state.status === "failed") return "导入失败";
+  if (!canImportDataset(datasetType)) return "待清单成功后导入";
+  return "未导入";
 }
 
 function resetForm(): void {
@@ -470,6 +523,8 @@ function resetForm(): void {
   runningBatches.value = [];
 
   pendingImportedBatches.value = [];
+  importStates.value = defaultImportStates();
+  shouldAutoCompleteCurrentSession.value = false;
 
   errorMessage.value = "";
   progressIssue.value = null;
@@ -480,6 +535,148 @@ function resetForm(): void {
   uploadRef.value?.clearFiles();
 
   uploadKey.value += 1;
+}
+
+function defaultImportStates(): Record<DatasetType, DatasetImportState> {
+  return {
+    BILLING_POINT: { status: "idle", batches: [], error: "" },
+    PAYMENT: { status: "idle", batches: [], error: "" },
+    METER_READING: { status: "idle", batches: [], error: "" },
+    BENCHMARK: { status: "idle", batches: [], error: "" },
+  };
+}
+
+function sessionItemError(item: ImportSessionItem): string {
+  const firstError = item.batches
+    .flatMap((batch) => batch.errors)
+    .find((error) => error.message.trim().length > 0);
+
+  return firstError?.message ?? "导入失败，请查看失败详情后重试或重新上传该类文件。";
+}
+
+function applyRecoveredSessionItem(
+  state: Record<DatasetType, DatasetImportState>,
+  item: ImportSessionItem,
+): void {
+  if (item.status === "SUCCESS") {
+    state[item.datasetType] = {
+      status: "success",
+      batches: item.batches,
+      error: "",
+    };
+    return;
+  }
+
+  if (item.status === "FAILED") {
+    state[item.datasetType] = {
+      status: "failed",
+      batches: item.batches,
+      error: sessionItemError(item),
+    };
+    return;
+  }
+
+  if (item.status === "RUNNING") {
+    state[item.datasetType] = {
+      status: "uploading",
+      batches: item.batches,
+      error: "",
+    };
+    return;
+  }
+
+  if (item.status === "SUPERSEDED") {
+    state[item.datasetType] = {
+      status: "idle",
+      batches: item.batches,
+      error: "最近批次已被后续导入替代。",
+    };
+  }
+}
+
+function isCompletedHistoricalSession(items: ImportSessionItem[]): boolean {
+  return datasetTypes.every((datasetType) =>
+    items.some(
+      (item) =>
+        item.datasetType === datasetType &&
+        item.status === "SUCCESS",
+    ),
+  );
+}
+
+function hasRecoverableSession(items: ImportSessionItem[]): boolean {
+  if (isCompletedHistoricalSession(items)) {
+    return false;
+  }
+
+  return items.some((item) =>
+    item.status === "SUCCESS" ||
+    item.status === "FAILED" ||
+    item.status === "RUNNING",
+  );
+}
+
+async function resumeRunningItem(item: ImportSessionItem): Promise<void> {
+  const ids = item.batches.map((batch) => batch.id);
+  if (ids.length === 0) {
+    return;
+  }
+
+  selectedType.value = item.datasetType;
+  runningBatches.value = item.batches;
+  runningBatch.value = item.batches[0] ?? null;
+  progressVisible.value = true;
+  shouldAutoCompleteCurrentSession.value = true;
+  await pollBatches(ids, item.datasetType);
+}
+
+async function restoreLatestImportSession(): Promise<void> {
+  isRestoringSession.value = true;
+  errorMessage.value = "";
+  progressIssue.value = null;
+
+  try {
+    const session = await businessApi.imports.latestSession();
+
+    if (!hasRecoverableSession(session.items)) {
+      shouldAutoCompleteCurrentSession.value = false;
+      return;
+    }
+
+    const restoredStates = defaultImportStates();
+
+    for (const item of session.items) {
+      applyRecoveredSessionItem(restoredStates, item);
+    }
+
+    importStates.value = restoredStates;
+
+    const firstAvailable = datasetTypes.find((type) => canImportDataset(type));
+    if (firstAvailable !== undefined) {
+      selectedType.value = firstAvailable;
+    }
+
+    const runningItems = session.items.filter(
+      (item) => item.status === "RUNNING" && item.batches.length > 0,
+    );
+
+    const firstRunningItem = runningItems[0];
+    if (firstRunningItem !== undefined) {
+      void resumeRunningItem(firstRunningItem);
+      return;
+    }
+
+    shouldAutoCompleteCurrentSession.value = false;
+  } catch (error) {
+    errorMessage.value =
+      error instanceof ApiProblem
+        ? error.detail || error.message
+        : error instanceof Error
+          ? error.message
+          : "导入状态恢复失败";
+  } finally {
+    isRestoringSession.value = false;
+  }
 }
 
 function handleFileChange(file: UploadFile): void {
@@ -543,10 +740,36 @@ function finishPolling(
    */
   if (succeeded.length === latest.length) {
     pendingImportedBatches.value = succeeded;
-
-    successVisible.value = true;
-
+    importStates.value[selectedType.value] = {
+      status: "success",
+      batches: succeeded,
+      error: "",
+    };
+    progressVisible.value = false;
+    selectedFile.value = null;
+    uploadRef.value?.clearFiles();
+    uploadKey.value += 1;
+    const nextType = datasetTypes.find((type) => canImportDataset(type));
+    if (nextType !== undefined) {
+      selectedType.value = nextType;
+    }
+    if (
+      allDatasetsImported.value &&
+      shouldAutoCompleteCurrentSession.value
+    ) {
+      shouldAutoCompleteCurrentSession.value = false;
+      successVisible.value = true;
+      globalThis.setTimeout(confirmSuccess, 1_200);
+    }
     return;
+  }
+
+  if (failedBatches.value.length > 0) {
+    importStates.value[selectedType.value] = {
+      status: "failed",
+      batches: latest,
+      error: "导入失败，请查看失败详情后重试或重新上传该类文件。",
+    };
   }
 
   /**
@@ -842,6 +1065,12 @@ async function submit(): Promise<void> {
 
   errorMessage.value = "";
   progressIssue.value = null;
+  shouldAutoCompleteCurrentSession.value = true;
+  importStates.value[selectedType.value] = {
+    status: "uploading",
+    batches: [],
+    error: "",
+  };
 
   /**
    * 先打开弹窗。
@@ -907,6 +1136,11 @@ async function submit(): Promise<void> {
           : error instanceof Error
             ? error.message
             : "导入任务提交失败";
+    importStates.value[selectedType.value] = {
+      status: "failed",
+      batches: [],
+      error: errorMessage.value,
+    };
   } finally {
     isSubmitting.value = false;
   }
@@ -927,6 +1161,7 @@ async function retry(): Promise<void> {
   isSubmitting.value = true;
 
   progressVisible.value = true;
+  shouldAutoCompleteCurrentSession.value = true;
 
   progressIssue.value = null;
 
@@ -973,8 +1208,7 @@ async function retry(): Promise<void> {
  * ========================================================= */
 
 function confirmSuccess(): void {
-  const imported =
-    pendingImportedBatches.value;
+  const imported = datasetTypes.flatMap((type) => importStates.value[type].batches);
 
   progressVisible.value = false;
 
@@ -1020,6 +1254,7 @@ watch(
     }
 
     resetForm();
+    void restoreLatestImportSession();
   },
 );
 </script>
@@ -1031,7 +1266,7 @@ watch(
   <ElDialog
     :model-value="modelValue"
     title="导入数据"
-    width="min(1040px, calc(100vw - 32px))"
+    width="min(960px, calc(100vw - 32px))"
     class="import-dialog"
     append-to-body
     align-center
@@ -1060,8 +1295,12 @@ watch(
             :class="{
               selected:
                 selectedType === datasetType,
+              success:
+                importStates[datasetType].status === 'success',
+              failed:
+                importStates[datasetType].status === 'failed',
             }"
-            :disabled="progressVisible"
+            :disabled="progressVisible || !canImportDataset(datasetType)"
             @click="
               selectDataset(datasetType)
             "
@@ -1085,23 +1324,28 @@ watch(
               </strong>
 
               <small>
-                {{
-                  datasetMeta[
-                    datasetType
-                    ].description
-                }}
-                /
-                {{
-                  datasetMeta[
-                    datasetType
-                    ].fieldCount
-                }}
-                列
+                {{ datasetStateLabel(datasetType) }}
               </small>
             </span>
           </button>
         </div>
       </div>
+
+      <ElAlert
+        v-if="successfulLabels"
+        type="success"
+        :closable="false"
+        show-icon
+        :title="`已成功导入：${successfulLabels}`"
+      />
+
+      <ElAlert
+        v-if="importStates[selectedType].status === 'failed'"
+        type="error"
+        :closable="false"
+        show-icon
+        :title="importStates[selectedType].error"
+      />
 
       <!-- 上传文件 -->
       <div class="form-row">
@@ -1191,7 +1435,7 @@ watch(
         :disabled="!canSubmit"
         @click="submit"
       >
-        确认导入
+        导入{{ datasetMeta[selectedType].label }}
       </ElButton>
     </template>
   </ElDialog>
@@ -1374,7 +1618,7 @@ watch(
     :show-close="false"
   >
     <p class="success-message">
-      导入数据已成功生效。
+      四类数据已全部导入成功。
     </p>
 
     <template #footer>
@@ -1392,7 +1636,7 @@ watch(
 .import-form,
 .progress-list {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 /* =========================================================
@@ -1402,14 +1646,14 @@ watch(
 .form-row {
   display: grid;
   grid-template-columns:
-    minmax(96px, 112px)
+    minmax(88px, 104px)
     minmax(0, 1fr);
-  gap: 14px;
+  gap: 12px;
   align-items: start;
 }
 
 .form-row > strong {
-  padding-top: 11px;
+  padding-top: 8px;
   color: #1f2d3d;
   font-size: 14px;
 }
@@ -1426,15 +1670,15 @@ watch(
   display: grid;
   grid-template-columns:
     repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .dataset-card {
   display: flex;
-  min-height: 116px;
-  gap: 14px;
+  min-height: 86px;
+  gap: 12px;
   align-items: center;
-  padding: 26px 28px;
+  padding: 16px 18px;
   color: #1f2d3d;
   text-align: left;
   background: #fff;
@@ -1456,6 +1700,16 @@ watch(
   border-color: #ff3152;
 }
 
+.dataset-card.success {
+  background: #f0f9eb;
+  border-color: #67c23a;
+}
+
+.dataset-card.failed {
+  background: #fef0f0;
+  border-color: #f56c6c;
+}
+
 .dataset-card:disabled {
   cursor: not-allowed;
   opacity: 0.48;
@@ -1463,9 +1717,9 @@ watch(
 
 .dataset-card > b {
   display: grid;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
   place-items: center;
   color: #ff3152;
   background: #fff0f3;
@@ -1477,7 +1731,7 @@ watch(
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .dataset-card small,
@@ -1631,6 +1885,11 @@ watch(
 :deep(.import-progress-dialog .el-dialog__body),
 :deep(.import-success-dialog .el-dialog__body) {
   overflow: auto;
+}
+
+:deep(.import-dialog .el-dialog__body) {
+  padding-top: 16px;
+  padding-bottom: 18px;
 }
 
 /* =========================================================

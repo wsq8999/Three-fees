@@ -332,12 +332,17 @@ public class DashboardQueryService {
             """
             SELECT s.public_id, s.billing_point_code, s.billing_point_name, s.data_period,
                    COALESCE(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), '') AS county,
-                   a.actual_amount, a.over_limit_type, a.max_ratio
+                   a.actual_amount, a.over_limit_type, a.max_ratio,
+                   a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
+                   a.rated_result, a.rated_ratio,
+                   d.analysis_status AS draft_analysis_status
               FROM billing_point_snapshot s
               JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code
                AND a.data_period = s.data_period
                AND a.city_code = s.city_code
+              LEFT JOIN report_draft d
+                ON d.billing_point_snapshot_id = s.id
              WHERE s.data_period = ?
                AND a.audit_status = 'OVER_LIMIT'
                AND NOT EXISTS (
@@ -363,21 +368,23 @@ public class DashboardQueryService {
     String name = rs.getString("billing_point_name");
     BigDecimal ratio = rs.getBigDecimal("max_ratio");
     String ratioText =
-        ratio == null ? "—" : ratio.multiply(BigDecimal.valueOf(100)).stripTrailingZeros() + "%";
+        ratio == null ? "—" : ratio.stripTrailingZeros() + "%";
     return new DashboardSummary.PendingReportTask(
         rs.getString("public_id"),
         rs.getString("public_id"),
         code + " " + name,
         "稽核超标，需生成报告并人工确认",
         "/reports/drafts",
-        ratio != null && ratio.compareTo(BigDecimal.valueOf(0.3)) >= 0 ? "DANGER" : "WARNING",
+        ratio != null && ratio.compareTo(BigDecimal.valueOf(30)) >= 0 ? "DANGER" : "WARNING",
         code,
         name,
         valueOr(rs.getString("county"), "—"),
         rs.getString("data_period"),
         decimalString(rs.getBigDecimal("actual_amount")),
         overLimitTypeLabel(valueOr(rs.getString("over_limit_type"), "未分类")),
-        ratioText);
+        ratioText,
+        overLimitRatios(rs),
+        rs.getString("draft_analysis_status"));
   }
 
   private ImportBatchSummary mapImportBatch(ResultSet rs, int row) throws SQLException {
@@ -430,6 +437,27 @@ public class DashboardQueryService {
       case "NONE", "未超标" -> "未超标";
       default -> valueOr(value, "未分类");
     };
+  }
+
+  private List<DashboardSummary.OverLimitRatio> overLimitRatios(ResultSet rs) throws SQLException {
+    var ratios = new ArrayList<DashboardSummary.OverLimitRatio>();
+    addOverLimitRatio(ratios, rs, "yoy_result", "yoy_ratio", "YOY", "同比");
+    addOverLimitRatio(ratios, rs, "mom_result", "mom_ratio", "MOM", "环比");
+    addOverLimitRatio(ratios, rs, "rated_result", "rated_ratio", "RATED", "额定标杆");
+    return ratios;
+  }
+
+  private void addOverLimitRatio(
+      List<DashboardSummary.OverLimitRatio> ratios,
+      ResultSet rs,
+      String resultColumn,
+      String ratioColumn,
+      String type,
+      String label)
+      throws SQLException {
+    if ("OVER_LIMIT".equals(rs.getString(resultColumn))) {
+      ratios.add(new DashboardSummary.OverLimitRatio(type, label, decimalString(rs.getBigDecimal(ratioColumn))));
+    }
   }
 
   public record ImportBatchSummary(

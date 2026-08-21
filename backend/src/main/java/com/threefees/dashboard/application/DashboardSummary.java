@@ -37,5 +37,9 @@ public record DashboardSummary(
       String period,
       String actualAmount,
       String overLimitType,
-      String maximumRatio) {}
+      String maximumRatio,
+      List<OverLimitRatio> overLimitRatios,
+      String draftAnalysisStatus) {}
+
+  public record OverLimitRatio(String type, String label, String ratio) {}
 }

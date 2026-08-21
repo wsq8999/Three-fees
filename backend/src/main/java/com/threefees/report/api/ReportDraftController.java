@@ -14,8 +14,12 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.List;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -111,6 +115,30 @@ public class ReportDraftController {
         .body(new ImageUploadResponse(uploaded.fileId(), uploaded.entityVersion()));
   }
 
+  @GetMapping("/{publicId}/images/{fileId}/content")
+  public ResponseEntity<InputStreamResource> imageContent(
+      @PathVariable String publicId,
+      @PathVariable String fileId,
+      @RequestParam(defaultValue = "true") boolean inline,
+      @AuthenticationPrincipal CurrentUser actor) {
+    var access = service.imageContent(publicId, fileId, actor);
+    ContentDisposition disposition =
+        inline
+            ? ContentDisposition.inline()
+                .filename(access.file().originalName(), StandardCharsets.UTF_8)
+                .build()
+            : ContentDisposition.attachment()
+                .filename(access.file().originalName(), StandardCharsets.UTF_8)
+                .build();
+    return ResponseEntity.ok()
+        .cacheControl(CacheControl.noStore())
+        .contentType(MediaType.parseMediaType(access.file().mediaType()))
+        .contentLength(access.file().byteSize())
+        .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(access.resource());
+  }
+
   @DeleteMapping("/{publicId}/images/{fileId}")
   public ResponseEntity<DraftResponse> removeImage(
       @PathVariable String publicId,
@@ -185,8 +213,8 @@ public class ReportDraftController {
   public record UpdateDraftRequest(
       @NotBlank @Size(max = 500) String title,
       @NotBlank @Size(max = 100_000) String situation,
-      @NotBlank @Size(max = 100_000) String analysis,
-      @NotBlank @Size(max = 100_000) String rectification) {
+      @NotNull @Size(max = 100_000) String analysis,
+      @NotNull @Size(max = 100_000) String rectification) {
 
     ReportSections toSections() {
       return new ReportSections(title, situation, analysis, rectification);
@@ -215,12 +243,19 @@ public class ReportDraftController {
       String period,
       String auditStatus,
       String overLimitType,
+      String overLimitDisplayType,
       java.math.BigDecimal maxExceedRatio,
+      List<com.threefees.report.application.ReportDraftService.OverLimitRatio> overLimitRatios,
       String status,
       ReportSections sections,
       int currentVersion,
       List<String> currentImageFileIds,
       String formalReportId,
+      String analysisStatus,
+      String analysisTaskId,
+      String analysisErrorCode,
+      LocalDateTime analysisSubmittedAt,
+      LocalDateTime analysisCompletedAt,
       List<DraftMessage> messages,
       LocalDateTime createdAt,
       LocalDateTime updatedAt,
@@ -238,12 +273,19 @@ public class ReportDraftController {
           draft.period(),
           draft.auditStatus(),
           draft.overLimitType(),
+          draft.overLimitDisplayType(),
           draft.maxExceedRatio(),
+          draft.overLimitRatios(),
           draft.status(),
           draft.sections(),
           draft.currentVersion(),
           draft.currentImageFileIds(),
           draft.formalReportId(),
+          draft.analysisStatus(),
+          draft.analysisTaskId(),
+          draft.analysisErrorCode(),
+          draft.analysisSubmittedAt(),
+          draft.analysisCompletedAt(),
           draft.messages(),
           draft.createdAt(),
           draft.updatedAt(),

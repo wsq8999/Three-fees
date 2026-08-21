@@ -48,7 +48,7 @@ export function serializeBillingPointQuery(
   return {
     ...(value.cityCode.length > 0 ? { city: value.cityCode } : {}),
     ...(value.period.length > 0 ? { period: value.period } : {}),
-    ...(value.keyword.length > 0 ? { keyword: value.keyword } : {}),
+    ...((value.keyword ?? "").length > 0 ? { keyword: value.keyword } : {}),
     ...(value.auditStatus.length > 0 ? { status: value.auditStatus } : {}),
     page: String(value.page),
     size: String(value.size),

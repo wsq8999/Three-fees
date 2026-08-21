@@ -44,6 +44,7 @@ const activePath = computed(() => resolveNavigationActivePath(route.path));
       </template>
       <ElMenuItem index="/reports/generate">生成报告</ElMenuItem>
       <ElMenuItem index="/reports/history">历史报告</ElMenuItem>
+      <ElMenuItem index="/reports/ai-tasks">AI任务进度</ElMenuItem>
     </ElSubMenu>
     <ElMenuItem index="/benchmark-rules">
       <ElIcon><DataAnalysis /></ElIcon><span>标杆规则查看</span>

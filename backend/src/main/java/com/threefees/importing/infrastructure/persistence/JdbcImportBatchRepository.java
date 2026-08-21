@@ -94,6 +94,55 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   }
 
   @Override
+  public Optional<ImportBatch> findLatestBatch(DatasetType datasetType, String cityCode) {
+    var sql = new StringBuilder("WHERE dataset_type = ?");
+    var arguments = new java.util.ArrayList<Object>();
+    arguments.add(datasetType.name());
+    if (cityCode != null && !cityCode.isBlank()) {
+      sql.append(" AND city_code = ?");
+      arguments.add(cityCode);
+    }
+    sql.append(" ORDER BY created_at DESC, id DESC LIMIT 1");
+    return query(sql.toString(), arguments.toArray()).stream().findFirst();
+  }
+
+  @Override
+  public List<ImportBatch> findLatestSession(
+      DatasetType datasetType, String cityCode, LocalDateTime sessionStartedAt) {
+    var latestSql =
+        new StringBuilder(
+            """
+            SELECT source_file_id
+              FROM import_job
+             WHERE dataset_type = ? AND created_at >= ?
+            """);
+    var latestArguments = new java.util.ArrayList<Object>();
+    latestArguments.add(datasetType.name());
+    latestArguments.add(sessionStartedAt);
+    if (cityCode != null && !cityCode.isBlank()) {
+      latestSql.append(" AND city_code = ?");
+      latestArguments.add(cityCode);
+    }
+    latestSql.append(" ORDER BY created_at DESC, id DESC LIMIT 1");
+    List<Long> sourceFileIds =
+        jdbcTemplate.queryForList(latestSql.toString(), Long.class, latestArguments.toArray());
+    if (sourceFileIds.isEmpty()) {
+      return List.of();
+    }
+
+    var sessionSql = new StringBuilder("WHERE dataset_type = ? AND source_file_id = ?");
+    var sessionArguments = new java.util.ArrayList<Object>();
+    sessionArguments.add(datasetType.name());
+    sessionArguments.add(sourceFileIds.getFirst());
+    if (cityCode != null && !cityCode.isBlank()) {
+      sessionSql.append(" AND city_code = ?");
+      sessionArguments.add(cityCode);
+    }
+    sessionSql.append(" ORDER BY data_period ASC, id ASC");
+    return query(sessionSql.toString(), sessionArguments.toArray());
+  }
+
+  @Override
   public long count(DatasetType datasetType, String period, String cityCode) {
     var sql = new StringBuilder("SELECT COUNT(*) FROM import_job WHERE 1 = 1");
     var arguments = new java.util.ArrayList<>();

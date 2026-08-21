@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.threefees.ai.application.AiServiceClient.AgentContext;
 import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.ai.application.CityMemoryService;
 import com.threefees.ai.application.CityMemoryService.MemoryQuery;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.AopTestUtils;
 
 @SpringBootTest(properties = {"three-fees.process-role=api", "app.bootstrap.enabled=false"})
 class ReportDraftCityMemoryIntegrationTest {
@@ -31,11 +33,24 @@ class ReportDraftCityMemoryIntegrationTest {
     jdbcTemplate.update(
         "DELETE FROM ai_billing_point_memory_profile WHERE city_code IN ('320100', '320500')");
     jdbcTemplate.update(
+        """
+        DELETE FROM historical_audit_case
+         WHERE report_id IN (SELECT id FROM audit_report WHERE updated_by='city-memory-test')
+        """);
+    jdbcTemplate.update("DELETE FROM audit_report WHERE updated_by='city-memory-test'");
+    jdbcTemplate.update(
         "DELETE FROM report_draft_version WHERE draft_id IN (SELECT id FROM report_draft WHERE created_by='city-memory-test')");
     jdbcTemplate.update("DELETE FROM report_draft WHERE created_by='city-memory-test'");
-    jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code='MEMORY-POINT-001'");
     jdbcTemplate.update(
-        "DELETE FROM billing_point_snapshot WHERE billing_point_code='MEMORY-POINT-001'");
+        """
+        DELETE FROM audit_result
+         WHERE billing_point_code IN ('MEMORY-POINT-001', 'CITY-OTHER-001', 'SUZHOU-OTHER-001')
+        """);
+    jdbcTemplate.update(
+        """
+        DELETE FROM billing_point_snapshot
+         WHERE billing_point_code IN ('MEMORY-POINT-001', 'CITY-OTHER-001', 'SUZHOU-OTHER-001')
+        """);
     jdbcTemplate.update("DELETE FROM import_job WHERE created_by='city-memory-test'");
     jdbcTemplate.update("DELETE FROM stored_file WHERE created_by='city-memory-test'");
   }
@@ -64,8 +79,56 @@ class ReportDraftCityMemoryIntegrationTest {
 
     assertThat(draft.cityCode()).isEqualTo("320100");
     assertThat(draft.sections().title()).contains("电费稽核说明");
+    assertThat(draft.sections().analysis()).isEmpty();
+    assertThat(draft.sections().rectification()).isEmpty();
     assertThat(draft.currentVersion()).isZero();
     assertThat(service.versions(draft.publicId(), actor)).hasSize(1);
+  }
+
+  @Test
+  void agentContextSeparatesSameCityAndExternalProvinceReferences() throws Exception {
+    String currentSnapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(currentSnapshotId, actor);
+
+    seedAuditReport(
+        "320100",
+        "MEMORY-POINT-001",
+        "南京测试报账点",
+        "2026-06",
+        "南京同点历史：上月核查为空调运行时长增加。");
+    seedAuditReport(
+        "320100",
+        "CITY-OTHER-001",
+        "南京其他报账点",
+        "2026-07",
+        "南京本市其他案例：设备负载变化导致环比升高。");
+    seedAuditReport(
+        "320500",
+        "SUZHOU-OTHER-001",
+        "苏州其他报账点",
+        "2026-07",
+        "苏州外市案例：设备扩容后用电增长。");
+
+    AgentContext context = agentContext(draft, "IMAGE_ANALYSIS");
+
+    assertThat(context.samePointCases())
+        .anySatisfy(reference -> assertThat(reference.summary()).contains("南京同点历史"));
+    assertThat(context.cityMemories())
+        .anySatisfy(reference -> assertThat(reference.summary()).contains("南京本市其他案例"));
+    assertThat(context.cityMemories())
+        .allMatch(reference -> reference.cityCode() == null || reference.cityCode().equals("320100"));
+    assertThat(context.provinceReferences())
+        .anySatisfy(
+            reference -> {
+              assertThat(reference.id()).startsWith("OUTCITY-CASE-");
+              assertThat(reference.cityCode()).isEqualTo("320500");
+              assertThat(reference.summary()).contains("外市参考", "城市=320500", "苏州外市案例");
+            });
+    assertThat(context.provinceReferences()).noneMatch(reference -> "320100".equals(reference.cityCode()));
   }
 
   @Test
@@ -329,6 +392,153 @@ class ReportDraftCityMemoryIntegrationTest {
         "SELECT analysis_json FROM report_draft_image WHERE draft_id=? ORDER BY sort_no, id",
         (rs, row) -> rs.getString("analysis_json"),
         draftId);
+  }
+
+  private AgentContext agentContext(Object draft, String intent) throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("agentContext", draft.getClass(), String.class);
+    method.setAccessible(true);
+    return (AgentContext) method.invoke(target, draft, intent);
+  }
+
+  private void seedAuditReport(
+      String cityCode,
+      String billingPointCode,
+      String billingPointName,
+      String period,
+      String analysis) {
+    long snapshotDbId = seedSnapshot(cityCode, billingPointCode, billingPointName, period);
+    long wordFileId = seedStoredFile("word-" + billingPointCode + "-" + period + ".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    long pdfFileId = seedStoredFile("pdf-" + billingPointCode + "-" + period + ".pdf", "application/pdf");
+    String reportPublicId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO audit_report
+          (public_id, report_number, billing_point_snapshot_id, source_type, status, title,
+           situation, analysis, rectification, word_file_id, pdf_file_id,
+           business_snapshot_json, updated_by)
+        VALUES (?, ?, ?, 'HISTORICAL_IMPORT', 'FORMALIZED', ?, ?, ?, ?, ?, ?, '{}',
+                'city-memory-test')
+        """,
+        reportPublicId,
+        "TEST-" + UUID.randomUUID().toString().substring(0, 24),
+        snapshotDbId,
+        billingPointName + "电费稽核说明",
+        "本期出现环比超标。",
+        analysis,
+        "已完成现场核查，后续持续复核。",
+        wordFileId,
+        pdfFileId);
+    Long reportId =
+        jdbcTemplate.queryForObject(
+            "SELECT id FROM audit_report WHERE public_id=?", Long.class, reportPublicId);
+    jdbcTemplate.update(
+        """
+        INSERT INTO historical_audit_case
+          (public_id, report_id, city_code, billing_point_code, data_period, over_limit_type,
+           final_reason, summary, trust_level, image_count, image_analysis_status,
+           image_analysis_text)
+        VALUES (?, ?, ?, ?, ?, 'ONLY_MOM', ?, ?, 'CONFIRMED_REPORT', 1, 'COMPLETED', ?)
+        """,
+        UUID.randomUUID().toString(),
+        reportId,
+        cityCode,
+        billingPointCode,
+        period,
+        analysis,
+        analysis,
+        "历史图片显示设备和空调状态。");
+  }
+
+  private long seedSnapshot(
+      String cityCode, String billingPointCode, String billingPointName, String period) {
+    long importDbId = seedImportJob(cityCode, period);
+    String snapshotId = UUID.randomUUID().toString();
+    String periodStart = period + "-01";
+    String periodEnd = period + "-28";
+    jdbcTemplate.update(
+        """
+        INSERT INTO billing_point_snapshot
+          (public_id, data_period, period_start, period_end, city_code,
+           source_import_job_id, source_row_no, raw_row_json, billing_point_code,
+           billing_point_name, city_name, data_json)
+        VALUES (?, ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?, '{}')
+        """,
+        snapshotId,
+        period,
+        periodStart,
+        periodEnd,
+        cityCode,
+        importDbId,
+        billingPointCode,
+        billingPointName,
+        cityName(cityCode));
+    jdbcTemplate.update(
+        """
+        INSERT INTO audit_result
+          (public_id, billing_point_code, billing_point_name, city_code, data_period,
+           period_start, period_end, audit_status, report_status, over_limit_type,
+           max_ratio, detail_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'OVER_LIMIT', 'WAITING', 'ONLY_MOM', 18.5, '{}')
+        """,
+        UUID.randomUUID().toString(),
+        billingPointCode,
+        billingPointName,
+        cityCode,
+        period,
+        periodStart,
+        periodEnd);
+    Long id =
+        jdbcTemplate.queryForObject(
+            "SELECT id FROM billing_point_snapshot WHERE public_id=?", Long.class, snapshotId);
+    if (id == null) throw new IllegalStateException("Snapshot was not inserted");
+    return id;
+  }
+
+  private long seedImportJob(String cityCode, String period) {
+    long storedFileId = seedStoredFile("seed-" + cityCode + "-" + period + ".csv", "text/csv");
+    String importId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO import_job
+          (public_id, dataset_type, data_period, city_code, status, source_file_id,
+           task_public_id, errors_json, created_by, updated_by)
+        VALUES (?, 'BILLING_POINT', ?, ?, 'SUCCEEDED', ?, ?, '[]',
+                'city-memory-test', 'city-memory-test')
+        """,
+        importId,
+        period,
+        cityCode,
+        storedFileId,
+        UUID.randomUUID().toString());
+    Long id =
+        jdbcTemplate.queryForObject("SELECT id FROM import_job WHERE public_id=?", Long.class, importId);
+    if (id == null) throw new IllegalStateException("Import job was not inserted");
+    return id;
+  }
+
+  private long seedStoredFile(String originalName, String mediaType) {
+    String publicId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO stored_file
+          (public_id, storage_name, original_name, media_type, byte_size, sha256,
+           purpose, created_by)
+        VALUES (?, ?, ?, ?, 1, ?, 'TEST', 'city-memory-test')
+        """,
+        publicId,
+        publicId + "-" + originalName,
+        originalName,
+        mediaType,
+        publicId.replace("-", "").substring(0, 32).repeat(2));
+    Long id =
+        jdbcTemplate.queryForObject("SELECT id FROM stored_file WHERE public_id=?", Long.class, publicId);
+    if (id == null) throw new IllegalStateException("Stored file was not inserted");
+    return id;
+  }
+
+  private String cityName(String cityCode) {
+    return "320500".equals(cityCode) ? "苏州市" : "南京市";
   }
 
   private String seedOverLimitSnapshot() {

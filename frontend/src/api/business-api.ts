@@ -1,5 +1,7 @@
 import { httpClient } from "@/api";
 import type {
+  AiTaskListQuery,
+  AiTaskPage,
   BenchmarkRule,
   BillingPointDetail,
   BillingPointQuery,
@@ -14,7 +16,9 @@ import type {
   HistoricalReportCandidate,
   HistoricalReportPeriod,
   ImportBatch,
+  ImportSessionState,
   ManagedUser,
+  OverLimitRatio,
   PageResult,
   PaymentRecord,
   MeterRecord,
@@ -42,6 +46,12 @@ interface BackendPage<T> {
   totalElements?: number;
   total?: number;
   totalPages: number;
+}
+
+interface BackendOverLimitRatio {
+  type: string;
+  label: string;
+  ratio: string | number | null;
 }
 
 function mapDashboard(value: Partial<DashboardData>): DashboardData {
@@ -75,6 +85,7 @@ function mapDashboard(value: Partial<DashboardData>): DashboardData {
       ...item,
       overLimitType:
         overLimitTypeLabel(item.overLimitType) ?? item.overLimitType,
+      overLimitRatios: item.overLimitRatios ?? [],
     })),
   };
 }
@@ -97,10 +108,13 @@ interface BackendBillingPointSummary {
   actualAmount: string | null;
   benchmarkEnergy: string | null;
   maxDeviationRate: string | null;
+  overLimitRatios?: BackendOverLimitRatio[] | null;
   auditStatus: string;
   overLimitType: string | null;
+  overLimitDisplayType?: string | null;
   reportStatus: "PENDING" | "GENERATED" | "NONE";
   draftId: string | null;
+  draftAnalysisStatus?: string | null;
   reportId: string | null;
   reportNumber: string | null;
 }
@@ -170,12 +184,24 @@ interface BackendReportDraft {
   period: string;
   auditStatus: string;
   overLimitType: string | null;
+  overLimitDisplayType?: string | null;
   maxExceedRatio: string | null;
+  overLimitRatios?: BackendOverLimitRatio[] | null;
   status: "DRAFT" | "CORRECTING" | "GENERATING" | "FORMALIZED";
   sections: ReportSections;
   currentVersion: number;
   currentImageFileIds: string[];
   formalReportId: string | null;
+  analysisStatus:
+    | "PENDING_ANALYSIS"
+    | "AI_ANALYZING"
+    | "AI_COMPLETED_PENDING_CONFIRMATION"
+    | "AI_FAILED"
+    | "FORMALIZED";
+  analysisTaskId: string | null;
+  analysisErrorCode: string | null;
+  analysisSubmittedAt: string | null;
+  analysisCompletedAt: string | null;
   messages: BackendDraftMessage[];
   createdAt: string;
   updatedAt: string;
@@ -192,6 +218,13 @@ interface BackendTask {
 const TASK_ERROR_MESSAGES: Record<string, string> = {
   CONFIRMED_REPORT_VERSION_MISMATCH:
     "确认的报告版本已经变化，请返回工作稿检查后重新确认。",
+  AI_IMAGE_ANALYSIS_FAILED:
+    "AI图片分析失败，请检查密钥配置或稍后重新分析。",
+  KIMI_AUTH_FAILED: "Kimi 密钥无效或无权限，请检查 KIMI_API_KEY。",
+  KIMI_MODEL_UNAVAILABLE: "Kimi 模型不可用，请检查 KIMI_MODEL 配置。",
+  KIMI_TIMEOUT: "Kimi 调用超时，请稍后重新分析。",
+  KIMI_IMAGE_INVALID: "图片过大或格式不支持，请减少图片数量或重新粘贴。",
+  AI_RESPONSE_INVALID: "Kimi 返回内容格式不符合要求，请重新分析。",
   HISTORICAL_WORD_INVALID:
     "历史 Word 无法识别，请确认文件是真实的 .doc 或 .docx 文档。",
   HISTORICAL_REPORT_EMPTY:
@@ -209,12 +242,15 @@ interface BackendReportSummary {
   cityName: string;
   district: string | null;
   period: string;
+  periodStart: string | null;
+  periodEnd: string | null;
   sourceType: "SYSTEM" | "HISTORICAL" | "GENERATED" | "IMPORTED";
   status: "GENERATED" | "CORRECTED";
   actualEnergy: string | null;
   actualAmount: string | null;
   overLimitType: string | null;
   maxRatio: string | null;
+  overLimitRatios?: BackendOverLimitRatio[] | null;
   generatedAt: string;
   updatedAt: string;
   version: number;
@@ -232,6 +268,7 @@ interface BackendHistoricalReportCandidate {
   period: string;
   overLimitType?: string | null;
   maxRatio?: string | null;
+  overLimitRatios?: BackendOverLimitRatio[] | null;
 }
 
 function queryString(
@@ -272,6 +309,18 @@ function overLimitTypeLabel(value: string | null | undefined): string | null {
   return labels[value] ?? value;
 }
 
+function mapOverLimitRatios(
+  ratios: BackendOverLimitRatio[] | null | undefined,
+): OverLimitRatio[] {
+  return (ratios ?? [])
+    .filter((item) => item.ratio !== null && item.ratio !== undefined)
+    .map((item) => ({
+      type: item.type,
+      label: item.label,
+      ratio: item.ratio,
+    }));
+}
+
 function mapBillingSummary(
   item: BackendBillingPointSummary,
 ): BillingPointDetail["summary"] {
@@ -291,11 +340,18 @@ function mapBillingSummary(
     actualAmount: item.actualAmount,
     benchmarkEnergy: item.benchmarkEnergy,
     deviationRate: item.maxDeviationRate,
-    overLimitType: overLimitTypeLabel(item.overLimitType),
+    overLimitRatios: mapOverLimitRatios(item.overLimitRatios),
+    overLimitType:
+      overLimitTypeLabel(item.overLimitDisplayType) ??
+      overLimitTypeLabel(item.overLimitType),
+    overLimitDisplayType:
+      overLimitTypeLabel(item.overLimitDisplayType) ??
+      overLimitTypeLabel(item.overLimitType),
     auditStatus:
       item.auditStatus as BillingPointDetail["summary"]["auditStatus"],
     reportStatus: mapReportStatus(item.reportStatus),
     draftId: item.draftId,
+    draftAnalysisStatus: item.draftAnalysisStatus ?? null,
     reportId: item.reportId,
     reportNumber: item.reportNumber,
     periodStart: item.periodStart,
@@ -449,6 +505,7 @@ function blocksToSections(blocks: DraftBlock[]): ReportSections {
 }
 
 function mapDraft(item: BackendReportDraft): ReportDraft {
+  const analysisStatus = item.analysisStatus ?? "PENDING_ANALYSIS";
   return {
     id: item.id,
     billingPointId: item.billingPointPeriodId,
@@ -456,14 +513,28 @@ function mapDraft(item: BackendReportDraft): ReportDraft {
     billingPointName: item.billingPointName,
     city: { code: item.cityCode, name: item.cityName ?? item.cityCode },
     period: item.period,
-    overLimitType: overLimitTypeLabel(item.overLimitType),
+    overLimitType:
+      overLimitTypeLabel(item.overLimitDisplayType) ??
+      overLimitTypeLabel(item.overLimitType),
     maxExceedRatio: item.maxExceedRatio,
+    overLimitRatios: mapOverLimitRatios(item.overLimitRatios),
     status:
       item.status === "GENERATING"
         ? "GENERATING"
         : item.status === "FORMALIZED"
           ? "FINALIZED"
+          : analysisStatus === "AI_ANALYZING"
+            ? "AI_ANALYZING"
+            : analysisStatus === "AI_COMPLETED_PENDING_CONFIRMATION"
+              ? "AI_COMPLETED"
+              : analysisStatus === "AI_FAILED"
+                ? "AI_FAILED"
           : "EDITING",
+    analysisStatus,
+    analysisTaskId: item.analysisTaskId ?? null,
+    analysisErrorCode: item.analysisErrorCode ?? null,
+    analysisSubmittedAt: item.analysisSubmittedAt ?? null,
+    analysisCompletedAt: item.analysisCompletedAt ?? null,
     blocks: sectionsToBlocks(item.sections),
     imageFileIds: item.currentImageFileIds ?? [],
     messages: (item.messages ?? []).flatMap((message) => [
@@ -518,6 +589,8 @@ function mapReport(item: BackendReportSummary): ReportSummary {
     city: { code: item.cityCode, name: item.cityName },
     district: item.district,
     period: item.period,
+    periodStart: item.periodStart,
+    periodEnd: item.periodEnd,
     status: item.status === "CORRECTED" ? "CORRECTED" : "FINAL",
     source:
       item.sourceType === "HISTORICAL" || item.sourceType === "IMPORTED"
@@ -530,8 +603,9 @@ function mapReport(item: BackendReportSummary): ReportSummary {
     actualAmount: item.actualAmount,
     overLimitType: overLimitTypeLabel(item.overLimitType),
     maxRatio: item.maxRatio,
-    wordFileName: `${item.reportNumber}.docx`,
-    pdfFileName: `${item.reportNumber}.pdf`,
+    overLimitRatios: mapOverLimitRatios(item.overLimitRatios),
+    wordFileName: reportFileName(item, "docx"),
+    pdfFileName: reportFileName(item, "pdf"),
     summary,
     previewHtml: buildReportPreviewHtml(item.sections),
     archivedAudit: [],
@@ -547,6 +621,47 @@ function mapReport(item: BackendReportSummary): ReportSummary {
         ]
       : [],
   };
+}
+
+function reportFileName(
+  item: Pick<
+    BackendReportSummary,
+    "billingPointName" | "period" | "periodStart" | "periodEnd"
+  >,
+  extension: "docx" | "pdf",
+): string {
+  const range = reportPeriodRange(item.period, item.periodStart, item.periodEnd);
+  return sanitizeFileName(
+    `${item.billingPointName}电费稽核说明-${range}.${extension}`,
+  );
+}
+
+function reportPeriodRange(
+  period: string,
+  periodStart: string | null,
+  periodEnd: string | null,
+): string {
+  if (periodStart && periodEnd) {
+    return `${formatChineseDate(periodStart)}至${formatChineseDate(periodEnd)}`;
+  }
+  if (/^\d{4}-\d{2}$/.test(period)) {
+    const [yearText, monthText] = period.split("-");
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const endDay = new Date(year, month, 0).getDate();
+    return `${year}年${month}月1日至${year}年${month}月${endDay}日`;
+  }
+  return period;
+}
+
+function formatChineseDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (match === null) return value;
+  return `${Number(match[1])}年${Number(match[2])}月${Number(match[3])}日`;
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, "_");
 }
 
 function cleanDraftText(value: string | null | undefined): string {
@@ -592,6 +707,7 @@ function mapHistoricalCandidate(
     period: item.period,
     overLimitType: overLimitTypeLabel(item.overLimitType),
     maxRatio: item.maxRatio ?? null,
+    overLimitRatios: mapOverLimitRatios(item.overLimitRatios),
   };
 }
 
@@ -614,7 +730,7 @@ async function waitForReport(taskId: string): Promise<string> {
 
 function taskErrorMessage(errorCode: string | null): string {
   if (errorCode === null) return "正式报告生成失败";
-  return TASK_ERROR_MESSAGES[errorCode] ?? errorCode;
+  return TASK_ERROR_MESSAGES[errorCode] ?? "任务执行失败，请稍后重试。";
 }
 
 async function fetchReportById(id: string): Promise<ReportSummary> {
@@ -650,6 +766,43 @@ export const businessApi = {
             `/api/v1/dashboard/summary${query ? `?${query}` : ""}`,
           ),
         ),
+      );
+    },
+  },
+
+  aiTasks: {
+    async list(query: AiTaskListQuery): Promise<AiTaskPage> {
+      const qs = queryString({
+        status: query.status,
+        billingPointName: query.billingPointName?.trim(),
+        cityName: query.cityName?.trim(),
+        period: query.period?.trim(),
+        page: Math.max(0, query.page - 1),
+        size: query.size,
+      });
+      const result = asResult<AiTaskPage>(
+        await httpClient.get(`/api/v1/tasks${qs ? `?${qs}` : ""}`),
+      );
+      return {
+        ...result,
+        page: result.page + 1,
+        totalElements: result.totalElements ?? 0,
+        totalPages: result.totalPages,
+        summary: result.summary ?? {
+          queued: 0,
+          running: 0,
+          retryWait: 0,
+          completedPendingConfirmation: 0,
+          failed: 0,
+        },
+        filterOptions: result.filterOptions ?? { cityNames: [], periods: [] },
+      };
+    },
+
+    async retry(id: string): Promise<void> {
+      await httpClient.post(
+        `/api/v1/tasks/${encodeURIComponent(id)}/retries`,
+        {},
       );
     },
   },
@@ -763,6 +916,12 @@ export const businessApi = {
         await httpClient.get(
           `/api/v1/import-batches/${encodeURIComponent(id)}`,
         ),
+      );
+    },
+
+    async latestSession(): Promise<ImportSessionState> {
+      return asResult<ImportSessionState>(
+        await httpClient.get("/api/v1/import-batches/session/latest"),
       );
     },
 
@@ -1026,7 +1185,7 @@ export const businessApi = {
           },
           {
             headers: { "If-Match": String(version ?? 0) },
-            timeoutMs: 600_000,
+            timeoutMs: input.intent === "IMAGE_ANALYSIS" ? 30_000 : 600_000,
           },
         ),
       );
@@ -1146,13 +1305,20 @@ export const businessApi = {
       const params = queryString({
         cityCode: query.cityCode,
       });
-      return asResult<HistoricalReportPeriod[]>(
+      const periods = asResult<BackendHistoricalReportCandidate[]>(
         await httpClient.get(
           `/api/v1/historical-report-billing-points/${encodeURIComponent(query.billingPointCode)}/periods${
             params ? `?${params}` : ""
           }`,
         ),
       );
+      return periods.map((item) => ({
+        billingPointPeriodId: item.billingPointPeriodId,
+        period: item.period,
+        overLimitType: overLimitTypeLabel(item.overLimitType),
+        maxRatio: item.maxRatio ?? null,
+        overLimitRatios: mapOverLimitRatios(item.overLimitRatios),
+      }));
     },
 
     async importHistorical(input: {

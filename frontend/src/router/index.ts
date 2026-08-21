@@ -80,6 +80,12 @@ export const router = createRouter({
           meta: { title: "历史报告", requiresAuth: true },
         },
         {
+          path: "reports/ai-tasks",
+          name: "reports-ai-tasks",
+          component: () => import("@/views/reports/AiTaskProgressView.vue"),
+          meta: { title: "AI任务进度", requiresAuth: true },
+        },
+        {
           path: "reports/:reportId",
           name: "report-detail",
           component: () => import("@/views/reports/ReportDetailView.vue"),

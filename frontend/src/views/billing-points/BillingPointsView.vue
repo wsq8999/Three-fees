@@ -8,6 +8,8 @@ import type { TableInstance } from "element-plus";
 import { businessApi } from "@/api/business-api";
 import ExportDataDialog from "@/components/business/ExportDataDialog.vue";
 import ImportDataDialog from "@/components/business/ImportDataDialog.vue";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import StatusTag from "@/components/business/StatusTag.vue";
 import PageState from "@/components/PageState.vue";
 import { parseBillingPointQuery } from "@/router/billing-query-state";
@@ -71,6 +73,10 @@ const selectedRows = computed(() =>
     selectedIds.value.has(item.id),
   ),
 );
+
+function isAiAnalyzing(row: Summary): boolean {
+  return row.draftAnalysisStatus === "AI_ANALYZING";
+}
 
 const exportCityCode = computed(() => {
   if (filters.cityCode) return filters.cityCode;
@@ -438,6 +444,10 @@ async function openDetail(
 async function openDraft(
   row: Summary,
 ): Promise<void> {
+  if (isAiAnalyzing(row)) {
+    ElMessage.info("AI正在后台分析，完成或失败后可继续生成报告。");
+    return;
+  }
   const draft =
     await businessApi.drafts.createOrResume(
       row.id,
@@ -1020,25 +1030,38 @@ watch(
 
       <ElTableColumn
         label="超标类型"
-        width="130"
+        min-width="190"
       >
         <template #default="scope">
-          <ElTag
+          <OverLimitTypeTags
             v-if="
               asSummary(scope.row)
                 .auditStatus ===
               'OVER_LIMIT'
             "
-            type="danger"
-            size="small"
-          >
-            {{
+            :ratios="asSummary(scope.row).overLimitRatios"
+            :fallback="
+              asSummary(scope.row)
+                .overLimitDisplayType ??
               asSummary(scope.row)
                 .overLimitType ??
-              "超标"
-            }}
-          </ElTag>
+              '超标'
+            "
+          />
 
+          <span v-else>—</span>
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn
+        label="超标比例"
+        min-width="230"
+      >
+        <template #default="scope">
+          <OverLimitRatioTags
+            v-if="asSummary(scope.row).auditStatus === 'OVER_LIMIT'"
+            :ratios="asSummary(scope.row).overLimitRatios"
+          />
           <span v-else>—</span>
         </template>
       </ElTableColumn>
@@ -1086,13 +1109,24 @@ watch(
               "
               link
               type="danger"
+              :disabled="
+                isAiAnalyzing(
+                  asSummary(scope.row),
+                )
+              "
               @click="
                 openDraft(
                   asSummary(scope.row),
                 )
               "
             >
-              生成报告
+              {{
+                isAiAnalyzing(
+                  asSummary(scope.row),
+                )
+                  ? "AI分析中"
+                  : "生成报告"
+              }}
             </ElButton>
 
             <ElButton

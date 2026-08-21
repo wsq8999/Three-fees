@@ -61,7 +61,7 @@ public class ExportTaskProcessor implements TaskProcessor {
       List<String> billingPointCodes = billingPointCodes(job.billingPointIds());
       var files = new LinkedHashMap<String, byte[]>();
       for (DatasetType datasetType : job.datasetTypes()) {
-        String filename = job.period() + "-" + datasetType.name().toLowerCase() + ".xlsx";
+        String filename = exportFileName(job.period(), datasetType, billingPointCodes.size(), "xlsx");
         files.put(filename, workbook(datasetType, job.period(), job.cityCode(), billingPointCodes));
       }
       byte[] resultBytes;
@@ -73,7 +73,8 @@ public class ExportTaskProcessor implements TaskProcessor {
         resultBytes = only.getValue();
         mediaType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       } else {
-        resultName = job.period() + "-three-fees-export.zip";
+        resultName =
+            exportBundleName(job.period(), job.datasetTypes().size(), billingPointCodes.size());
         resultBytes = zip(files);
         mediaType = "application/zip";
       }
@@ -93,6 +94,53 @@ public class ExportTaskProcessor implements TaskProcessor {
       jobRepository.markFailed(job.id(), "EXPORT_FAILED");
       throw new TaskExecutionException("EXPORT_FAILED", exception.getMessage(), true);
     }
+  }
+
+  private String exportFileName(
+      String period, DatasetType datasetType, int billingPointCount, String extension) {
+    return sanitizeFileName(
+        periodLabel(period)
+            + "电费稽核"
+            + datasetTypeLabel(datasetType)
+            + "导出"
+            + scopeLabel(billingPointCount)
+            + "."
+            + extension);
+  }
+
+  private String exportBundleName(String period, int datasetTypeCount, int billingPointCount) {
+    return sanitizeFileName(
+        periodLabel(period)
+            + "电费稽核多类数据导出"
+            + "（共"
+            + datasetTypeCount
+            + "类）"
+            + scopeLabel(billingPointCount)
+            + ".zip");
+  }
+
+  private String datasetTypeLabel(DatasetType datasetType) {
+    return switch (datasetType) {
+      case BILLING_POINT -> "报账点清单";
+      case PAYMENT -> "缴费明细";
+      case METER_READING -> "电表读数";
+      case BENCHMARK -> "标杆值";
+    };
+  }
+
+  private String periodLabel(String period) {
+    if (period != null && period.matches("\\d{4}-\\d{2}")) {
+      return period.substring(0, 4) + "年" + period.substring(5, 7) + "月";
+    }
+    return period == null || period.isBlank() ? "" : period;
+  }
+
+  private String scopeLabel(int billingPointCount) {
+    return billingPointCount <= 0 ? "（全部报账点）" : "（选中" + billingPointCount + "个报账点）";
+  }
+
+  private String sanitizeFileName(String value) {
+    return value.replaceAll("[\\\\/:*?\"<>|]", "_");
   }
 
   private byte[] workbook(

@@ -112,6 +112,7 @@ public class AuditRecalculationService {
                 period,
                 current.paymentEligible(),
                 current.actualEnergy(),
+                current.dailyAverage(),
                 current.paymentDaysOr(period.lengthOfMonth()),
                 benchmarkTotal,
                 yoy,
@@ -197,7 +198,7 @@ public class AuditRecalculationService {
   }
 
   private EnergyAndPayment loadActual(YearMonth period, String cityCode, String billingPointCode) {
-    BigDecimal actualEnergy =
+    BigDecimal meterEnergy =
         jdbcTemplate.queryForObject(
             """
             SELECT COALESCE(SUM(allocated_kwh), 0)
@@ -223,7 +224,8 @@ public class AuditRecalculationService {
     List<PaymentStatusAndAmount> payments =
         jdbcTemplate.query(
             """
-            SELECT audit_status, actual_report_amount, payment_start, payment_end
+            SELECT audit_status, actual_report_amount, actual_total_kwh, daily_avg_kwh,
+                   payment_days, payment_start, payment_end
               FROM payment_detail
              WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
             """,
@@ -231,6 +233,9 @@ public class AuditRecalculationService {
                 new PaymentStatusAndAmount(
                     resultSet.getString("audit_status"),
                     resultSet.getBigDecimal("actual_report_amount"),
+                    resultSet.getBigDecimal("actual_total_kwh"),
+                    resultSet.getBigDecimal("daily_avg_kwh"),
+                    resultSet.getObject("payment_days", Integer.class),
                     resultSet.getObject("payment_start", LocalDate.class),
                     resultSet.getObject("payment_end", LocalDate.class)),
             period.toString(),
@@ -239,12 +244,35 @@ public class AuditRecalculationService {
     boolean hasPayments = !payments.isEmpty();
     boolean eligible = hasPayments;
     BigDecimal actualAmount = BigDecimal.ZERO;
+    BigDecimal paymentEnergy = BigDecimal.ZERO;
+    boolean hasPaymentEnergy = false;
+    BigDecimal paymentDailyEnergy = BigDecimal.ZERO;
+    int paymentDailyDays = 0;
     LocalDate paymentStart = null;
     LocalDate paymentEnd = null;
+    Integer maxPaymentDays = null;
     for (PaymentStatusAndAmount payment : payments) {
       eligible &= isApproved(payment.auditStatus());
       if (payment.actualAmount() != null) {
         actualAmount = actualAmount.add(payment.actualAmount());
+      }
+      BigDecimal rowEnergy = payment.actualEnergy();
+      if (rowEnergy == null && payment.dailyAverage() != null && payment.paymentDays() != null) {
+        rowEnergy = payment.dailyAverage().multiply(BigDecimal.valueOf(payment.paymentDays()));
+      }
+      if (rowEnergy != null) {
+        paymentEnergy = paymentEnergy.add(rowEnergy);
+        hasPaymentEnergy = true;
+      }
+      if (payment.paymentDays() != null
+          && payment.paymentDays() > 0
+          && (maxPaymentDays == null || payment.paymentDays() > maxPaymentDays)) {
+        maxPaymentDays = payment.paymentDays();
+      }
+      if (payment.dailyAverage() != null && payment.paymentDays() != null && payment.paymentDays() > 0) {
+        paymentDailyEnergy =
+            paymentDailyEnergy.add(payment.dailyAverage().multiply(BigDecimal.valueOf(payment.paymentDays())));
+        paymentDailyDays += payment.paymentDays();
       }
       if (payment.paymentStart() != null
           && (paymentStart == null || payment.paymentStart().isBefore(paymentStart))) {
@@ -255,31 +283,36 @@ public class AuditRecalculationService {
         paymentEnd = payment.paymentEnd();
       }
     }
+    Integer datePaymentDays = paymentDays(paymentStart, paymentEnd);
+    Integer paymentDays = datePaymentDays == null ? maxPaymentDays : datePaymentDays;
+    BigDecimal dailyAverage =
+        paymentDailyDays > 0
+            ? paymentDailyEnergy.divide(BigDecimal.valueOf(paymentDailyDays), MathContext.DECIMAL128)
+            : hasPaymentEnergy && paymentDays != null && paymentDays > 0
+                ? paymentEnergy.divide(BigDecimal.valueOf(paymentDays), MathContext.DECIMAL128)
+                : null;
     return new EnergyAndPayment(
-        meterCount == null || meterCount == 0 ? null : actualEnergy,
+        hasPaymentEnergy ? paymentEnergy : meterCount == null || meterCount == 0 ? null : meterEnergy,
+        dailyAverage,
         hasPayments ? actualAmount : null,
         payments.size(),
         hasPayments,
         eligible,
-        paymentDays(paymentStart, paymentEnd));
+        paymentDays);
   }
 
   private BigDecimal loadBenchmarkTotal(
       YearMonth period, String cityCode, String billingPointCode) {
-    return jdbcTemplate
-        .query(
-            """
-            SELECT calculated_day_total
-              FROM benchmark_value
-             WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
-            """,
-            (resultSet, rowNumber) -> resultSet.getBigDecimal("calculated_day_total"),
-            period.toString(),
-            cityCode,
-            billingPointCode)
-        .stream()
-        .findFirst()
-        .orElse(null);
+    return jdbcTemplate.queryForObject(
+        """
+        SELECT SUM(COALESCE(calculated_day_total, benchmark_month_value, day_total))
+          FROM benchmark_value
+         WHERE data_period = ? AND city_code = ? AND billing_point_code = ?
+        """,
+        BigDecimal.class,
+        period.toString(),
+        cityCode,
+        billingPointCode);
   }
 
   private void upsert(
@@ -599,6 +632,7 @@ public class AuditRecalculationService {
 
   private record EnergyAndPayment(
       BigDecimal actualEnergy,
+      BigDecimal dailyAverage,
       BigDecimal actualAmount,
       int paymentCount,
       boolean hasPayments,
@@ -611,7 +645,13 @@ public class AuditRecalculationService {
   }
 
   private record PaymentStatusAndAmount(
-      String auditStatus, BigDecimal actualAmount, LocalDate paymentStart, LocalDate paymentEnd) {}
+      String auditStatus,
+      BigDecimal actualAmount,
+      BigDecimal actualEnergy,
+      BigDecimal dailyAverage,
+      Integer paymentDays,
+      LocalDate paymentStart,
+      LocalDate paymentEnd) {}
 
   private record SnapshotInfo(
       String billingPointCode,

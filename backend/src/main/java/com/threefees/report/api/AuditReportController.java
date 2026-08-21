@@ -150,10 +150,10 @@ public class AuditReportController {
     ContentDisposition disposition =
         inline
             ? ContentDisposition.inline()
-                .filename(access.file().originalName(), StandardCharsets.UTF_8)
+                .filename(access.downloadName(), StandardCharsets.UTF_8)
                 .build()
             : ContentDisposition.attachment()
-                .filename(access.file().originalName(), StandardCharsets.UTF_8)
+                .filename(access.downloadName(), StandardCharsets.UTF_8)
                 .build();
     return ResponseEntity.ok()
         .cacheControl(CacheControl.noStore())

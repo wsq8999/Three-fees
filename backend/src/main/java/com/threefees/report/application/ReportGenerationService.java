@@ -282,7 +282,7 @@ public class ReportGenerationService {
             + decimal(source.actualAmount())
             + "元。经系统稽核，该报账点本期用电存在超标情况，超标类型为"
             + overLimitTypeLabel(source.overLimitType())
-            + "，最大超标比例为"
+            + "，超标比例为"
             + percent(source.maxRatio())
             + "。";
     return "<h1>"
@@ -440,7 +440,7 @@ public class ReportGenerationService {
         new AiServiceClient.Fact("账期", source.period()),
         new AiServiceClient.Fact("稽核状态", "超标"),
         new AiServiceClient.Fact("超标类型", overLimitTypeLabel(source.overLimitType())),
-        new AiServiceClient.Fact("最大超标比例", percent(source.maxRatio())),
+        new AiServiceClient.Fact("超标比例", percent(source.maxRatio())),
         new AiServiceClient.Fact("实际总耗电量", decimal(source.actualEnergy()) + "kWh"),
         new AiServiceClient.Fact("实际报账金额", decimal(source.actualAmount()) + "元"));
   }

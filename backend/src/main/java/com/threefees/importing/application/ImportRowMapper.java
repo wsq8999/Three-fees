@@ -353,18 +353,6 @@ public class ImportRowMapper {
 
     List<String> required = new ArrayList<>(requiredTechnicalNames(datasetType));
 
-    /*
-     * 报账点清单：
-     *
-     * 如果接口没有显式提供账期，
-     * 就需要使用“最后报账期始”推算月份。
-     */
-    if (datasetType == DatasetType.BILLING_POINT
-        && (fallbackPeriod == null || fallbackPeriod.isBlank())) {
-
-      required.add(LAST_PERIOD_START);
-    }
-
     Map<String, FieldDefinition> fieldsByTechnicalName = new HashMap<>();
 
     for (FieldDefinition field : fields) {
@@ -501,19 +489,12 @@ public class ImportRowMapper {
       case BILLING_POINT -> {
         rowCity = resolveCity(value(values, CITY), cityCodes);
 
-        period = fallbackPeriod;
-
-        if (period == null || period.isBlank()) {
-
-          period =
-              inferPeriodFromDate(
-                  value(values, LAST_PERIOD_START), sourceRow, LAST_PERIOD_START, errors);
-        }
+        period = fallbackPeriod == null || fallbackPeriod.isBlank() ? "MASTER" : fallbackPeriod;
 
         validateDateRange(
             value(values, LAST_PERIOD_START), value(values, LAST_PERIOD_END), sourceRow, errors);
 
-        businessKey = billingPointCode + "|" + period + "|" + sourceRow;
+        businessKey = billingPointCode + "|" + sourceRow;
       }
 
       case PAYMENT -> {

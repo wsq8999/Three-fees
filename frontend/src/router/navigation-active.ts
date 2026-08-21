@@ -5,6 +5,7 @@ export function resolveNavigationActivePath(path: string): string {
   if (path === "/reports/generate" || path.startsWith("/reports/drafts/")) {
     return "/reports/generate";
   }
+  if (path === "/reports/ai-tasks") return "/reports/ai-tasks";
   if (
     path === "/reports/history" ||
     /^\/reports\/[^/]+(?:\/correction)?$/.test(path)

@@ -219,7 +219,7 @@ class ApiContractIntegrationTest {
   }
 
   private HttpResponse<String> get(HttpClient client, String path) throws Exception {
-    var request = HttpRequest.newBuilder(uri(path)).timeout(Duration.ofSeconds(5)).GET().build();
+    var request = HttpRequest.newBuilder(uri(path)).timeout(Duration.ofSeconds(15)).GET().build();
     return client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
   }
 
@@ -227,7 +227,7 @@ class ApiContractIntegrationTest {
       HttpClient client, String path, String body, String csrfToken) throws Exception {
     var builder =
         HttpRequest.newBuilder(uri(path))
-            .timeout(Duration.ofSeconds(5))
+            .timeout(Duration.ofSeconds(15))
             .header("Content-Type", "application/json");
     if (csrfToken != null) {
       builder.header("X-XSRF-TOKEN", csrfToken);

@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  onUpdated,
+  reactive,
+  ref,
+} from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Download } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
-import { businessApi, formatPercent, saveBlob } from "@/api/business-api";
+import { businessApi, triggerBrowserDownload } from "@/api/business-api";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import type { ReportSummary } from "@/types/business";
 
@@ -19,11 +29,13 @@ const report = ref<ReportSummary | null>(null);
 const loading = ref(true);
 const downloading = ref(false);
 const errorMessage = ref("");
+const previewContentRef = ref<HTMLElement>();
 const correctionVisible = ref(false);
 const correctionError = ref("");
 const correctionForm = reactive({
   reason: "",
 });
+let previewImageCleanup: Array<() => void> = [];
 
 const isHistorical = computed(
   () => report.value?.source === "HISTORICAL_IMPORT",
@@ -35,11 +47,6 @@ const billingPointLabel = computed(() => {
   if (report.value === null) return "—";
   return `${report.value.billingPointCode} ｜ ${report.value.billingPointName} ｜ ${report.value.city.name}`;
 });
-const overLimitLabel = computed(() => {
-  if (report.value === null) return "—";
-  return `${overLimitTypeLabel(report.value.overLimitType)} ｜ ${formatPercent(report.value.maxRatio)}`;
-});
-
 const rawContent = computed(
   () => report.value?.previewHtml || report.value?.summary || "",
 );
@@ -79,6 +86,69 @@ function normalizePreviewContent(value: string): string {
     .trim();
 }
 
+function clearPreviewImageHandlers(): void {
+  previewImageCleanup.forEach((cleanup) => cleanup());
+  previewImageCleanup = [];
+}
+
+function reportImageUrl(id: string): string {
+  return `/api/v1/files/${encodeURIComponent(id)}?inline=true`;
+}
+
+function normalizeReportImageSrc(image: HTMLImageElement): string | null {
+  const fileId =
+    image.dataset.fileId ??
+    image.closest<HTMLElement>("[data-file-id]")?.dataset.fileId;
+  if (fileId !== undefined && fileId.length > 0) return reportImageUrl(fileId);
+  const rawSrc = image.getAttribute("src")?.trim();
+  if (!rawSrc) return null;
+  try {
+    const url = new URL(rawSrc, window.location.origin);
+    if (
+      url.origin === window.location.origin &&
+      url.pathname.startsWith("/api/v1/files/")
+    ) {
+      url.searchParams.set("inline", "true");
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch {
+    return rawSrc;
+  }
+  return rawSrc;
+}
+
+function showImageFallback(image: HTMLImageElement): void {
+  if (image.dataset.fallbackRendered === "true") return;
+  image.dataset.fallbackRendered = "true";
+  const fallback = document.createElement("div");
+  fallback.className = "report-image-fallback";
+  fallback.textContent = "图片暂无法显示，请下载 Word 查看原图。";
+  image.replaceWith(fallback);
+}
+
+function enhanceReportPreviewImages(): void {
+  clearPreviewImageHandlers();
+  const root = previewContentRef.value;
+  if (root === undefined) return;
+  root.querySelectorAll<HTMLImageElement>("img").forEach((image) => {
+    const normalizedSrc = normalizeReportImageSrc(image);
+    if (normalizedSrc === null) {
+      showImageFallback(image);
+      return;
+    }
+    if (image.getAttribute("src") !== normalizedSrc) {
+      image.src = normalizedSrc;
+    }
+    image.alt ||= "稽核报告图片";
+    image.loading = "lazy";
+    image.decoding = "async";
+    const onError = (): void => showImageFallback(image);
+    image.addEventListener("error", onError, { once: true });
+    previewImageCleanup.push(() => image.removeEventListener("error", onError));
+    if (image.complete && image.naturalWidth === 0) showImageFallback(image);
+  });
+}
+
 function decodeHtmlEntities(value: string): string {
   return value
     .replace(/&lt;/g, "<")
@@ -94,18 +164,6 @@ function looksLikeHtml(value: string): boolean {
   );
 }
 
-function overLimitTypeLabel(value: string | null | undefined): string {
-  if (!value) return "—";
-  const labels: Record<string, string> = {
-    ONLY_YOY: "仅同比超标",
-    ONLY_MOM: "仅环比超标",
-    ONLY_RATED: "仅额定标杆超标",
-    MULTIPLE: "多项超标",
-    NONE: "未超标",
-  };
-  return labels[value] ?? value;
-}
-
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
@@ -114,6 +172,8 @@ async function load(): Promise<void> {
     if (loaded === undefined) throw new Error("报告不存在或当前账号无权访问");
     report.value = loaded;
     loading.value = false;
+    await nextTick();
+    enhanceReportPreviewImages();
     if (props.correction) correctionVisible.value = true;
     if (route.query.autoDownload === "word") {
       await downloadWord();
@@ -137,8 +197,8 @@ async function downloadWord(): Promise<void> {
   if (report.value === null) return;
   downloading.value = true;
   try {
-    saveBlob(
-      await businessApi.reports.downloadWord(report.value.id),
+    await triggerBrowserDownload(
+      `/api/v1/reports/${encodeURIComponent(report.value.id)}/word`,
       report.value.wordFileName,
     );
   } catch (error) {
@@ -202,6 +262,10 @@ async function goBack(): Promise<void> {
 }
 
 onMounted(load);
+onUpdated(() => {
+  void nextTick(enhanceReportPreviewImages);
+});
+onBeforeUnmount(clearPreviewImageHandlers);
 </script>
 
 <template>
@@ -221,8 +285,15 @@ onMounted(load);
         <strong>{{ billingPointLabel }}</strong>
       </div>
       <div>
-        <small>超标类型/超标率：</small>
-        <strong class="over-limit-value">{{ overLimitLabel }}</strong>
+        <small>超标类型：</small>
+        <OverLimitTypeTags
+          :ratios="report.overLimitRatios"
+          :fallback="report.overLimitType"
+        />
+      </div>
+      <div>
+        <small>超标比例：</small>
+        <OverLimitRatioTags :ratios="report.overLimitRatios" />
       </div>
       <div>
         <small>报告来源：</small>
@@ -234,6 +305,7 @@ onMounted(load);
       <article class="report-sheet">
         <article
           v-if="contentHtml"
+          ref="previewContentRef"
           class="word-preview-content"
           v-html="contentHtml"
         />
@@ -386,8 +458,21 @@ onMounted(load);
 }
 
 .word-preview-content :deep(img) {
+  display: block;
   max-width: 100%;
   height: auto;
+  margin: 12px auto;
+  object-fit: contain;
+}
+
+.word-preview-content :deep(.report-image-fallback) {
+  padding: 16px;
+  margin: 12px 0;
+  color: #7d4b00;
+  text-align: center;
+  background: #fff7e6;
+  border: 1px dashed #f0b35a;
+  border-radius: 6px;
 }
 
 .correction-note {

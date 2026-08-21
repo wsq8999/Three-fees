@@ -38,7 +38,16 @@ public class FormalImportTableWriter {
   private static final String LAST_PERIOD_END = "最后报账期终";
   private static final String PERIOD_START = "缴费期始";
   private static final String PERIOD_END = "缴费期终";
+  private static final String PAYMENT_DAYS = "缴费天数";
+  private static final String DAILY_AVG_KWH = "日均耗电量";
   private static final String ACTUAL_AMOUNT = "实际报账金额";
+  private static final String ACTUAL_TOTAL_KWH = "实际总耗电量";
+  private static final String BENCHMARK_OVER_LIMIT = "标杆是否超标";
+  private static final String HISTORICAL_FEE_BENCHMARK_YOY = "历史电费标杆-同比";
+  private static final String HISTORICAL_FEE_BENCHMARK_MOM = "历史电费标杆-环比";
+  private static final String HISTORICAL_DAILY_ENERGY_YOY = "历史日均电量标杆-同比";
+  private static final String HISTORICAL_DAILY_ENERGY_MOM = "历史日均电量标杆-环比";
+  private static final String RATED_POWER_BENCHMARK = "额定功率标杆";
   private static final String METER_ACCOUNT_NO = "电表户号";
   private static final String METER_MULTIPLIER = "电表倍率";
   private static final String ALLOCATED_ENERGY = "分摊后度数";
@@ -69,67 +78,6 @@ public class FormalImportTableWriter {
 
   private void replaceBillingPoints(ImportBatch batch, List<ImportRow> rows) {
     List<ImportRow> aggregatedRows = aggregateBillingPointRows(rows);
-    jdbcTemplate.batchUpdate(
-        """
-        INSERT INTO billing_point_snapshot
-          (public_id, data_period, period_start, period_end, city_code, district_code,
-           source_import_job_id, source_row_no, raw_row_json, source_audit_status,
-           billing_point_code, billing_point_name, billing_point_type, city_name, district_name,
-           billing_point_status, last_reimbursement_start, last_reimbursement_end, data_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          public_id = VALUES(public_id),
-          data_period = VALUES(data_period),
-          period_start = VALUES(period_start),
-          period_end = VALUES(period_end),
-          city_code = VALUES(city_code),
-          district_code = VALUES(district_code),
-          source_import_job_id = VALUES(source_import_job_id),
-          source_row_no = VALUES(source_row_no),
-          raw_row_json = VALUES(raw_row_json),
-          source_audit_status = VALUES(source_audit_status),
-          billing_point_name = VALUES(billing_point_name),
-          billing_point_type = VALUES(billing_point_type),
-          city_name = VALUES(city_name),
-          district_name = VALUES(district_name),
-          billing_point_status = VALUES(billing_point_status),
-          last_reimbursement_start = VALUES(last_reimbursement_start),
-          last_reimbursement_end = VALUES(last_reimbursement_end),
-          data_json = VALUES(data_json)
-        """,
-        new RowSetter(aggregatedRows) {
-          @Override
-          protected void setRow(PreparedStatement ps, ImportRow row, Map<String, String> values)
-              throws SQLException {
-            LocalDate start = valueDate(values, LAST_PERIOD_START);
-            LocalDate end = valueDate(values, LAST_PERIOD_END);
-            if (start == null) {
-              start = YearMonth.parse(batch.period()).atDay(1);
-            }
-            if (end == null) {
-              end = YearMonth.parse(batch.period()).atEndOfMonth();
-            }
-            ps.setString(1, UUID.randomUUID().toString());
-            ps.setString(2, batch.period());
-            setDate(ps, 3, start);
-            setDate(ps, 4, end);
-            ps.setString(5, batch.cityCode());
-            ps.setString(6, value(values, DISTRICT));
-            ps.setLong(7, batch.id());
-            ps.setInt(8, row.sourceRow());
-            ps.setString(9, row.valuesJson());
-            ps.setString(10, value(values, AUDIT_STATUS));
-            ps.setString(11, row.billingPointCode());
-            ps.setString(12, row.billingPointName());
-            ps.setString(13, value(values, BILLING_POINT_TYPE));
-            ps.setString(14, valueOr(values, CITY, batch.cityCode()));
-            ps.setString(15, value(values, DISTRICT));
-            ps.setString(16, value(values, BILLING_POINT_STATUS));
-            setDate(ps, 17, valueDate(values, LAST_PERIOD_START));
-            setDate(ps, 18, valueDate(values, LAST_PERIOD_END));
-            ps.setString(19, row.valuesJson());
-          }
-        });
     syncBillingPointMaster(batch, aggregatedRows);
   }
 
@@ -175,36 +123,32 @@ public class FormalImportTableWriter {
   }
 
   private void syncBillingPointMaster(ImportBatch batch, List<ImportRow> rows) {
-    List<String> billingPointCodes = billingPointCodes(rows);
-    if (billingPointCodes.isEmpty()) {
-      return;
-    }
-    String placeholders = placeholders(billingPointCodes.size());
-    var deleteArguments = new java.util.ArrayList<Object>();
-    deleteArguments.add(batch.cityCode());
-    deleteArguments.addAll(billingPointCodes);
-    jdbcTemplate.update(
-        "DELETE FROM billing_point_master WHERE city_code = ? AND billing_point_code IN ("
-            + placeholders
-            + ")",
-        deleteArguments.toArray());
-    var arguments = new java.util.ArrayList<Object>();
-    arguments.add(batch.cityCode());
-    arguments.add(batch.period());
-    arguments.addAll(billingPointCodes);
-    jdbcTemplate.update(
+    jdbcTemplate.batchUpdate(
         """
         INSERT INTO billing_point_master
           (billing_point_code, billing_point_name, city_code, district_code,
-           billing_point_status, current_data_period, current_snapshot_id)
-        SELECT s.billing_point_code, s.billing_point_name, s.city_code, s.district_code,
-               s.billing_point_status, s.data_period, s.id
-          FROM billing_point_snapshot s
-         WHERE s.city_code = ? AND s.data_period = ? AND s.billing_point_code IN (
+           billing_point_status, current_data_period, current_snapshot_id, resource_summary_json)
+        VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)
+        ON DUPLICATE KEY UPDATE
+          billing_point_name = VALUES(billing_point_name),
+          district_code = VALUES(district_code),
+          billing_point_status = VALUES(billing_point_status),
+          resource_summary_json = VALUES(resource_summary_json),
+          updated_at = CURRENT_TIMESTAMP(3)
         """
-            + placeholders
-            + ")",
-        arguments.toArray());
+            ,
+        new RowSetter(rows) {
+          @Override
+          protected void setRow(PreparedStatement ps, ImportRow row, Map<String, String> values)
+              throws SQLException {
+            ps.setString(1, row.billingPointCode());
+            ps.setString(2, row.billingPointName());
+            ps.setString(3, batch.cityCode());
+            ps.setString(4, value(values, DISTRICT));
+            ps.setString(5, value(values, BILLING_POINT_STATUS));
+            ps.setString(6, row.valuesJson());
+          }
+        });
   }
 
   private void replacePayments(ImportBatch batch, List<ImportRow> rows) {
@@ -215,8 +159,11 @@ public class FormalImportTableWriter {
           (public_id, data_period, period_start, period_end, city_code, district_code,
            source_import_job_id, source_row_no, raw_row_json, audit_status, payment_bill_code,
            city_name, district_name, billing_point_code, billing_point_name, payment_start,
-           payment_end, actual_report_amount, values_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           payment_end, payment_days, daily_avg_kwh, actual_report_amount, actual_total_kwh,
+           benchmark_over_limit, historical_fee_benchmark_yoy, historical_fee_benchmark_mom,
+           historical_daily_energy_yoy, historical_daily_energy_mom, rated_power_benchmark,
+           values_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         new RowSetter(rows) {
           @Override
@@ -241,10 +188,20 @@ public class FormalImportTableWriter {
             ps.setString(15, row.billingPointName());
             setDate(ps, 16, start);
             setDate(ps, 17, end);
-            setBigDecimal(ps, 18, valueDecimal(values, ACTUAL_AMOUNT));
-            ps.setString(19, row.valuesJson());
+            setInteger(ps, 18, valueInteger(values, PAYMENT_DAYS));
+            setBigDecimal(ps, 19, valueDecimal(values, DAILY_AVG_KWH));
+            setBigDecimal(ps, 20, valueDecimal(values, ACTUAL_AMOUNT));
+            setBigDecimal(ps, 21, valueDecimal(values, ACTUAL_TOTAL_KWH));
+            ps.setString(22, value(values, BENCHMARK_OVER_LIMIT));
+            ps.setString(23, value(values, HISTORICAL_FEE_BENCHMARK_YOY));
+            ps.setString(24, value(values, HISTORICAL_FEE_BENCHMARK_MOM));
+            setBigDecimal(ps, 25, valueDecimal(values, HISTORICAL_DAILY_ENERGY_YOY));
+            setBigDecimal(ps, 26, valueDecimal(values, HISTORICAL_DAILY_ENERGY_MOM));
+            setBigDecimal(ps, 27, valueDecimal(values, RATED_POWER_BENCHMARK));
+            ps.setString(28, row.valuesJson());
           }
         });
+    syncBusinessSnapshots(batch, rows);
   }
 
   private void replaceMeters(ImportBatch batch, List<ImportRow> rows) {
@@ -323,18 +280,143 @@ public class FormalImportTableWriter {
               }
               setBigDecimal(ps, 17 + day, value);
             }
+            BigDecimal effectiveBenchmarkTotal =
+                monthBenchmark == null ? dayTotal : monthBenchmark;
             BigDecimal calculatedAverage =
-                dayTotal.divide(
+                effectiveBenchmarkTotal.divide(
                     BigDecimal.valueOf(month.lengthOfMonth()), 6, java.math.RoundingMode.HALF_UP);
             setBigDecimal(ps, 49, dayTotal);
             setBigDecimal(ps, 50, calculatedAverage);
             ps.setString(51, "PASS");
             ps.setString(52, null);
             setBigDecimal(ps, 53, monthBenchmark);
-            setBigDecimal(ps, 54, dayTotal);
+            setBigDecimal(ps, 54, effectiveBenchmarkTotal);
             ps.setString(55, row.valuesJson());
           }
         });
+  }
+
+  private void syncBusinessSnapshots(ImportBatch batch, List<ImportRow> rows) {
+    List<String> billingPointCodes = billingPointCodes(rows);
+    if (billingPointCodes.isEmpty()) {
+      return;
+    }
+    String placeholders = placeholders(billingPointCodes.size());
+    var arguments = new java.util.ArrayList<Object>();
+    arguments.add(batch.cityCode());
+    arguments.add(batch.period());
+    arguments.addAll(billingPointCodes);
+    List<SnapshotSeed> seeds =
+        jdbcTemplate.query(
+            """
+            SELECT m.billing_point_code,
+                   COALESCE(MIN(p.billing_point_name), m.billing_point_name) AS billing_point_name,
+                   m.city_code,
+                   COALESCE(MIN(p.city_name), c.name) AS city_name,
+                   COALESCE(MIN(p.district_code), m.district_code) AS district_code,
+                   m.billing_point_status,
+                   MIN(p.values_json) AS data_json,
+                   MIN(p.source_import_job_id) AS source_import_job_id,
+                   MIN(p.source_row_no) AS source_row_no,
+                   MIN(p.period_start) AS period_start,
+                   MAX(p.period_end) AS period_end
+              FROM billing_point_master m
+              JOIN city c ON c.code = m.city_code
+              JOIN payment_detail p
+                ON p.city_code = m.city_code
+               AND p.billing_point_code = m.billing_point_code
+               AND p.data_period = ?
+             WHERE m.city_code = ?
+               AND m.billing_point_code IN (
+            """
+                + placeholders
+                + """
+               )
+             GROUP BY m.billing_point_code, m.billing_point_name, m.city_code, c.name,
+                      m.district_code, m.billing_point_status
+            """,
+            (resultSet, rowNumber) ->
+                new SnapshotSeed(
+                    resultSet.getString("billing_point_code"),
+                    resultSet.getString("billing_point_name"),
+                    resultSet.getString("city_code"),
+                    resultSet.getString("city_name"),
+                    resultSet.getString("district_code"),
+                    resultSet.getString("billing_point_status"),
+                    resultSet.getString("data_json"),
+                    resultSet.getLong("source_import_job_id"),
+                    resultSet.getInt("source_row_no"),
+                    resultSet.getObject("period_start", LocalDate.class),
+                    resultSet.getObject("period_end", LocalDate.class)),
+            snapshotArguments(batch, billingPointCodes).toArray());
+    jdbcTemplate.batchUpdate(
+        """
+        INSERT INTO billing_point_snapshot
+          (public_id, data_period, period_start, period_end, city_code, district_code,
+           source_import_job_id, source_row_no, raw_row_json, source_audit_status,
+           billing_point_code, billing_point_name, billing_point_type, city_name, district_name,
+           billing_point_status, last_reimbursement_start, last_reimbursement_end, data_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, NULL, NULL, ?)
+        ON DUPLICATE KEY UPDATE
+          billing_point_name = VALUES(billing_point_name),
+          district_code = VALUES(district_code),
+          source_import_job_id = VALUES(source_import_job_id),
+          source_row_no = VALUES(source_row_no),
+          raw_row_json = VALUES(raw_row_json),
+          city_name = VALUES(city_name),
+          district_name = VALUES(district_name),
+          billing_point_status = VALUES(billing_point_status),
+          data_json = VALUES(data_json),
+          updated_at = CURRENT_TIMESTAMP(3)
+        """,
+        new BatchPreparedStatementSetter() {
+          @Override
+          public int getBatchSize() {
+            return seeds.size();
+          }
+
+          @Override
+          public void setValues(PreparedStatement ps, int index) throws SQLException {
+            SnapshotSeed seed = seeds.get(index);
+            String json =
+                seed.dataJson() == null || seed.dataJson().isBlank()
+                    ? fallbackSnapshotJson(seed)
+                    : seed.dataJson();
+            ps.setString(1, UUID.randomUUID().toString());
+            ps.setString(2, batch.period());
+            setDate(ps, 3, seed.periodStart());
+            setDate(ps, 4, seed.periodEnd());
+            ps.setString(5, seed.cityCode());
+            ps.setString(6, seed.districtCode());
+            ps.setLong(7, seed.sourceImportJobId());
+            ps.setInt(8, seed.sourceRowNo());
+            ps.setString(9, json);
+            ps.setString(10, seed.billingPointCode());
+            ps.setString(11, seed.billingPointName());
+            ps.setString(12, seed.cityName());
+            ps.setString(13, seed.districtCode());
+            ps.setString(14, seed.billingPointStatus());
+            ps.setString(15, json);
+          }
+        });
+  }
+
+  private java.util.ArrayList<Object> snapshotArguments(ImportBatch batch, List<String> codes) {
+    var arguments = new java.util.ArrayList<Object>();
+    arguments.add(batch.period());
+    arguments.add(batch.cityCode());
+    arguments.addAll(codes);
+    return arguments;
+  }
+
+  private String fallbackSnapshotJson(SnapshotSeed seed) {
+    var values = new LinkedHashMap<String, String>();
+    values.put("报账点编码", seed.billingPointCode());
+    values.put("报账点名称", seed.billingPointName());
+    values.put("所属地市", seed.cityName());
+    values.put("所属区县", seed.districtCode());
+    values.put("报账点状态", seed.billingPointStatus());
+    return writeJson(values);
   }
 
   private String benchmarkSql() {
@@ -496,6 +578,18 @@ public class FormalImportTableWriter {
     }
   }
 
+  private Integer valueInteger(Map<String, String> values, String column) {
+    String raw = value(values, column);
+    if (raw == null || "-".equals(raw) || "?".equals(raw)) {
+      return null;
+    }
+    try {
+      return Integer.valueOf(raw.replace(",", ""));
+    } catch (RuntimeException exception) {
+      return null;
+    }
+  }
+
   private void setDate(PreparedStatement ps, int index, LocalDate value) throws SQLException {
     if (value == null) {
       ps.setDate(index, null);
@@ -508,4 +602,25 @@ public class FormalImportTableWriter {
       throws SQLException {
     ps.setBigDecimal(index, value);
   }
+
+  private void setInteger(PreparedStatement ps, int index, Integer value) throws SQLException {
+    if (value == null) {
+      ps.setNull(index, java.sql.Types.INTEGER);
+    } else {
+      ps.setInt(index, value);
+    }
+  }
+
+  private record SnapshotSeed(
+      String billingPointCode,
+      String billingPointName,
+      String cityCode,
+      String cityName,
+      String districtCode,
+      String billingPointStatus,
+      String dataJson,
+      long sourceImportJobId,
+      int sourceRowNo,
+      LocalDate periodStart,
+      LocalDate periodEnd) {}
 }

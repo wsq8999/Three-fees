@@ -9,11 +9,15 @@ import com.threefees.importing.application.ImportBatchRepository;
 import com.threefees.importing.application.ImportCommandService;
 import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
+import com.threefees.importing.domain.ImportBatchStatus;
 import com.threefees.task.application.BusinessTaskRepository;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Pattern;
 import java.net.URI;
+import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -72,6 +76,37 @@ public class ImportBatchController {
     ImportBatch batch = findBatch(publicId);
     requireScope(batch, actor);
     return ImportBatchResponse.from(batch);
+  }
+
+  @GetMapping("/session/latest")
+  public ImportSessionResponse latestSession(
+      @RequestParam(required = false) String cityCode, @AuthenticationPrincipal CurrentUser actor) {
+    String scope = scope(actor, cityCode);
+    var anchor = batchRepository.findLatestBatch(DatasetType.BILLING_POINT, scope);
+    if (anchor.isEmpty()) {
+      return ImportSessionResponse.from(
+          Arrays.stream(DatasetType.values())
+              .map(datasetType -> ImportSessionItemResponse.from(datasetType, List.of()))
+              .toList(),
+          null,
+          null);
+    }
+    LocalDateTime sessionStartedAt = anchor.get().createdAt();
+    List<ImportSessionItemResponse> items =
+        Arrays.stream(DatasetType.values())
+            .map(
+                datasetType -> {
+                  List<ImportBatch> sessionBatches =
+                      datasetType == DatasetType.BILLING_POINT
+                          ? List.of(anchor.get())
+                          : batchRepository.findLatestSession(
+                              datasetType, scope, sessionStartedAt);
+                  List<ImportBatchResponse> batches =
+                      sessionBatches.stream().map(ImportBatchResponse::from).toList();
+                  return ImportSessionItemResponse.from(datasetType, batches);
+                })
+            .toList();
+    return ImportSessionResponse.from(items, sessionStartedAt, DatasetType.BILLING_POINT.name());
   }
 
   @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -140,6 +175,62 @@ public class ImportBatchController {
   private void requireScope(ImportBatch batch, CurrentUser actor) {
     if (!actor.roles().contains(Role.SUPER_ADMIN) && !actor.cityCode().equals(batch.cityCode())) {
       throw new AccessDeniedException("Import batch is outside city scope");
+    }
+  }
+
+  public record ImportSessionResponse(
+      List<ImportSessionItemResponse> items,
+      boolean allCompleted,
+      List<DatasetType> successfulTypes,
+      List<DatasetType> runningTypes,
+      List<DatasetType> failedTypes,
+      LocalDateTime sessionStartedAt,
+      String sessionAnchorType) {
+    static ImportSessionResponse from(
+        List<ImportSessionItemResponse> items,
+        LocalDateTime sessionStartedAt,
+        String sessionAnchorType) {
+      return new ImportSessionResponse(
+          items,
+          items.stream().allMatch(item -> "SUCCESS".equals(item.status())),
+          items.stream()
+              .filter(item -> "SUCCESS".equals(item.status()))
+              .map(ImportSessionItemResponse::datasetType)
+              .toList(),
+          items.stream()
+              .filter(item -> "RUNNING".equals(item.status()))
+              .map(ImportSessionItemResponse::datasetType)
+              .toList(),
+          items.stream()
+              .filter(item -> "FAILED".equals(item.status()))
+              .map(ImportSessionItemResponse::datasetType)
+              .toList(),
+          sessionStartedAt,
+          sessionAnchorType);
+    }
+  }
+
+  public record ImportSessionItemResponse(
+      DatasetType datasetType, String status, List<ImportBatchResponse> batches) {
+    static ImportSessionItemResponse from(
+        DatasetType datasetType, List<ImportBatchResponse> batches) {
+      if (batches.isEmpty()) {
+        return new ImportSessionItemResponse(datasetType, "NOT_STARTED", batches);
+      }
+      if (batches.stream().allMatch(batch -> batch.status() == ImportBatchStatus.ACTIVE)) {
+        return new ImportSessionItemResponse(datasetType, "SUCCESS", batches);
+      }
+      if (batches.stream().anyMatch(batch -> batch.status() == ImportBatchStatus.FAILED)) {
+        return new ImportSessionItemResponse(datasetType, "FAILED", batches);
+      }
+      if (batches.stream()
+          .anyMatch(
+              batch ->
+                  batch.status() == ImportBatchStatus.QUEUED
+                      || batch.status() == ImportBatchStatus.PROCESSING)) {
+        return new ImportSessionItemResponse(datasetType, "RUNNING", batches);
+      }
+      return new ImportSessionItemResponse(datasetType, "SUPERSEDED", batches);
     }
   }
 }

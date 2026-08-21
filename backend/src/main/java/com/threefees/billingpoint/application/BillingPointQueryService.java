@@ -154,8 +154,11 @@ public class BillingPointQueryService {
         SELECT s.public_id, s.billing_point_code, s.billing_point_name, s.city_code,
                c.name AS city_name, s.data_period, s.period_start, s.period_end, s.data_json,
                a.payment_eligible, a.actual_energy, a.actual_amount, a.rated_benchmark_energy,
-               a.max_ratio, a.audit_status, a.over_limit_type,
-               d.public_id AS draft_id, r.public_id AS report_id, r.report_number
+               a.max_ratio, a.yoy_ratio, a.mom_ratio, a.rated_ratio,
+               a.audit_status, a.over_limit_type,
+               a.yoy_result, a.mom_result, a.rated_result,
+               d.public_id AS draft_id, d.analysis_status AS draft_analysis_status,
+               r.public_id AS report_id, r.report_number
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
@@ -196,7 +199,7 @@ public class BillingPointQueryService {
      *    完整保留原有排序逻辑：
      *      - 有 focusPeriod/focusCityCode 时，原焦点排序继续生效；
      *      - 然后按导入/更新时间倒序；
-     *      - 再按账期倒序、最大超标比例倒序等原规则排序。
+     *      - 再按账期倒序、最高超标比例倒序等原规则排序。
      *
      * 这样可以保证：
      * “有生成报告按钮的全部置顶 + 每个分组内部仍按原来的倒序逻辑”。
@@ -272,10 +275,13 @@ public class BillingPointQueryService {
         decimalString(resultSet.getBigDecimal("actual_amount")),
         decimalString(resultSet.getBigDecimal("rated_benchmark_energy")),
         decimalString(resultSet.getBigDecimal("max_ratio")),
+        overLimitRatios(resultSet),
         auditStatus,
         valueOr(resultSet.getString("over_limit_type"), "NONE"),
+        overLimitDisplayType(resultSet),
         reportStatus,
         resultSet.getString("draft_id"),
+        resultSet.getString("draft_analysis_status"),
         reportId,
         resultSet.getString("report_number"));
   }
@@ -471,7 +477,7 @@ public class BillingPointQueryService {
             null,
             null,
             "尚未生成同比稽核结果",
-            "本期实际用电与去年同月参考阈值比较"));
+            "本期实际用电与去年同月正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -484,7 +490,7 @@ public class BillingPointQueryService {
             null,
             null,
             "尚未生成环比稽核结果",
-            "本期实际用电与上一个自然月参考阈值比较"));
+            "本期实际用电与上一个自然月正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -537,7 +543,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("actual_energy"),
             resultSet.getBigDecimal("yoy_ratio"),
             resultSet.getString("yoy_na_reason"),
-            "本期实际用电与去年同月参考阈值比较"));
+            "本期实际用电与去年同月正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -550,7 +556,7 @@ public class BillingPointQueryService {
             resultSet.getBigDecimal("actual_energy"),
             resultSet.getBigDecimal("mom_ratio"),
             resultSet.getString("mom_na_reason"),
-            "本期实际用电与上一个自然月参考阈值比较"));
+            "本期实际用电与上一个自然月正常上限比较"));
 
     comparisons.add(
         comparison(
@@ -653,6 +659,47 @@ public class BillingPointQueryService {
       case "NONE" -> "未超标";
       default -> value;
     };
+  }
+
+  private String overLimitDisplayType(ResultSet resultSet) throws SQLException {
+    String overLimitType = resultSet.getString("over_limit_type");
+    if (!"MULTIPLE".equals(overLimitType)) {
+      return overLimitTypeLabel(overLimitType);
+    }
+
+    var labels = new ArrayList<String>();
+    if ("OVER_LIMIT".equals(resultSet.getString("yoy_result"))) {
+      labels.add("同比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("mom_result"))) {
+      labels.add("环比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("rated_result"))) {
+      labels.add("额定标杆");
+    }
+
+    return labels.isEmpty() ? "超标" : String.join("、", labels) + "超标";
+  }
+
+  private List<OverLimitRatio> overLimitRatios(ResultSet resultSet) throws SQLException {
+    var ratios = new ArrayList<OverLimitRatio>();
+    addOverLimitRatio(ratios, resultSet, "yoy_result", "yoy_ratio", "YOY", "同比");
+    addOverLimitRatio(ratios, resultSet, "mom_result", "mom_ratio", "MOM", "环比");
+    addOverLimitRatio(ratios, resultSet, "rated_result", "rated_ratio", "RATED", "额定标杆");
+    return ratios;
+  }
+
+  private void addOverLimitRatio(
+      List<OverLimitRatio> ratios,
+      ResultSet resultSet,
+      String resultColumn,
+      String ratioColumn,
+      String type,
+      String label)
+      throws SQLException {
+    if ("OVER_LIMIT".equals(resultSet.getString(resultColumn))) {
+      ratios.add(new OverLimitRatio(type, label, decimalString(resultSet.getBigDecimal(ratioColumn))));
+    }
   }
 
   private String difference(BigDecimal actual, BigDecimal baseline) {
@@ -797,12 +844,17 @@ public class BillingPointQueryService {
       String actualAmount,
       String benchmarkEnergy,
       String maxDeviationRate,
+      List<OverLimitRatio> overLimitRatios,
       String auditStatus,
       String overLimitType,
+      String overLimitDisplayType,
       String reportStatus,
       String draftId,
+      String draftAnalysisStatus,
       String reportId,
       String reportNumber) {}
+
+  public record OverLimitRatio(String type, String label, String ratio) {}
 
   public record CityValue(String code, String name) {}
 

@@ -4,7 +4,9 @@ import { useRoute, useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
-import { businessApi, formatPercent } from "@/api/business-api";
+import { businessApi } from "@/api/business-api";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type { DashboardData } from "@/types/business";
@@ -65,6 +67,10 @@ function asPendingTask(row: unknown): DashboardData["pendingTasks"][number] {
   return row as DashboardData["pendingTasks"][number];
 }
 
+function isTaskAiAnalyzing(task: DashboardData["pendingTasks"][number]): boolean {
+  return task.draftAnalysisStatus === "AI_ANALYZING";
+}
+
 async function load(period = selectedPeriod.value): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
@@ -103,6 +109,10 @@ async function changePeriod(): Promise<void> {
 
 async function openTask(task: DashboardData["pendingTasks"][number]): Promise<void> {
   if (openingTaskId.value !== null) return;
+  if (isTaskAiAnalyzing(task)) {
+    ElMessage.info("AI正在后台分析，完成或失败后可继续生成报告。");
+    return;
+  }
   if (!task.billingPointPeriodId) {
     ElMessage.error("该任务缺少报账点账期信息，请刷新工作台后重试。");
     return;
@@ -158,7 +168,7 @@ onMounted(load);
         <span class="stat-icon yellow"><Warning /></span>
         <div>
           <h3>超标报账点</h3>
-          <small>超标率：{{ overRate }}</small>
+          <small>超标占比：{{ overRate }}</small>
         </div>
         <strong class="orange">{{ dashboard.overLimitBillingPointCount }}</strong>
       </article>
@@ -192,101 +202,99 @@ onMounted(load);
           />
         </ElSelect>
       </header>
-      <ElTable
-        class="task-table"
-        :data="dashboard.pendingTasks"
-        height="310"
-        table-layout="fixed"
-      >
-        <ElTableColumn
-          prop="billingPointCode"
-          label="报账点编码"
-          width="145"
-          show-overflow-tooltip
-        />
-
-        <ElTableColumn
-          prop="billingPointName"
-          label="报账点名称"
-          min-width="160"
-          show-overflow-tooltip
-        />
-
-        <ElTableColumn
-          prop="county"
-          label="所属区县"
-          width="88"
-          show-overflow-tooltip
-        />
-
-        <ElTableColumn
-          prop="period"
-          label="账期"
-          width="88"
-        />
-
-        <ElTableColumn
-          label="实际报账金额"
-          width="112"
-          align="right"
+      <div class="task-table-scroll">
+        <ElTable
+          class="task-table"
+          :data="dashboard.pendingTasks"
+          height="310"
+          table-layout="auto"
         >
-          <template #default="scope">
-            ¥{{ scope.row.actualAmount }}
-          </template>
-        </ElTableColumn>
+          <ElTableColumn
+            prop="billingPointCode"
+            label="报账点编码"
+            width="210"
+          />
 
-        <ElTableColumn
-          label="超标类型"
-          width="118"
-          align="center"
-        >
-          <template #default="scope">
-            <ElTag
-              type="danger"
-              size="small"
-              class="task-overlimit-tag"
-            >
-              {{ scope.row.overLimitType }}
-            </ElTag>
-          </template>
-        </ElTableColumn>
+          <ElTableColumn
+            prop="billingPointName"
+            label="报账点名称"
+            min-width="220"
+          />
 
-        <ElTableColumn
-          label="最大超标比例"
-          width="108"
-          align="right"
-        >
-          <template #default="scope">
-            <b class="number-emphasis">
-              {{ formatPercent(scope.row.maximumRatio) }}
-            </b>
-          </template>
-        </ElTableColumn>
+          <ElTableColumn
+            prop="county"
+            label="所属区县"
+            width="100"
+          />
 
-        <ElTableColumn
-          label="操作"
-          width="86"
-          align="center"
-        >
-          <template #default="scope">
-            <ElButton
-              link
-              type="danger"
-              :loading="openingTaskId === scope.row.id"
-              :disabled="
-        openingTaskId !== null &&
-        openingTaskId !== scope.row.id
-      "
-              @click="openTask(asPendingTask(scope.row))"
-            >
-              生成报告
-            </ElButton>
+          <ElTableColumn
+            prop="period"
+            label="账期"
+            width="98"
+          />
+
+          <ElTableColumn
+            label="实际报账金额"
+            width="124"
+            align="right"
+          >
+            <template #default="scope">
+              ¥{{ scope.row.actualAmount }}
+            </template>
+          </ElTableColumn>
+
+          <ElTableColumn
+            label="超标类型"
+            min-width="150"
+            align="center"
+          >
+            <template #default="scope">
+              <OverLimitTypeTags
+                :ratios="scope.row.overLimitRatios"
+                :fallback="scope.row.overLimitType"
+              />
+            </template>
+          </ElTableColumn>
+
+          <ElTableColumn
+            label="超标比例"
+            min-width="230"
+          >
+            <template #default="scope">
+              <OverLimitRatioTags :ratios="scope.row.overLimitRatios" />
+            </template>
+          </ElTableColumn>
+
+          <ElTableColumn
+            label="操作"
+            width="104"
+            align="center"
+          >
+            <template #default="scope">
+              <ElButton
+                link
+                type="danger"
+                :loading="openingTaskId === scope.row.id"
+                :disabled="
+          isTaskAiAnalyzing(asPendingTask(scope.row)) ||
+          (openingTaskId !== null &&
+            openingTaskId !== scope.row.id)
+        "
+                @click="openTask(asPendingTask(scope.row))"
+              >
+                {{
+                  isTaskAiAnalyzing(asPendingTask(scope.row))
+                    ? "AI分析中"
+                    : "生成报告"
+                }}
+              </ElButton>
+            </template>
+          </ElTableColumn>
+          <template #empty>
+            <ElEmpty description="当前账期暂无待生成报告" />
           </template>
-        </ElTableColumn>
-        <template #empty>
-          <ElEmpty description="当前账期暂无待生成报告" />
-        </template>
-      </ElTable>
+        </ElTable>
+      </div>
     </section>
 
     <section class="chart-grid">
@@ -500,11 +508,8 @@ onMounted(load);
   color: #16a56f;
 }
 
-/*
- * ↓↓↓ 待生成报告任务区域保持用户当前代码的尺寸与表格风格，不再改动。 ↓↓↓
- */
 .task-card {
-  overflow: hidden;
+  overflow: visible;
   min-height: 388px;
   margin-bottom: 14px;
 }
@@ -536,10 +541,46 @@ onMounted(load);
 
 .number-emphasis {
   color: #f02f44;
+  white-space: nowrap;
+}
+
+.task-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.task-table-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+.task-table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.task-table-scroll::-webkit-scrollbar-thumb {
+  background: #d4dce7;
+  border-radius: 999px;
+}
+
+.task-table-scroll::-webkit-scrollbar-thumb:hover {
+  background: #b8c2d0;
+}
+
+.task-table {
+  min-width: 980px;
 }
 
 .task-table :deep(.el-table__cell) {
   padding: 7px 0;
+}
+
+.task-table :deep(.el-table),
+.task-table :deep(.el-table__inner-wrapper),
+.task-table :deep(.el-table__body-wrapper),
+.task-table :deep(.el-table__header-wrapper),
+.task-table :deep(.el-scrollbar__view) {
+  min-width: 980px;
 }
 
 .task-table :deep(.el-table__header .cell) {
@@ -555,17 +596,14 @@ onMounted(load);
   padding-left: 6px;
   font-size: 12px;
   line-height: 1.35;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .task-table :deep(.el-tag) {
-  max-width: 100%;
   padding: 0 5px;
   font-size: 11px;
-}
-
-.task-overlimit-tag {
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -783,7 +821,6 @@ onMounted(load);
 
 /*
  * 小屏：只继续压缩统计卡和图表内部，不把图表改成单列。
- * 待生成报告任务表保持当前代码，不在这里改它。
  */
 @media (width <= 1280px) {
   .stat-grid {

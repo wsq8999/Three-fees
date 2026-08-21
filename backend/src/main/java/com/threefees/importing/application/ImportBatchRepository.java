@@ -4,6 +4,7 @@ import com.threefees.importing.domain.DatasetType;
 import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportError;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -26,6 +27,11 @@ public interface ImportBatchRepository {
 
   List<ImportBatch> findPage(
       DatasetType datasetType, String period, String cityCode, int offset, int limit);
+
+  Optional<ImportBatch> findLatestBatch(DatasetType datasetType, String cityCode);
+
+  List<ImportBatch> findLatestSession(
+      DatasetType datasetType, String cityCode, LocalDateTime sessionStartedAt);
 
   long count(DatasetType datasetType, String period, String cityCode);
 

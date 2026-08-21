@@ -99,14 +99,14 @@ public class JdbcBusinessTaskRepository implements BusinessTaskRepository {
             this::map,
             limit);
     var claimed = new ArrayList<BusinessTask>();
-    LocalDateTime leaseExpiresAt = LocalDateTime.now().plus(leaseDuration);
     for (BusinessTask candidate : candidates) {
       int updated =
           jdbcTemplate.update(
               """
               UPDATE business_task
                  SET status = 'RUNNING', attempts = attempts + 1,
-                     lease_owner = ?, lease_expires_at = ?,
+                     lease_owner = ?,
+                     lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND),
                      updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
                WHERE id = ? AND version = ?
                  AND attempts < max_attempts
@@ -118,7 +118,7 @@ public class JdbcBusinessTaskRepository implements BusinessTaskRepository {
                  )
               """,
               leaseOwner,
-              leaseExpiresAt,
+              leaseDuration.toSeconds(),
               leaseOwner,
               candidate.id(),
               candidate.version());
@@ -134,11 +134,12 @@ public class JdbcBusinessTaskRepository implements BusinessTaskRepository {
     return jdbcTemplate.update(
             """
             UPDATE business_task
-               SET lease_expires_at = ?, updated_at = CURRENT_TIMESTAMP(3),
+               SET lease_expires_at = DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND),
+                   updated_at = CURRENT_TIMESTAMP(3),
                    updated_by = ?, version = version + 1
              WHERE id = ? AND status = 'RUNNING' AND lease_owner = ?
             """,
-            LocalDateTime.now().plus(leaseDuration),
+            leaseDuration.toSeconds(),
             task.leaseOwner(),
             task.id(),
             task.leaseOwner())
@@ -169,13 +170,18 @@ public class JdbcBusinessTaskRepository implements BusinessTaskRepository {
             """
         UPDATE business_task
            SET status = ?, error_code = ?,
-               next_run_at = ?, lease_owner = NULL, lease_expires_at = NULL,
+               next_run_at = CASE
+                 WHEN ? THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ? SECOND)
+                 ELSE NULL
+               END,
+               lease_owner = NULL, lease_expires_at = NULL,
                updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
          WHERE id = ? AND status = 'RUNNING' AND lease_owner = ?
         """,
             shouldRetry ? TaskStatus.RETRY_WAIT.name() : TaskStatus.FAILED.name(),
             errorCode,
-            shouldRetry ? LocalDateTime.now().plus(retryDelay) : null,
+            shouldRetry,
+            retryDelay.toSeconds(),
             task.leaseOwner(),
             task.id(),
             task.leaseOwner())
@@ -193,6 +199,31 @@ public class JdbcBusinessTaskRepository implements BusinessTaskRepository {
                    version = version + 1
              WHERE public_id = ? AND status = 'FAILED'
             """,
+            publicId)
+        == 1;
+  }
+
+  @Override
+  public boolean requeueWithPayload(String publicId, String payloadJson, String actor) {
+    return jdbcTemplate.update(
+            """
+            UPDATE business_task
+               SET status = 'QUEUED',
+                   attempts = 0,
+                   next_run_at = CURRENT_TIMESTAMP(3),
+                   lease_owner = NULL,
+                   lease_expires_at = NULL,
+                   payload_json = ?,
+                   result_json = NULL,
+                   error_code = NULL,
+                   updated_at = CURRENT_TIMESTAMP(3),
+                   updated_by = ?,
+                   version = version + 1
+             WHERE public_id = ?
+               AND status IN ('FAILED', 'SUCCEEDED')
+            """,
+            payloadJson,
+            actor,
             publicId)
         == 1;
   }

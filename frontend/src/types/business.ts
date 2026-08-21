@@ -28,6 +28,25 @@ export interface ImportBatch {
   errors: ImportErrorItem[];
 }
 
+export type ImportSessionItemStatus =
+  "NOT_STARTED" | "RUNNING" | "SUCCESS" | "FAILED" | "SUPERSEDED";
+
+export interface ImportSessionItem {
+  datasetType: DatasetType;
+  status: ImportSessionItemStatus;
+  batches: ImportBatch[];
+}
+
+export interface ImportSessionState {
+  items: ImportSessionItem[];
+  allCompleted: boolean;
+  successfulTypes: DatasetType[];
+  runningTypes: DatasetType[];
+  failedTypes: DatasetType[];
+  sessionStartedAt: string | null;
+  sessionAnchorType: DatasetType | null;
+}
+
 export interface CreateImportInput {
   datasetType: DatasetType;
   period?: string;
@@ -54,6 +73,12 @@ export type AuditStatus =
 
 export type ReportStatus = "NONE" | "DRAFT" | "FINAL" | "CORRECTED";
 
+export interface OverLimitRatio {
+  type: "YOY" | "MOM" | "RATED" | string;
+  label: string;
+  ratio: string | number | null;
+}
+
 export interface BusinessCity {
   code: string;
   name: string;
@@ -68,15 +93,16 @@ export interface PageResult<T> {
 }
 
 export interface BillingPointQuery {
-  code: string;
-  name: string;
+  keyword?: string;
+  code?: string;
+  name?: string;
   cityCode: string;
-  district: string;
+  district?: string;
   period: string;
   paymentEligible?: boolean;
-  billingPointStatus: string;
+  billingPointStatus?: string;
   auditStatus: AuditStatus | "";
-  reportStatus: ReportStatus | "";
+  reportStatus?: ReportStatus | "";
   focusPeriod?: string;
   focusCityCode?: string;
   page: number;
@@ -99,10 +125,13 @@ export interface BillingPointSummary {
   actualAmount?: string | number | null;
   benchmarkEnergy: string | null;
   deviationRate: string | null;
+  overLimitRatios: OverLimitRatio[];
   overLimitType?: string | null;
+  overLimitDisplayType?: string | null;
   auditStatus: AuditStatus;
   reportStatus: ReportStatus;
   draftId?: string | null;
+  draftAnalysisStatus?: "AI_ANALYZING" | string | null;
   reportId?: string | null;
   reportNumber?: string | null;
   periodStart?: string | null;
@@ -222,6 +251,8 @@ export interface DashboardData {
     actualAmount: string;
     overLimitType: string;
     maximumRatio: string;
+    overLimitRatios: OverLimitRatio[];
+    draftAnalysisStatus?: "AI_ANALYZING" | string | null;
   }>;
 }
 
@@ -253,7 +284,24 @@ export interface ReportDraft {
   period: string;
   overLimitType?: string | null;
   maxExceedRatio?: string | null;
-  status: "EDITING" | "GENERATING" | "FINALIZED";
+  overLimitRatios?: OverLimitRatio[];
+  status:
+    | "EDITING"
+    | "AI_ANALYZING"
+    | "AI_COMPLETED"
+    | "AI_FAILED"
+    | "GENERATING"
+    | "FINALIZED";
+  analysisStatus:
+    | "PENDING_ANALYSIS"
+    | "AI_ANALYZING"
+    | "AI_COMPLETED_PENDING_CONFIRMATION"
+    | "AI_FAILED"
+    | "FORMALIZED";
+  analysisTaskId: string | null;
+  analysisErrorCode: string | null;
+  analysisSubmittedAt: string | null;
+  analysisCompletedAt: string | null;
   blocks: DraftBlock[];
   imageFileIds: string[];
   messages: DraftMessage[];
@@ -269,6 +317,65 @@ export interface SendDraftMessageInput {
   imageFileIds?: string[];
 }
 
+export type AiTaskStatus =
+  | "QUEUED"
+  | "RUNNING"
+  | "RETRY_WAIT"
+  | "SUCCEEDED"
+  | "FAILED";
+
+export type AiTaskDraftStatus =
+  | "EDITING"
+  | "AI_ANALYZING"
+  | "AI_COMPLETED"
+  | "AI_FAILED"
+  | "FINALIZED";
+
+export interface AiTaskListQuery {
+  status?: AiTaskStatus | "";
+  billingPointName?: string;
+  cityName?: string;
+  period?: string;
+  page: number;
+  size: number;
+}
+
+export interface AiTaskSummary {
+  queued: number;
+  running: number;
+  retryWait: number;
+  completedPendingConfirmation: number;
+  failed: number;
+}
+
+export interface AiTaskListItem {
+  id: string;
+  type: "AI_IMAGE_ANALYSIS";
+  status: AiTaskStatus;
+  attempts: number;
+  maxAttempts: number;
+  errorCode: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  relatedDraftId: string | null;
+  relatedReportId: string | null;
+  billingPointName: string | null;
+  cityName: string | null;
+  period: string | null;
+  draftStatus: AiTaskDraftStatus;
+  canRetry: boolean;
+  retryBlockedReason?: string | null;
+}
+
+export interface AiTaskPage extends PageResult<AiTaskListItem> {
+  summary: AiTaskSummary;
+  filterOptions?: {
+    cityNames: string[];
+    periods: string[];
+  };
+}
+
 export interface ReportSummary {
   id: string;
   reportNumber: string;
@@ -278,6 +385,8 @@ export interface ReportSummary {
   city: BusinessCity;
   district?: string | null;
   period: string;
+  periodStart?: string | null;
+  periodEnd?: string | null;
   status: "FINAL" | "CORRECTED" | "HISTORICAL_IMPORTED";
   source: "SYSTEM" | "HISTORICAL_IMPORT";
   generatedAt: string;
@@ -287,6 +396,7 @@ export interface ReportSummary {
   actualAmount?: string | number | null;
   overLimitType?: string | null;
   maxRatio?: string | null;
+  overLimitRatios?: OverLimitRatio[];
   wordFileName: string;
   pdfFileName: string;
   pdfAvailable?: boolean;
@@ -312,6 +422,7 @@ export interface ReportGenerationCandidate {
   period: string;
   overLimitType?: string | null;
   maxExceedRatio?: string | null;
+  overLimitRatios?: OverLimitRatio[];
 }
 
 export interface ReportGenerationInitialContent {
@@ -351,6 +462,7 @@ export interface HistoricalReportPeriod {
   period: string;
   overLimitType?: string | null;
   maxRatio?: string | null;
+  overLimitRatios?: OverLimitRatio[];
 }
 
 export interface HistoricalReportCandidate {
@@ -362,16 +474,18 @@ export interface HistoricalReportCandidate {
   period: string;
   overLimitType?: string | null;
   maxRatio?: string | null;
+  overLimitRatios?: OverLimitRatio[];
 }
 
 export interface ReportQuery {
-  reportNumber: string;
-  billingPointCode: string;
-  billingPointName: string;
+  keyword?: string;
+  reportNumber?: string;
+  billingPointCode?: string;
+  billingPointName?: string;
 
   period: string;
   cityCode: string;
-  district: string;
+  district?: string;
 
   source: ReportSummary["source"] | "";
 

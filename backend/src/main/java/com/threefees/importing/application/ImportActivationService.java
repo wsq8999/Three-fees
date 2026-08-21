@@ -32,7 +32,7 @@ public class ImportActivationService {
     crossDatasetValidator.validate(batch, rows);
     formalImportTableWriter.replace(batch, rows);
     batchRepository.markSucceeded(batch, rows.size());
-    if (batchRepository.allDatasetsActive(batch.period(), batch.cityCode())) {
+    if (batch.datasetType() != com.threefees.importing.domain.DatasetType.BILLING_POINT) {
       auditRecalculationService.recalculate(batch.period(), batch.cityCode(), affectedCodes(rows));
     }
   }

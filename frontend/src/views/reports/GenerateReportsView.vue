@@ -5,6 +5,8 @@ import { ArrowLeft, ChatLineRound, Download, Picture, Refresh } from "@element-p
 import { ElMessage } from "element-plus";
 
 import { businessApi, triggerBrowserDownload } from "@/api/business-api";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type { ReportGenerationCandidate, ReportGenerationImageInput } from "@/types/business";
@@ -43,8 +45,6 @@ const candidateOptions = computed(() =>
   })),
 );
 
-const overLimitType = computed(() => selected.value?.overLimitType ?? "—");
-const exceedRatio = computed(() => formatRatio(selected.value?.maxExceedRatio));
 const selectedOptionLabel = computed(
   () => candidateOptions.value.find((option) => option.key === selectedKey.value)?.label ?? "",
 );
@@ -62,14 +62,6 @@ const hasUnsavedContent = computed(
 
 function candidateKey(item: ReportGenerationCandidate): string {
   return `${item.billingPointCode}@@${item.period}`;
-}
-
-function formatRatio(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "—";
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) return `${numeric.toFixed(2)}%`;
-  const text = String(value);
-  return text.endsWith("%") ? text : `${text}%`;
 }
 
 function currentQueryTarget(): { billingPointCode: string; period: string } | null {
@@ -403,11 +395,14 @@ onMounted(load);
       </label>
       <div>
         <small>超标类型</small>
-        <strong>{{ overLimitType }}</strong>
+        <OverLimitTypeTags
+          :ratios="selected?.overLimitRatios"
+          :fallback="selected?.overLimitType"
+        />
       </div>
       <div>
-        <small>超标率</small>
-        <strong class="danger-text">{{ exceedRatio }}</strong>
+        <small>超标比例</small>
+        <OverLimitRatioTags :ratios="selected?.overLimitRatios" />
       </div>
     </section>
 
@@ -813,7 +808,7 @@ onMounted(load);
   }
 
   /*
-   * 超标类型、超标率放第二行。
+   * 超标类型、超标比例放第二行。
    */
   .generation-head > div {
     min-width: 0;

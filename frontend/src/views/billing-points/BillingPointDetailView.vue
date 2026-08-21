@@ -256,6 +256,9 @@ const fullFields = computed(() => {
 });
 
 const canExport = computed(() => detail.value !== null);
+const aiAnalyzing = computed(
+  () => detail.value?.summary.draftAnalysisStatus === "AI_ANALYZING",
+);
 const canGenerateReport = computed(
   () =>
     detail.value?.summary.auditStatus === "OVER_LIMIT" &&
@@ -569,9 +572,9 @@ function auditLabel(key: AuditComparison["key"]): string {
 
 function auditReasonByKey(key: AuditComparison["key"]): string {
   const labels: Record<AuditComparison["key"], string> = {
-    YEAR_ON_YEAR: "固定对比去年同月，按参考日均和标杆修正系数计算阈值",
-    MONTH_ON_MONTH: "固定对比上一个自然月，按参考日均和标杆修正系数计算阈值",
-    RATED_BENCHMARK: "对比当月日标杆合计",
+    YEAR_ON_YEAR: "固定对比去年同月，按参考日均和标杆修正系数计算正常上限",
+    MONTH_ON_MONTH: "固定对比上一个自然月，按参考日均和标杆修正系数计算正常上限",
+    RATED_BENCHMARK: "对比系统计算后的当月标杆总量正常上限，缺失时回退日列合计",
   };
   return labels[key];
 }
@@ -622,6 +625,10 @@ async function goBack(): Promise<void> {
 
 async function openGenerateReport(): Promise<void> {
   if (detail.value === null) return;
+  if (aiAnalyzing.value) {
+    ElMessage.info("AI正在后台分析，完成或失败后可继续生成报告。");
+    return;
+  }
   const draft = await businessApi.drafts.createOrResume(detail.value.summary.id);
   await router.push({
     name: "report-draft",
@@ -855,7 +862,7 @@ onMounted(load);
             <ElTableColumn prop="label" label="分析类型" width="110" />
             <ElTableColumn prop="referencePeriod" label="参考账期" width="110" />
             <ElTableColumn prop="baseline" label="参考电量" width="130" />
-            <ElTableColumn prop="threshold" label="判定阈值" width="130" />
+            <ElTableColumn prop="threshold" label="正常上限" width="130" />
             <ElTableColumn prop="actual" label="本期实际" width="130" />
             <ElTableColumn label="结果" width="100">
               <template #default="scope">
@@ -889,7 +896,14 @@ onMounted(load);
       <ElButton :icon="Download" :disabled="!canExport" @click="exportVisible = true">
         导出Excel
       </ElButton>
-      <ElButton v-if="canGenerateReport" type="primary" @click="openGenerateReport">生成报告</ElButton>
+      <ElButton
+        v-if="canGenerateReport"
+        type="primary"
+        :disabled="aiAnalyzing"
+        @click="openGenerateReport"
+      >
+        {{ aiAnalyzing ? "AI分析中" : "生成报告" }}
+      </ElButton>
       <ElButton v-else-if="canViewReport" type="primary" @click="openReport">查看报告</ElButton>
     </footer>
 

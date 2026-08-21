@@ -35,6 +35,9 @@ const breadcrumbItems = computed(() => {
   if (route.name === "report-detail") {
     return ["稽核报告管理", "历史报告", "报告详情"];
   }
+  if (String(route.path).startsWith("/reports/")) {
+    return ["稽核报告管理", breadcrumbTitle.value];
+  }
   return [breadcrumbTitle.value];
 });
 

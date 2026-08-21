@@ -230,9 +230,9 @@ function comparisons(
       ratio: year.overLimit ? formatRatio(year.ratio) : null,
       reason: !year.applicable
         ? "A/B/C 缺失、参考月不合格或 B≤0，同比不适用"
-        : `C=${formatNumber(year.referenceDaily)}，A=${formatNumber(year.a)}，B=${formatNumber(year.b)}，K=${formatNumber(year.k, 4)}，阈值=${formatNumber(year.threshold)}`,
+        : `C=${formatNumber(year.referenceDaily)}，A=${formatNumber(year.a)}，B=${formatNumber(year.b)}，K=${formatNumber(year.k, 4)}，正常上限=${formatNumber(year.threshold)}`,
       formula:
-        "C=上年同月合格参考月日均；A=本月标杆总量÷本月自然日；B=参考月标杆总量÷参考月自然日；K=max(1,A/B)；阈值=C×K×1.20；当前日均>阈值则超标",
+        "C=上年同月合格参考月日均；A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
     },
     {
       key: "MONTH_ON_MONTH",
@@ -254,9 +254,9 @@ function comparisons(
       ratio: month.overLimit ? formatRatio(month.ratio) : null,
       reason: !month.applicable
         ? "找不到最近合格参考月、A/B/C 缺失或 B≤0，环比不适用"
-        : `最近合格参考月：C=${formatNumber(month.referenceDaily)}，A=${formatNumber(month.a)}，B=${formatNumber(month.b)}，K=${formatNumber(month.k, 4)}，阈值=${formatNumber(month.threshold)}`,
+        : `最近合格参考月：C=${formatNumber(month.referenceDaily)}，A=${formatNumber(month.a)}，B=${formatNumber(month.b)}，K=${formatNumber(month.k, 4)}，正常上限=${formatNumber(month.threshold)}`,
       formula:
-        "C=当前月之前最近合格自然月日均；A=本月标杆月平均；B=参考月标杆月平均；K=max(1,A/B)；阈值=C×K×1.20；当前日均>阈值则超标",
+        "C=当前月之前最近合格自然月日均；A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
     },
     {
       key: "RATED_BENCHMARK",
@@ -278,8 +278,8 @@ function comparisons(
         ? "当月日标杆不完整，额定标杆不适用"
         : benchmarkTotal === 0
           ? actualTotal === 0
-            ? "阈值为 0 且实际为 0，结果正常"
-            : "阈值为 0 且实际大于 0，结果超标；比例不显示无穷数"
+            ? "正常上限为 0 且实际为 0，结果正常"
+            : "正常上限为 0 且实际大于 0，结果超标；比例不显示无穷数"
           : ratedOver
             ? "实际总耗电量高于当月 1 日至月末日标杆值之和"
             : "实际总耗电量未超过当月日标杆值之和",
@@ -329,6 +329,13 @@ function makeBillingPoint(
       actualEnergy: actual,
       benchmarkEnergy: benchmark,
       deviationRate: deviation,
+      overLimitRatios:
+        status === "OVER_LIMIT"
+          ? [
+              { type: "YOY", label: "同比", ratio: "11.74" },
+              { type: "RATED", label: "额定标杆", ratio: "8.12" },
+            ]
+          : [],
       auditStatus: status,
       reportStatus: index === 1 ? "FINAL" : index === 2 ? "DRAFT" : "NONE",
     },
@@ -580,12 +587,12 @@ function makeBillingPoint(
       finalStatus: status,
       finalReason:
         status === "OVER_LIMIT"
-          ? "同比与额定标杆均超出阈值，最终判定为额定标杆超标"
+          ? "同比与额定标杆均超出正常上限，最终判定为额定标杆超标"
           : status === "PENDING_REVIEW"
             ? "存在待审核缴费明细，暂不形成最终结论"
             : status === "NOT_APPLICABLE"
               ? "关键比较基线缺失，本期不适用"
-              : "三项比较均未超出阈值",
+              : "三项比较均未超出正常上限",
       ruleVersion: "audit-rule-v2026.1",
       calculatedAt: FIXED_TIME,
       eligibilityReason: eligible
@@ -686,7 +693,7 @@ function initialDraft(): ReportDraft {
       id: "block-3",
       type: "ANALYSIS",
       title: "审计分析",
-      content: "同比与额定标杆比较均超过规则阈值，建议结合设备运行时长复核。",
+      content: "同比与额定标杆比较均超过正常上限，建议结合设备运行时长复核。",
     },
     {
       id: "block-4",
@@ -701,6 +708,11 @@ function initialDraft(): ReportDraft {
     billingPointName: "南京科创园",
     period: "2026-06",
     status: "EDITING",
+    analysisStatus: "PENDING_ANALYSIS",
+    analysisTaskId: null,
+    analysisErrorCode: null,
+    analysisSubmittedAt: null,
+    analysisCompletedAt: null,
     blocks,
     imageFileIds: [],
     messages: [],
@@ -833,17 +845,17 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     version: "audit-rule-v2026.1",
     description: "以上一年度同自然月的合格日均电量为 C，并按标杆变化系数上浮。",
     formula:
-      "A=本月标杆总量÷本月自然日；B=上年同月标杆总量÷参考月自然日；K=max(1,A/B)；同比阈值=C×K×1.20",
+      "A=本月标杆日列合计÷本月自然日；B=上年同月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20",
     chain: [
       "筛选上年同月合格参考月 C",
       "计算 A/B 与 K=max(1,A/B)",
-      "计算阈值 C×K×1.20",
-      "当前日均大于阈值则超标",
+      "计算正常上限 C×K×1.20",
+      "当前日均大于正常上限则超标",
     ],
     example: [
       { label: "参考月日均 C", value: "260.00 kWh/天" },
       { label: "调整系数 K", value: "1.1500" },
-      { label: "阈值", value: "358.80 kWh/天（超标）" },
+      { label: "正常上限", value: "358.80 kWh/天（超标）" },
     ],
     boundaries: [
       "A/B/C 任一缺失或 B≤0 时不适用",
@@ -858,17 +870,17 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     version: "audit-rule-v2026.1",
     description: "向前寻找结束日最近的合格自然月，不强制固定上一月。",
     formula:
-      "A=本月标杆月平均；B=参考月标杆月平均；K=max(1,A/B)；环比阈值=C×K×1.20",
+      "A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20",
     chain: [
       "向前查找最近合格自然月 C",
       "计算 A/B 与 K=max(1,A/B)",
-      "计算阈值 C×K×1.20",
-      "当前日均大于阈值则超标",
+      "计算正常上限 C×K×1.20",
+      "当前日均大于正常上限则超标",
     ],
     example: [
       { label: "参考月日均 C", value: "354.84 kWh/天" },
       { label: "调整系数 K", value: "1.0000" },
-      { label: "阈值", value: "425.81 kWh/天（正常）" },
+      { label: "正常上限", value: "425.81 kWh/天（正常）" },
     ],
     boundaries: [
       "A/B/C 任一缺失或 B≤0 时不适用",
@@ -897,8 +909,8 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     ],
     boundaries: [
       "日标杆不完整时不适用",
-      "阈值为0且实际为0时正常",
-      "阈值为0且实际>0时超标且比例不显示无穷数",
+      "正常上限为0且实际为0时正常",
+      "正常上限为0且实际>0时超标且比例不显示无穷数",
     ],
     snapshotNote: "报告始终展示生成时使用的规则版本，不随规则说明变化而回写。",
   },
@@ -1199,6 +1211,10 @@ export function createScenarioStore(): ScenarioStore {
             actualAmount: "8564.28",
             overLimitType: "多项超标",
             maximumRatio: "23.32%",
+            overLimitRatios: [
+              { type: "YOY", label: "同比", ratio: "23.32" },
+              { type: "RATED", label: "额定标杆", ratio: "12.08" },
+            ],
           },
           {
             id: "task-2",
@@ -1214,12 +1230,16 @@ export function createScenarioStore(): ScenarioStore {
             actualAmount: "8564.28",
             overLimitType: "多项超标",
             maximumRatio: "23.32%",
+            overLimitRatios: [
+              { type: "YOY", label: "同比", ratio: "23.32" },
+              { type: "RATED", label: "额定标杆", ratio: "12.08" },
+            ],
           },
         ],
       };
     },
     listBillingPoints(query) {
-      const keyword = query.keyword.trim().toLowerCase();
+      const keyword = (query.keyword ?? "").trim().toLowerCase();
       const filtered = state.billingPoints
         .map((item) => item.summary)
         .filter(
@@ -1276,30 +1296,60 @@ export function createScenarioStore(): ScenarioStore {
       } else if (resolvedIntent === "IMAGE_ANALYSIS") {
         if (input.imageNames.length === 0)
           throw new Error("DRAFT_IMAGE_REQUIRED");
-        const imageName = input.imageNames[0] ?? "现场图片";
-        draft.blocks.push({
-          id: `block-${++sequence}`,
-          type: "IMAGE",
-          title: "现场图片分析",
-          content: `${input.content}：已识别设备运行标识与现场环境，建议人工复核。`,
-          imageName,
-        });
+        draft.status = "AI_ANALYZING";
+        draft.analysisStatus = "AI_ANALYZING";
+        draft.analysisTaskId = `mock-ai-task-${++sequence}`;
+        draft.analysisErrorCode = null;
+        draft.analysisSubmittedAt = now();
+        draft.analysisCompletedAt = null;
         touchDraft(draft);
+        const taskId = draft.analysisTaskId;
+        window.setTimeout(() => {
+          const latest = state.drafts.find((item) => item.id === id);
+          if (
+            latest === undefined ||
+            latest.analysisTaskId !== taskId ||
+            latest.status !== "AI_ANALYZING"
+          )
+            return;
+          const imageName = input.imageNames[0] ?? "现场图片";
+          latest.blocks.push({
+            id: `block-${++sequence}`,
+            type: "IMAGE",
+            title: "现场图片分析",
+            content: `${input.content}：已识别设备运行标识与现场环境，建议人工复核。`,
+            imageName,
+          });
+          latest.messages.push({
+            id: `message-${++sequence}`,
+            role: "ASSISTANT",
+            intent: resolvedIntent,
+            content: "已加入现场图片分析块。",
+            imageNames: [],
+            createdAt: now(),
+          });
+          latest.status = "AI_COMPLETED";
+          latest.analysisStatus = "AI_COMPLETED_PENDING_CONFIRMATION";
+          latest.analysisCompletedAt = now();
+          touchDraft(latest);
+        }, 1500);
       }
       const answer =
         resolvedIntent === "ASK"
           ? "根据归档审计输入，超标主要来自本期实际总电量高于同比与额定标杆基线；问答未修改正文。"
           : resolvedIntent === "EDIT"
             ? "已按要求更新整改建议。"
-            : "已加入现场图片分析块。";
-      draft.messages.push({
-        id: `message-${++sequence}`,
-        role: "ASSISTANT",
-        intent: resolvedIntent,
-        content: answer,
-        imageNames: [],
-        createdAt: now(),
-      });
+            : "AI分析任务已提交，可留在当前页等待，也可返回列表继续处理其他报账点。";
+      if (resolvedIntent !== "IMAGE_ANALYSIS") {
+        draft.messages.push({
+          id: `message-${++sequence}`,
+          role: "ASSISTANT",
+          intent: resolvedIntent,
+          content: answer,
+          imageNames: [],
+          createdAt: now(),
+        });
+      }
       return clone(draft);
     },
     generateFormalReport(draftId) {
@@ -1341,11 +1391,12 @@ export function createScenarioStore(): ScenarioStore {
       return clone(report);
     },
     listReports(query) {
-      const keyword = query.keyword.trim().toLowerCase();
+      const keyword = (query.keyword ?? "").trim().toLowerCase();
       const filtered = state.reports.filter(
         (item) =>
           (query.cityCode.length === 0 || item.city.code === query.cityCode) &&
-          (query.district.length === 0 || item.district === query.district) &&
+          ((query.district ?? "").length === 0 ||
+            item.district === query.district) &&
           (query.period.length === 0 || item.period === query.period) &&
           (query.source.length === 0 || item.source === query.source) &&
           (keyword.length === 0 ||

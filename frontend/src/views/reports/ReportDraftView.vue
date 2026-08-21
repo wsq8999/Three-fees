@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Picture, Promotion } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import type { DraftBlock, ReportDraft } from "@/types/business";
 import { standardConfirm } from "@/utils/message-box";
@@ -32,12 +34,40 @@ const pendingImageIds = ref<string[]>([]);
 const uploadingImages = ref(false);
 let saveInFlight: Promise<boolean> | null = null;
 let imageRemovalInFlight: Promise<boolean> | null = null;
+let analysisPollTimer: ReturnType<typeof window.setTimeout> | null = null;
+let analysisPolling = false;
 
 const allImageIds = computed(() =>
   Array.from(
     new Set([...(draft.value?.imageFileIds ?? []), ...pendingImageIds.value]),
   ),
 );
+
+const draftEditable = computed(
+  () =>
+    draft.value !== null &&
+    ["EDITING", "AI_COMPLETED", "AI_FAILED"].includes(draft.value.status),
+);
+
+const aiAnalyzing = computed(() => draft.value?.status === "AI_ANALYZING");
+
+const AI_ANALYSIS_ERROR_MESSAGES: Record<string, string> = {
+  AI_IMAGE_ANALYSIS_FAILED:
+    "AI图片分析失败，请检查密钥配置或稍后重新分析。",
+  KIMI_AUTH_FAILED: "Kimi 密钥无效或无权限，请检查 KIMI_API_KEY。",
+  KIMI_MODEL_UNAVAILABLE: "Kimi 模型不可用，请检查 KIMI_MODEL 配置。",
+  KIMI_TIMEOUT: "Kimi 调用超时，请稍后重新分析。",
+  KIMI_IMAGE_INVALID: "图片过大或格式不支持，请减少图片数量或重新粘贴。",
+  AI_RESPONSE_INVALID: "Kimi 返回内容格式不符合要求，请重新分析。",
+};
+
+function analysisErrorMessage(errorCode: string | null | undefined): string {
+  if (!errorCode) return "正文和图片已保留，可重新分析。";
+  return (
+    AI_ANALYSIS_ERROR_MESSAGES[errorCode] ??
+    "AI图片分析失败，正文和图片已保留，可重新分析。"
+  );
+}
 
 const chineseNumbers = ["一", "二", "三", "四", "五", "六", "七", "八"];
 
@@ -67,14 +97,6 @@ const billingPointLabel = computed(() => {
     .filter((value): value is string => Boolean(value))
     .join(" ｜ ");
 });
-
-function formatRatio(value: string | number | null | undefined): string {
-  if (value === null || value === undefined || value === "") return "—";
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) return `${numeric.toFixed(2)}%`;
-  const text = String(value);
-  return text.endsWith("%") ? text : `${text}%`;
-}
 
 function looksLikeHtml(value: string): boolean {
   return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(
@@ -126,8 +148,19 @@ function updateBlock(block: DraftBlock, content: string): void {
   if (target !== undefined) target.content = content;
 }
 
+function editableContentForBlock(block: DraftBlock, element: HTMLElement): string {
+  if (block.type === "HEADING") {
+    return element.querySelector("[data-file-id]") === null
+      ? element.innerText.trim()
+      : element.innerHTML.trim();
+  }
+  return element.innerHTML.trim();
+}
+
 function syncReportContentFromDom(): void {
   if (draft.value === null) return;
+  const root = reportEditorRoot();
+  if (root !== null) prepareInlineImagesForPersistence(root);
   if (htmlReportBlock.value !== null && htmlReportRef.value !== undefined) {
     updateBlock(htmlReportBlock.value, htmlReportRef.value.innerHTML.trim());
     return;
@@ -139,12 +172,7 @@ function syncReportContentFromDom(): void {
       const id = element.dataset.blockId;
       const block = draft.value?.blocks.find((item) => item.id === id);
       if (block !== undefined) {
-        updateBlock(
-          block,
-          block.type === "HEADING"
-            ? element.innerText.trim()
-            : element.innerHTML.trim(),
-        );
+        updateBlock(block, editableContentForBlock(block, element));
       }
     });
 }
@@ -153,7 +181,7 @@ async function saveDraft(showSuccess = false): Promise<boolean> {
   if (imageRemovalInFlight !== null && !(await imageRemovalInFlight)) {
     return false;
   }
-  if (draft.value === null || draft.value.status !== "EDITING") return false;
+  if (draft.value === null || !draftEditable.value) return false;
   if (saveInFlight !== null) return saveInFlight;
   syncReportContentFromDom();
   const inlineIdsAtSave = new Set(inlineImageIdsFromDom());
@@ -199,6 +227,59 @@ async function waitForPendingSave(): Promise<boolean> {
   return saveInFlight === null ? true : saveInFlight;
 }
 
+function stopAnalysisPolling(): void {
+  if (analysisPollTimer !== null) {
+    window.clearTimeout(analysisPollTimer);
+    analysisPollTimer = null;
+  }
+}
+
+function scheduleAnalysisPolling(delayMs = 3000): void {
+  if (!aiAnalyzing.value) {
+    stopAnalysisPolling();
+    return;
+  }
+  if (analysisPollTimer !== null) return;
+  analysisPollTimer = window.setTimeout(() => {
+    analysisPollTimer = null;
+    void pollAnalysisDraft();
+  }, delayMs);
+}
+
+function syncAnalysisPolling(): void {
+  if (aiAnalyzing.value) scheduleAnalysisPolling();
+  else stopAnalysisPolling();
+}
+
+async function pollAnalysisDraft(): Promise<void> {
+  if (draft.value === null || !aiAnalyzing.value || analysisPolling) {
+    syncAnalysisPolling();
+    return;
+  }
+  analysisPolling = true;
+  const draftId = draft.value.id;
+  const previousStatus = draft.value.status;
+  try {
+    const loaded = await businessApi.drafts.get(draftId);
+    if (loaded === undefined || draft.value?.id !== draftId) return;
+    draft.value = loaded;
+    await renderMissingInlineImages();
+    if (previousStatus === "AI_ANALYZING" && loaded.status === "AI_COMPLETED") {
+      ElMessage.success("AI分析完成，待人工确认。");
+    } else if (
+      previousStatus === "AI_ANALYZING" &&
+      loaded.status === "AI_FAILED"
+    ) {
+      ElMessage.error(analysisErrorMessage(loaded.analysisErrorCode));
+    }
+  } catch {
+    // Keep polling quietly; the next successful request will reconcile state.
+  } finally {
+    analysisPolling = false;
+    syncAnalysisPolling();
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
@@ -208,7 +289,7 @@ async function load(): Promise<void> {
     draft.value = loaded;
     assistantVisible.value = true;
     if (route.query.action === "image") {
-      ElMessage.info("可直接在左侧“排查分析”粘贴图片，再点击“分析全部图片”。");
+      ElMessage.info("可直接在左侧报告正文任意位置粘贴图片，再点击“分析全部图片”。");
     }
   } catch (error) {
     errorMessage.value =
@@ -217,6 +298,7 @@ async function load(): Promise<void> {
     loading.value = false;
   }
   if (draft.value !== null) await renderMissingInlineImages();
+  syncAnalysisPolling();
 }
 
 async function send(
@@ -250,6 +332,7 @@ async function send(
       draft.value.entityVersion,
     );
     await renderMissingInlineImages();
+    syncAnalysisPolling();
     prompt.value = "";
     if (intent !== "IMAGE_ANALYSIS") assistantIntent.value = "AUTO";
     pendingImageIds.value = pendingImageIds.value.filter(
@@ -294,7 +377,9 @@ async function pasteImages(event: ClipboardEvent): Promise<void> {
           marker.remove();
           continue;
         }
-        marker.replaceWith(createInlineImage(fileId));
+        const spacer = createInlineImageSpacer();
+        marker.replaceWith(createInlineImage(fileId), spacer);
+        placeCaretAfter(spacer);
         uploadedCount++;
       } catch (error) {
         marker.remove();
@@ -367,8 +452,25 @@ function createInlineImage(fileId: string): HTMLElement {
   image.alt = "稽核证据图片";
   image.dataset.fileId = fileId;
   image.draggable = false;
+  attachImageFallback(image);
   figure.append(image);
   return figure;
+}
+
+function createInlineImageSpacer(): HTMLBRElement {
+  const spacer = document.createElement("br");
+  spacer.dataset.inlineImageSpacer = "true";
+  return spacer;
+}
+
+function placeCaretAfter(node: Node): void {
+  const selection = window.getSelection();
+  if (selection === null) return;
+  const range = document.createRange();
+  range.setStartAfter(node);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 async function addImages(files: File[]): Promise<string[]> {
@@ -412,8 +514,15 @@ async function analyzeAllImages(): Promise<void> {
     return;
   }
   if (sending.value) return;
-  if (draft.value === null || allImageIds.value.length === 0) {
-    ElMessage.warning("请先在左侧排查分析中粘贴图片。");
+  if (draft.value === null) return;
+  syncReportContentFromDom();
+  let imageIds = inlineImageIdsFromDom();
+  if (imageIds.length === 0) {
+    ElMessage.warning("请先在左侧报告正文中粘贴图片。");
+    return;
+  }
+  if (aiAnalyzing.value) {
+    ElMessage.info("AI正在后台分析，请稍后再提交。");
     return;
   }
   const saved = await saveDraft(false);
@@ -421,33 +530,111 @@ async function analyzeAllImages(): Promise<void> {
     assistantError.value = "当前报告尚未保存，已停止图片分析。";
     return;
   }
+  await syncInlineImageOrder();
+  imageIds = inlineImageIdsFromDom();
+  if (imageIds.length === 0) {
+    ElMessage.warning("请先在左侧报告正文中粘贴图片。");
+    return;
+  }
   const previousPrompt = prompt.value;
   prompt.value =
-    "逐张分析当前报告中的全部图片，结合系统事实和历史案例重写完整报告。";
-  const succeeded = await send("IMAGE_ANALYSIS", pendingImageIds.value);
+    "按真实电费稽核说明生成；仅在排查分析中为设备图、机房图上方补充简短说明，格式为“说明文字：”后紧跟图片；情况说明和其他类型图片不加说明；正文只写业务判断，不写同点历史、本市经验、外市参考等内部来源话术。";
+  const succeeded = await send("IMAGE_ANALYSIS", imageIds);
   if (succeeded) {
-    ElMessage.success("全部图片已分析，左侧已回显最新完整报告。");
+    ElMessage.success(
+      "AI分析任务已提交，可留在当前页等待，也可返回列表继续处理其他报账点。",
+    );
   } else {
     prompt.value = previousPrompt;
   }
 }
 
 function imageUrl(id: string): string {
-  return `/api/v1/files/${encodeURIComponent(id)}?inline=true`;
+  const draftId = draft.value?.id;
+  if (draftId === undefined) return `/api/v1/files/${encodeURIComponent(id)}?inline=true`;
+  return `/api/v1/report-drafts/${encodeURIComponent(draftId)}/images/${encodeURIComponent(id)}/content?inline=true`;
 }
 
-function inlineImageEditor(): HTMLElement | null {
+function attachImageFallback(image: HTMLImageElement): void {
+  image.onerror = () => {
+    const fileId = image.dataset.fileId;
+    if (fileId === undefined || image.dataset.usedGenericFallback === "true") return;
+    image.dataset.usedGenericFallback = "true";
+    image.src = `/api/v1/files/${encodeURIComponent(fileId)}?inline=true`;
+  };
+}
+
+function prepareInlineImagesForPersistence(root: HTMLElement): void {
+  root
+    .querySelectorAll<HTMLImageElement>("figure[data-file-id] img[data-used-generic-fallback]")
+    .forEach((image) => delete image.dataset.usedGenericFallback);
+}
+
+function normalizeInlineImageElements(root: HTMLElement): void {
+  root.querySelectorAll<HTMLImageElement>("img[data-file-id]").forEach((image) => {
+    const fileId = image.dataset.fileId;
+    if (fileId === undefined || fileId.length === 0) return;
+    image.src = imageUrl(fileId);
+    image.alt ||= "稽核证据图片";
+    image.draggable = false;
+    attachImageFallback(image);
+    let figure = image.closest("figure");
+    if (!(figure instanceof HTMLElement)) {
+      figure = document.createElement("figure");
+      image.replaceWith(figure);
+      figure.append(image);
+    }
+    figure.dataset.fileId = fileId;
+    figure.classList.add("inline-report-image");
+    figure.classList.remove("is-selected");
+    figure.contentEditable = "false";
+  });
+
+  root.querySelectorAll<HTMLElement>("figure[data-file-id]").forEach((figure) => {
+    const fileId = figure.dataset.fileId;
+    if (fileId === undefined || fileId.length === 0) return;
+    figure.classList.add("inline-report-image");
+    figure.classList.remove("is-selected");
+    figure.contentEditable = "false";
+    let image = figure.querySelector<HTMLImageElement>("img");
+    if (image === null) {
+      image = document.createElement("img");
+      figure.append(image);
+    }
+    image.src = imageUrl(fileId);
+    image.alt ||= "稽核证据图片";
+    image.dataset.fileId = fileId;
+    image.draggable = false;
+    delete image.dataset.usedGenericFallback;
+    attachImageFallback(image);
+  });
+  ensureInlineImageCaretTargets(root);
+}
+
+function ensureInlineImageCaretTargets(root: HTMLElement): void {
+  root
+    .querySelectorAll<HTMLElement>("figure.inline-report-image[data-file-id]")
+    .forEach((figure) => {
+      const next = figure.nextSibling;
+      if (
+        next instanceof HTMLBRElement &&
+        next.dataset.inlineImageSpacer === "true"
+      ) {
+        return;
+      }
+      figure.after(createInlineImageSpacer());
+    });
+}
+
+function defaultInlineImageContainer(): HTMLElement | null {
   if (htmlReportBlock.value !== null) return htmlReportRef.value ?? null;
-  const analysisBlock = draft.value?.blocks.find(
-    (block) => block.type === "ANALYSIS",
+  if (reportPaperRef.value === undefined) return null;
+  const editableBlocks = Array.from(
+    reportPaperRef.value.querySelectorAll<HTMLElement>(
+      ".editable-report-block[data-block-id]",
+    ),
   );
-  if (analysisBlock === undefined || reportPaperRef.value === undefined)
-    return null;
-  return (
-    Array.from(
-      reportPaperRef.value.querySelectorAll<HTMLElement>("[data-block-id]"),
-    ).find((element) => element.dataset.blockId === analysisBlock.id) ?? null
-  );
+  return editableBlocks.at(-1) ?? reportPaperRef.value;
 }
 
 function reportEditorRoot(): HTMLElement | null {
@@ -457,17 +644,26 @@ function reportEditorRoot(): HTMLElement | null {
 function inlineImageIdsFromDom(): string[] {
   const root = reportEditorRoot();
   if (root === null) return [];
-  return Array.from(root.querySelectorAll<HTMLElement>("figure[data-file-id]"))
-    .map((element) => element.dataset.fileId)
-    .filter((value): value is string => value !== undefined);
+  return Array.from(
+    new Set(
+      Array.from(
+        root.querySelectorAll<HTMLElement>(
+          "figure[data-file-id], img[data-file-id]",
+        ),
+      )
+        .map((element) => element.dataset.fileId)
+        .filter((value): value is string => value !== undefined),
+    ),
+  );
 }
 
 async function renderMissingInlineImages(): Promise<void> {
   await nextTick();
-  const editor = inlineImageEditor();
+  const defaultContainer = defaultInlineImageContainer();
   const root = reportEditorRoot();
-  if (editor === null || root === null) return;
+  if (defaultContainer === null || root === null) return;
   root.querySelectorAll("figcaption").forEach((caption) => caption.remove());
+  normalizeInlineImageElements(root);
   const unassignedImages = Array.from(root.querySelectorAll("img")).filter(
     (image) =>
       image.dataset.fileId === undefined &&
@@ -492,11 +688,12 @@ async function renderMissingInlineImages(): Promise<void> {
       figure.classList.add("inline-report-image");
       figure.classList.remove("is-selected");
       figure.contentEditable = "false";
+      importedImage.src = imageUrl(fileId);
       importedImage.draggable = false;
       continue;
     }
-    editor.append(createInlineImage(fileId));
   }
+  normalizeInlineImageElements(root);
 }
 
 function selectInlineImage(event: MouseEvent): void {
@@ -626,6 +823,10 @@ async function generate(): Promise<void> {
     ElMessage.info("当前报告仍在处理或保存，请完成后再确认生成。");
     return;
   }
+  if (aiAnalyzing.value) {
+    ElMessage.info("AI正在后台分析，请稍后再确认正式报告。");
+    return;
+  }
   syncReportContentFromDom();
   try {
     await standardConfirm(
@@ -681,6 +882,7 @@ async function goBack(): Promise<void> {
 }
 
 onMounted(load);
+onUnmounted(stopAnalysisPolling);
 </script>
 
 <template>
@@ -701,24 +903,54 @@ onMounted(load);
       </div>
       <div>
         <small>超标类型</small>
-        <strong>{{ draft.overLimitType ?? "—" }}</strong>
+        <OverLimitTypeTags
+          :ratios="draft.overLimitRatios"
+          :fallback="draft.overLimitType"
+        />
       </div>
       <div>
-        <small>超标率</small>
-        <strong class="danger-text">{{
-          formatRatio(draft.maxExceedRatio)
-        }}</strong>
+        <small>超标比例</small>
+        <OverLimitRatioTags :ratios="draft.overLimitRatios" />
       </div>
     </section>
 
+    <ElAlert
+      v-if="draft.status === 'AI_ANALYZING'"
+      class="draft-analysis-alert"
+      type="info"
+      title="AI正在后台分析"
+      :closable="false"
+      show-icon
+    />
+
+    <ElAlert
+      v-else-if="draft.status === 'AI_COMPLETED'"
+      class="draft-analysis-alert"
+      type="success"
+      title="AI分析完成，待人工确认"
+      description="请继续检查和修改工作稿，满意后再确认报告并导出 Word。"
+      :closable="false"
+      show-icon
+    />
+
+    <ElAlert
+      v-else-if="draft.status === 'AI_FAILED'"
+      class="draft-analysis-alert"
+      type="error"
+      title="AI分析失败"
+      :description="analysisErrorMessage(draft.analysisErrorCode)"
+      :closable="false"
+      show-icon
+    />
+
     <div
-      class="draft-workspace draft-workspace-flow"
+      class="draft-workspace"
       :class="{ 'assistant-open': assistantVisible }"
     >
       <article
         v-if="htmlReportBlock"
         ref="htmlReportRef"
-        class="report-paper report-paper-flow html-report-paper business-card"
+        class="report-paper html-report-paper business-card"
         aria-label="可编辑报告正文"
         contenteditable="true"
         spellcheck="false"
@@ -732,7 +964,7 @@ onMounted(load);
       <article
         v-else
         ref="reportPaperRef"
-        class="report-paper report-paper-flow business-card"
+        class="report-paper business-card"
         aria-label="可编辑报告正文"
       >
         <h1
@@ -740,10 +972,12 @@ onMounted(load);
           :data-block-id="headingBlock.id"
           contenteditable="true"
           spellcheck="false"
+          v-html="editableBlockHtml(headingBlock)"
           @blur="saveDraft(false)"
-        >
-          {{ headingBlock.content }}
-        </h1>
+          @paste="pasteImages"
+          @click="selectInlineImage"
+          @keydown="handleEditorKeydown"
+        />
 
         <section v-for="(block, index) in bodyBlocks" :key="block.id">
           <h2>{{ chineseNumbers[index] ?? index + 1 }}、{{ block.title }}</h2>
@@ -761,7 +995,7 @@ onMounted(load);
         </section>
       </article>
 
-      <aside v-if="assistantVisible" class="assistant-panel assistant-panel-flow business-card">
+      <aside v-if="assistantVisible" class="assistant-panel business-card">
         <header>
           <div>
             <h2>AI报告助手</h2>
@@ -782,7 +1016,7 @@ onMounted(load);
           @close="assistantError = ''"
         />
 
-        <div class="chat-list chat-list-flow">
+        <div class="chat-list">
           <ElEmpty
             v-if="draft.messages.length === 0"
             description="点击底部“分析图片”后，AI 助手将在这里给出处理过程"
@@ -859,7 +1093,7 @@ onMounted(load);
         plain
         :icon="Picture"
         :loading="analyzingImages"
-        :disabled="sending && !analyzingImages"
+        :disabled="aiAnalyzing || (sending && !analyzingImages)"
         @click="analyzeAllImages"
       >
         分析全部图片
@@ -868,7 +1102,8 @@ onMounted(load);
         type="primary"
         :loading="generating"
         :disabled="
-          draft.status !== 'EDITING' ||
+          !draftEditable ||
+          aiAnalyzing ||
           sending ||
           uploadingImages ||
           imageUpdating ||
@@ -899,6 +1134,10 @@ onMounted(load);
 
   overflow: hidden;
   box-sizing: border-box;
+}
+
+.draft-analysis-alert {
+  margin: 12px 0;
 }
 
 .draft-summary > div {
@@ -952,34 +1191,19 @@ onMounted(load);
 
 .draft-workspace {
   display: grid;
-
-  /*
-   * 大屏和小屏始终保持：
-   * 左侧报告正文 + 右侧 AI 助手。
-   *
-   * 不设置固定视口高度，不设置内部滚动条。
-   * 左右任一侧内容变多时，整行自然变高，
-   * 由整个页面统一上下滚动。
-   */
   width: 100%;
-  min-height: 420px;
+  height: clamp(520px, calc(100vh - 230px), 820px);
+  min-height: 480px;
 
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-
   align-items: stretch;
-
   padding-bottom: 72px;
-
-  overflow: visible;
+  overflow: hidden;
   box-sizing: border-box;
 }
 
 .draft-workspace.assistant-open {
-  /*
-   * 左侧正文占主要空间，右侧 AI 助手保持稳定宽度。
-   * 不设置 min-width，不制造横向滚动。
-   */
   grid-template-columns:
     minmax(0, 1fr)
     clamp(280px, 31vw, 430px);
@@ -994,20 +1218,14 @@ onMounted(load);
   position: relative;
 
   width: 100%;
-  height: auto;
+  height: 100%;
 
   min-width: 0;
-  min-height: 420px;
+  min-height: 0;
 
   padding: clamp(18px, 3vw, 28px) clamp(16px, 4vw, 36px) 42px;
-
-  /*
-   * 正文完整展开。
-   * 不在正文卡片内部出现滚动条，
-   * 内容有多高，卡片就有多高。
-   */
-  overflow: visible;
-
+  overflow-x: hidden;
+  overflow-y: auto;
   background: #fff;
   box-sizing: border-box;
 }
@@ -1133,21 +1351,13 @@ onMounted(load);
   display: flex;
 
   width: 100%;
-  height: auto;
+  height: 100%;
 
   min-width: 0;
-  min-height: 420px;
-
-  /*
-   * AI 助手与左侧正文处于同一个 Grid 行。
-   * Grid 会让两个卡片外框自动等高。
-   * 不使用 sticky，不设置内部滚动。
-   */
+  min-height: 0;
   flex-direction: column;
   align-self: stretch;
-
-  overflow: visible;
-
+  overflow: hidden;
   background: #fff;
   box-sizing: border-box;
 }
@@ -1177,20 +1387,13 @@ onMounted(load);
   width: 100%;
   min-width: 0;
   min-height: 0;
-
-  /*
-   * 当左侧正文更高时，这里自动吃掉右侧剩余高度，
-   * 让底部输入区贴近 AI 卡片底部。
-   * 当聊天消息更多时，右侧卡片自然变高，
-   * 同时带动左侧卡片等高。
-   */
   flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
 
   padding: 18px;
-
-  overflow: visible;
+  overflow-x: hidden;
+  overflow-y: auto;
   box-sizing: border-box;
 }
 
@@ -1535,119 +1738,4 @@ onMounted(load);
     width: auto;
   }
 }
-
-
-
-/*
- * ============================================================
- * AI 草稿页最终布局约束
- * ============================================================
- * 1. 页面整体上下滚动；
- * 2. 左侧报告正文完整展开；
- * 3. 右侧 AI 助手完整展开；
- * 4. 左右始终并排且同一行自动等高；
- * 5. 禁止正文、AI聊天区、工作区产生自己的滚动条。
- *
- * 使用专用 *-flow class + !important，
- * 避免旧样式、全局样式或热更新残留再次把区域变成滚动容器。
- */
-
-.draft-workspace-flow {
-  width: 100% !important;
-
-  height: auto !important;
-  min-height: 420px !important;
-  max-height: none !important;
-
-  align-items: stretch !important;
-
-  overflow: visible !important;
-  overflow-x: visible !important;
-  overflow-y: visible !important;
-}
-
-.report-paper-flow {
-  width: 100% !important;
-
-  height: auto !important;
-  min-height: 420px !important;
-  max-height: none !important;
-
-  align-self: stretch !important;
-
-  overflow: visible !important;
-  overflow-x: visible !important;
-  overflow-y: visible !important;
-}
-
-.assistant-panel-flow {
-  width: 100% !important;
-
-  height: auto !important;
-  min-height: 420px !important;
-  max-height: none !important;
-
-  align-self: stretch !important;
-
-  overflow: visible !important;
-  overflow-x: visible !important;
-  overflow-y: visible !important;
-}
-
-/*
- * AI 对话记录不再自己滚动。
- * 消息越多，右侧卡片越高；
- * Grid 同时把左侧正文卡片拉到同样高度。
- */
-.chat-list-flow {
-  width: 100% !important;
-
-  height: auto !important;
-  min-height: 0 !important;
-  max-height: none !important;
-
-  flex: 1 1 auto !important;
-
-  overflow: visible !important;
-  overflow-x: visible !important;
-  overflow-y: visible !important;
-}
-
-/*
- * 防止 contenteditable 本身因为浏览器/历史样式重新成为滚动容器。
- */
-.report-paper-flow[contenteditable="true"] {
-  height: auto !important;
-  max-height: none !important;
-  overflow: visible !important;
-}
-
-/*
- * 小屏仍然保持左正文 + 右 AI。
- * 只调整列宽，不切换成上下布局，也不制造横向滚动。
- */
-@media (width <= 1024px) {
-  .draft-workspace-flow.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      clamp(220px, 29vw, 300px) !important;
-  }
-}
-
-@media (width <= 760px) {
-  .draft-workspace-flow.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      minmax(190px, 36%) !important;
-  }
-}
-
-@media (width <= 640px) {
-  .draft-workspace-flow.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      minmax(170px, 38%) !important;
-  }
-}
-
 </style>

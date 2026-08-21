@@ -13,4 +13,4 @@ three-fees:
 
 app:
   ai:
-    enabled: ${AI_ENABLED:false}
+    enabled: ${AI_ENABLED:true}

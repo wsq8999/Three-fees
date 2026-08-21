@@ -284,6 +284,9 @@ public class ImportCommandService {
   }
 
   private LocalDate scopeDate(DatasetType datasetType, ImportRowGroup group, boolean start) {
+    if (datasetType == DatasetType.BILLING_POINT) {
+      return null;
+    }
 
     LocalDate selected = null;
 

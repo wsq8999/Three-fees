@@ -7,9 +7,11 @@ import com.threefees.identity.application.ResourceConflictException;
 import com.threefees.identity.application.ResourceNotFoundException;
 import com.threefees.identity.domain.Role;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -409,7 +411,8 @@ public class AuditReportService {
                 """
                 SELECT r.public_id, r.report_number, r.source_type, r.status, r.generated_at,
                        r.updated_at, r.version, s.billing_point_code, s.billing_point_name,
-                       s.city_code, c.name AS city_name, s.data_period, s.data_json,
+                       s.city_code, c.name AS city_name, s.data_period,
+                       s.period_start, s.period_end, s.data_json,
                        COALESCE(
                          (SELECT SUM(m.allocated_kwh)
                             FROM meter_reading m
@@ -434,8 +437,11 @@ public class AuditReportService {
                              )),
                          a.actual_amount
                        ) AS actual_amount,
-                       a.over_limit_type,
-                       a.max_ratio,
+                        a.over_limit_type,
+                        a.yoy_result, a.yoy_ratio,
+                        a.mom_result, a.mom_ratio,
+                        a.rated_result, a.rated_ratio,
+                        a.max_ratio,
                        JSON_UNQUOTE(
                          JSON_EXTRACT(
                            r.business_snapshot_json,
@@ -503,6 +509,8 @@ public class AuditReportService {
                             parseJson(
                                 resultSet.getString("data_json"))),
                         resultSet.getString("data_period"),
+                        resultSet.getObject("period_start", LocalDate.class),
+                        resultSet.getObject("period_end", LocalDate.class),
                         resultSet.getString("source_type"),
                         resultSet.getString("status"),
                         decimalOr(
@@ -518,8 +526,7 @@ public class AuditReportService {
                                 "snapshot_actual_amount")),
                         valueOr(
                             valueOr(
-                                resultSet.getString(
-                                    "over_limit_type"),
+                                overLimitDisplayType(resultSet),
                                 resultSet.getString(
                                     "snapshot_over_limit_type")),
                             resultSet.getString(
@@ -531,6 +538,7 @@ public class AuditReportService {
                                     "snapshot_max_ratio")),
                             resultSet.getString(
                                 "snapshot_result_max_ratio")),
+                        overLimitRatios(resultSet),
                         resultSet.getObject(
                             "generated_at",
                             LocalDateTime.class),
@@ -567,6 +575,7 @@ public class AuditReportService {
                        wf.public_id AS word_file_public_id, pf.public_id AS pdf_file_public_id,
                        s.public_id AS snapshot_public_id, s.billing_point_code,
                        s.billing_point_name, s.city_code, c.name AS city_name, s.data_period,
+                       s.period_start, s.period_end,
                        s.data_json,
                        COALESCE(
                          (SELECT SUM(m.allocated_kwh)
@@ -592,7 +601,8 @@ public class AuditReportService {
                              )),
                          a.actual_amount
                        ) AS actual_amount,
-                       a.over_limit_type, a.max_ratio,
+                        a.over_limit_type, a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
+                        a.rated_result, a.rated_ratio, a.max_ratio,
                        JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.overLimitType')) AS snapshot_over_limit_type,
                        JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.result.overLimitType')) AS snapshot_result_over_limit_type,
                        JSON_UNQUOTE(JSON_EXTRACT(r.business_snapshot_json, '$.audit.maxRatioPercent')) AS snapshot_max_ratio,
@@ -622,6 +632,8 @@ public class AuditReportService {
                         resultSet.getString("city_name"),
                         district(parseJson(resultSet.getString("data_json"))),
                         resultSet.getString("data_period"),
+                        resultSet.getObject("period_start", LocalDate.class),
+                        resultSet.getObject("period_end", LocalDate.class),
                         resultSet.getString("source_type"),
                         resultSet.getString("status"),
                         decimalOr(
@@ -634,7 +646,7 @@ public class AuditReportService {
                             resultSet.getString("snapshot_actual_amount")),
                         valueOr(
                             valueOr(
-                                resultSet.getString("over_limit_type"),
+                                overLimitDisplayType(resultSet),
                                 resultSet.getString("snapshot_over_limit_type")),
                             resultSet.getString("snapshot_result_over_limit_type")),
                         decimalOr(
@@ -642,6 +654,7 @@ public class AuditReportService {
                                 resultSet.getBigDecimal("max_ratio"),
                                 resultSet.getString("snapshot_max_ratio")),
                             resultSet.getString("snapshot_result_max_ratio")),
+                        overLimitRatios(resultSet),
                         new ReportSections(
                             resultSet.getString("title"),
                             resultSet.getString("situation"),
@@ -671,7 +684,7 @@ public class AuditReportService {
       throw new ResourceNotFoundException("PDF");
     }
     var file = storedFileService.find(pdf ? report.pdfFileId() : report.wordFileId());
-    return new FileAccess(file, storedFileService.resource(file));
+    return new FileAccess(file, storedFileService.resource(file), reportDownloadName(report, pdf));
   }
 
   @Transactional(readOnly = true)
@@ -697,7 +710,9 @@ public class AuditReportService {
     return jdbcTemplate.query(
         """
         SELECT s.public_id, s.billing_point_code, s.billing_point_name, s.city_code,
-               c.name AS city_name, s.data_period, a.over_limit_type, a.max_ratio
+               c.name AS city_name, s.data_period, a.over_limit_type,
+               a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
+               a.rated_result, a.rated_ratio, a.max_ratio
          FROM billing_point_snapshot s
          JOIN city c ON c.code = s.city_code
           LEFT JOIN audit_result a
@@ -714,8 +729,9 @@ public class AuditReportService {
                 resultSet.getString("city_code"),
                 resultSet.getString("city_name"),
                 resultSet.getString("data_period"),
-                resultSet.getString("over_limit_type"),
-                resultSet.getBigDecimal("max_ratio")),
+                overLimitDisplayType(resultSet),
+                resultSet.getBigDecimal("max_ratio"),
+                overLimitRatios(resultSet)),
         args.toArray());
   }
 
@@ -793,7 +809,9 @@ public class AuditReportService {
     }
     return jdbcTemplate.query(
         """
-        SELECT s.public_id, s.data_period, a.over_limit_type, a.max_ratio
+        SELECT s.public_id, s.data_period, a.over_limit_type,
+               a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
+               a.rated_result, a.rated_ratio, a.max_ratio
           FROM billing_point_snapshot s
           LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
           JOIN audit_result a
@@ -807,8 +825,9 @@ public class AuditReportService {
             new HistoricalPeriodOption(
                 resultSet.getString("public_id"),
                 resultSet.getString("data_period"),
-                resultSet.getString("over_limit_type"),
-                resultSet.getBigDecimal("max_ratio")),
+                overLimitDisplayType(resultSet),
+                resultSet.getBigDecimal("max_ratio"),
+                overLimitRatios(resultSet)),
         args.toArray());
   }
 
@@ -1000,6 +1019,90 @@ public class AuditReportService {
     return value == null || value.isBlank() || "null".equalsIgnoreCase(value) ? fallback : value;
   }
 
+  private String overLimitTypeLabel(String value) {
+    if (value == null || value.isBlank()) {
+      return "未分类";
+    }
+    return switch (value) {
+      case "ONLY_YOY" -> "仅同比超标";
+      case "ONLY_MOM" -> "仅环比超标";
+      case "ONLY_RATED" -> "仅额定标杆超标";
+      case "MULTIPLE" -> "多项超标";
+      case "NONE" -> "未超标";
+      default -> value;
+    };
+  }
+
+  private String overLimitDisplayType(java.sql.ResultSet resultSet) throws java.sql.SQLException {
+    String overLimitType = resultSet.getString("over_limit_type");
+    if (!"MULTIPLE".equals(overLimitType)) {
+      return overLimitTypeLabel(overLimitType);
+    }
+
+    var labels = new ArrayList<String>();
+    if ("OVER_LIMIT".equals(resultSet.getString("yoy_result"))) {
+      labels.add("同比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("mom_result"))) {
+      labels.add("环比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("rated_result"))) {
+      labels.add("额定标杆");
+    }
+
+    return labels.isEmpty() ? "超标" : String.join("、", labels) + "超标";
+  }
+
+  private List<OverLimitRatio> overLimitRatios(java.sql.ResultSet resultSet)
+      throws java.sql.SQLException {
+    var ratios = new java.util.ArrayList<OverLimitRatio>();
+    addOverLimitRatio(ratios, resultSet, "yoy_result", "yoy_ratio", "YOY", "同比");
+    addOverLimitRatio(ratios, resultSet, "mom_result", "mom_ratio", "MOM", "环比");
+    addOverLimitRatio(ratios, resultSet, "rated_result", "rated_ratio", "RATED", "额定标杆");
+    return ratios;
+  }
+
+  private void addOverLimitRatio(
+      List<OverLimitRatio> ratios,
+      java.sql.ResultSet resultSet,
+      String resultColumn,
+      String ratioColumn,
+      String type,
+      String label)
+      throws java.sql.SQLException {
+    if ("OVER_LIMIT".equals(resultSet.getString(resultColumn))) {
+      ratios.add(new OverLimitRatio(type, label, resultSet.getBigDecimal(ratioColumn)));
+    }
+  }
+
+  private String reportDownloadName(ReportDetail report, boolean pdf) {
+    String extension = pdf ? ".pdf" : ".docx";
+    return sanitizeFileName(
+        report.billingPointName()
+            + "电费稽核说明-"
+            + reportPeriodRange(report)
+            + extension);
+  }
+
+  private String reportPeriodRange(ReportDetail report) {
+    LocalDate start = report.periodStart();
+    LocalDate end = report.periodEnd();
+    if (start == null || end == null) {
+      YearMonth month = YearMonth.parse(report.period());
+      start = month.atDay(1);
+      end = month.atEndOfMonth();
+    }
+    return formatFileDate(start) + "至" + formatFileDate(end);
+  }
+
+  private String formatFileDate(LocalDate date) {
+    return date.getYear() + "年" + date.getMonthValue() + "月" + date.getDayOfMonth() + "日";
+  }
+
+  private String sanitizeFileName(String value) {
+    return value.replaceAll("[\\\\/:*?\"<>|]", "_");
+  }
+
   private BigDecimal decimalOr(BigDecimal value, String fallback) {
     if (value != null) {
       return value;
@@ -1058,12 +1161,15 @@ public class AuditReportService {
       String cityName,
       String district,
       String period,
+      LocalDate periodStart,
+      LocalDate periodEnd,
       String sourceType,
       String status,
       BigDecimal actualEnergy,
       BigDecimal actualAmount,
       String overLimitType,
       BigDecimal maxRatio,
+      List<OverLimitRatio> overLimitRatios,
       LocalDateTime generatedAt,
       LocalDateTime updatedAt,
       long version) {}
@@ -1081,12 +1187,15 @@ public class AuditReportService {
       String cityName,
       String district,
       String period,
+      LocalDate periodStart,
+      LocalDate periodEnd,
       String sourceType,
       String status,
       BigDecimal actualEnergy,
       BigDecimal actualAmount,
       String overLimitType,
       BigDecimal maxRatio,
+      List<OverLimitRatio> overLimitRatios,
       ReportSections sections,
       String wordFileId,
       String pdfFileId,
@@ -1107,17 +1216,25 @@ public class AuditReportService {
       String cityName,
       String period,
       String overLimitType,
-      BigDecimal maxRatio) {}
+      BigDecimal maxRatio,
+      List<OverLimitRatio> overLimitRatios) {}
+
+  public record OverLimitRatio(String type, String label, BigDecimal ratio) {}
 
   public record HistoricalBillingPointOption(
       String billingPointCode, String billingPointName, String cityCode, String cityName) {}
 
   public record HistoricalPeriodOption(
-      String billingPointPeriodId, String period, String overLimitType, BigDecimal maxRatio) {}
+      String billingPointPeriodId,
+      String period,
+      String overLimitType,
+      BigDecimal maxRatio,
+      List<OverLimitRatio> overLimitRatios) {}
 
   public record FileAccess(
       com.threefees.file.domain.StoredFile file,
-      org.springframework.core.io.InputStreamResource resource) {}
+      org.springframework.core.io.InputStreamResource resource,
+      String downloadName) {}
 
   private record SnapshotForHistory(
       String publicId, String period, JsonNode data, JsonNode audit) {}

@@ -12,6 +12,7 @@ import com.threefees.ai.application.AiServiceException;
 import com.threefees.ai.application.CityMemoryService;
 import com.threefees.ai.application.CityMemoryService.MemoryQuery;
 import com.threefees.file.application.StoredFileService;
+import com.threefees.file.domain.StoredFile;
 import com.threefees.identity.application.BusinessRuleException;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.application.ResourceConflictException;
@@ -19,10 +20,12 @@ import com.threefees.identity.application.ResourceNotFoundException;
 import com.threefees.identity.domain.Role;
 import com.threefees.task.application.BusinessTaskRepository;
 import com.threefees.task.domain.BusinessTask;
+import com.threefees.task.domain.TaskStatus;
 import com.threefees.task.domain.TaskType;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +34,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -108,8 +112,8 @@ public class ReportDraftService {
         new ReportSections(
             "《" + snapshot.billingPointName() + "电费稽核说明》",
             "报账点编码为" + snapshot.billingPointCode() + "，账期为" + snapshot.period() + "，系统稽核结果为超标。",
-            "当前证据不足，需结合现场设备运行、设备变化、计量和相关系统数据进一步排查。",
-            "当前尚未形成有证据支撑的最终原因，待完成现场材料核验后确定整改结论。");
+            "",
+            "");
     var keyHolder = new GeneratedKeyHolder();
     try {
       jdbcTemplate.update(
@@ -204,6 +208,17 @@ public class ReportDraftService {
     return draft;
   }
 
+  @Transactional(readOnly = true)
+  public DraftImageAccess imageContent(String publicId, String imageFileId, CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    if (!draft.currentImageFileIds().contains(imageFileId)
+        && !isBoundDraftImage(draft.id(), imageFileId)) {
+      throw new ResourceNotFoundException("工作稿图片");
+    }
+    StoredFile file = storedFileService.find(imageFileId);
+    return new DraftImageAccess(file, storedFileService.resource(file));
+  }
+
   @Transactional
   public Draft assist(
       String publicId,
@@ -218,6 +233,9 @@ public class ReportDraftService {
     requireExpectedVersion(draft, expectedVersion);
     String safeInstruction = requireInstruction(instruction);
     String normalizedIntent = classifyIntent(intent, safeInstruction);
+    if ("IMAGE_ANALYSIS".equals(normalizedIntent)) {
+      return submitImageAnalysis(publicId, safeInstruction, imageFileIds, expectedVersion, actor);
+    }
     List<String> requestedImageIds = imageFileIds == null ? List.of() : List.copyOf(imageFileIds);
     if (!"IMAGE_ANALYSIS".equals(normalizedIntent) && !requestedImageIds.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_NOT_ALLOWED", "仅图片分析可以携带图片");
@@ -233,7 +251,7 @@ public class ReportDraftService {
                 .toList()
             : draft.currentImageFileIds();
     if ("IMAGE_ANALYSIS".equals(normalizedIntent) && reportImageIds.isEmpty()) {
-      throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告排查分析中粘贴至少一张图片");
+      throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告正文中粘贴至少一张图片");
     }
     if (reportImageIds.size() > 10) {
       throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "当前报告最多支持 10 张分析图片");
@@ -334,6 +352,118 @@ public class ReportDraftService {
   }
 
   @Transactional
+  public Draft submitImageAnalysis(
+      String publicId,
+      String instruction,
+      List<String> imageFileIds,
+      long expectedVersion,
+      CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    ensureEditable(draft);
+    requireExpectedVersion(draft, expectedVersion);
+    if ("AI_ANALYZING".equals(draft.analysisStatus())) {
+      throw new ResourceConflictException("AI_ANALYSIS_RUNNING", "AI正在后台分析，请勿重复提交");
+    }
+    String safeInstruction = requireInstruction(instruction);
+    List<String> requestedImageIds = imageFileIds == null ? List.of() : List.copyOf(imageFileIds);
+    if (requestedImageIds.size() > 10
+        || requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
+      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    }
+    List<String> reportImageIds =
+        Stream.concat(draft.currentImageFileIds().stream(), requestedImageIds.stream())
+            .distinct()
+            .toList();
+    validateAnalysisImages(reportImageIds, actor.username());
+    String businessKey = imageAnalysisBusinessKey(draft);
+    String payloadJson = writeJson(new ImageAnalysisTaskPayload(publicId, safeInstruction, reportImageIds));
+    var existing = taskRepository.findByTypeAndBusinessKey(TaskType.AI_IMAGE_ANALYSIS, businessKey);
+    if (existing.isPresent()) {
+      BusinessTask task = existing.get();
+      if (task.status() == TaskStatus.QUEUED
+          || task.status() == TaskStatus.RUNNING
+          || task.status() == TaskStatus.RETRY_WAIT) {
+        throw new ResourceConflictException("AI_ANALYSIS_RUNNING", "AI正在后台分析，请勿重复提交");
+      }
+      if (!taskRepository.requeueWithPayload(task.publicId(), payloadJson, actor.username())) {
+        throw new ResourceConflictException("AI_TASK_REQUEUE_FAILED", "AI分析任务状态已变化，请刷新后重试");
+      }
+      markImageAnalysisQueued(draft, reportImageIds, task.publicId(), expectedVersion, actor.username());
+      bindImages(draft.id(), reportImageIds, List.of(), actor.username());
+      return find(publicId, actor);
+    }
+    try {
+      BusinessTask task =
+          taskRepository.create(
+              TaskType.AI_IMAGE_ANALYSIS,
+              businessKey,
+              payloadJson,
+              actor.username(),
+              1);
+      markImageAnalysisQueued(draft, reportImageIds, task.publicId(), expectedVersion, actor.username());
+      bindImages(draft.id(), reportImageIds, List.of(), actor.username());
+      return find(publicId, actor);
+    } catch (DuplicateKeyException exception) {
+      return find(publicId, actor);
+    }
+  }
+
+  @Transactional
+  public void requeueImageAnalysisTask(BusinessTask task, CurrentUser actor) {
+    ImageAnalysisTaskPayload payload = readImageAnalysisPayload(task.payloadJson());
+    Draft draft = find(payload.draftId(), actor);
+    ensureEditable(draft);
+    validateAnalysisImages(payload.imageFileIds(), actor.username());
+    if (!taskRepository.requeueWithPayload(task.publicId(), task.payloadJson(), actor.username())) {
+      throw new ResourceConflictException("TASK_NOT_RETRYABLE", "只有已失败或已完成的AI任务可以重新提交");
+    }
+    markImageAnalysisQueued(draft, payload.imageFileIds(), task.publicId(), draft.entityVersion(), actor.username());
+  }
+
+  private String imageAnalysisBusinessKey(Draft draft) {
+    return "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId();
+  }
+
+  private void markImageAnalysisQueued(
+      Draft draft,
+      List<String> imageFileIds,
+      String taskPublicId,
+      long expectedEntityVersion,
+      String actor) {
+    int updated =
+        jdbcTemplate.update(
+            """
+            UPDATE report_draft
+               SET current_image_file_ids_json = ?,
+                   analysis_status = 'AI_ANALYZING',
+                   analysis_task_public_id = ?,
+                   analysis_error_code = NULL,
+                   analysis_submitted_at = CURRENT_TIMESTAMP(3),
+                   analysis_completed_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP(3),
+                   updated_by = ?,
+                   version = version + 1
+             WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
+            """,
+            writeJson(imageFileIds),
+            taskPublicId,
+            actor,
+            draft.id(),
+            expectedEntityVersion);
+    if (updated != 1) {
+      throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
+    }
+  }
+
+  private ImageAnalysisTaskPayload readImageAnalysisPayload(String payloadJson) {
+    try {
+      return objectMapper.readValue(payloadJson, ImageAnalysisTaskPayload.class);
+    } catch (JacksonException exception) {
+      throw new BusinessRuleException("TASK_PAYLOAD_INVALID", "AI图片分析任务数据异常，请重新提交");
+    }
+  }
+
+  @Transactional
   public Draft edit(
       String publicId, ReportSections sections, long expectedVersion, CurrentUser actor) {
     Draft draft = find(publicId, actor);
@@ -366,6 +496,70 @@ public class ReportDraftService {
     saveVersion(
         draft.id(), nextVersion, "MANUAL", sections, draft.currentImageFileIds(), actor.username());
     return find(publicId, actor);
+  }
+
+  @Transactional
+  public void completeImageAnalysisTask(
+      String publicId, String instruction, List<String> imageFileIds, String traceId, String actor) {
+    Draft draft = loadDraft(publicId);
+    if (!"AI_ANALYZING".equals(draft.analysisStatus())) {
+      return;
+    }
+    List<String> reportImageIds = imageFileIds == null ? draft.currentImageFileIds() : imageFileIds;
+    try {
+      validateAnalysisImages(reportImageIds, actor);
+      var images = new java.util.ArrayList<AiImage>();
+      for (String imageId : reportImageIds) {
+        var file = storedFileService.find(imageId);
+        images.add(
+            new AiImage(file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
+      }
+      List<Fact> facts = factsForIntent(draft, "IMAGE_ANALYSIS");
+      AgentContext context = agentContext(draft, "IMAGE_ANALYSIS");
+      var result =
+          aiServiceClient.assist(
+              UUID.randomUUID().toString(),
+              "IMAGE_ANALYSIS",
+              requireInstruction(instruction),
+              draft.sections(),
+              facts,
+              images,
+              context,
+              traceId == null ? "" : traceId);
+      ReportSections updated = result.updatedSections();
+      if (updated == null) {
+        throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整报告正文", false);
+      }
+      updated = preserveInlineFigures(draft.sections(), updated);
+      int version = draft.currentVersion() + 1;
+      updateDraft(
+          draft.id(),
+          updated,
+          reportImageIds,
+          version,
+          result.initialReason(),
+          result.finalReason(),
+          actor,
+          draft.entityVersion());
+      bindImages(draft.id(), reportImageIds, result.imageAnalyses(), actor);
+      saveVersion(draft.id(), version, "IMAGE_ANALYSIS", updated, reportImageIds, actor);
+      saveMessage(
+          draft,
+          "IMAGE_ANALYSIS",
+          instruction,
+          result.answer(),
+          true,
+          reportImageIds,
+          result.initialReason(),
+          result.finalReason(),
+          images.size(),
+          context,
+          actor);
+      markImageAnalysisSucceeded(draft.id(), actor);
+    } catch (RuntimeException exception) {
+      markImageAnalysisFailed(draft.id(), analysisErrorCode(exception), actor);
+      throw exception;
+    }
   }
 
   @Transactional(readOnly = true)
@@ -626,6 +820,78 @@ public class ReportDraftService {
     return "FORMAL_REPORT:DRAFT:" + draftPublicId + ":CONTENT_VERSION:" + contentVersion;
   }
 
+  private void validateAnalysisImages(List<String> imageIds, String actor) {
+    if (imageIds == null || imageIds.isEmpty()) {
+      throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告正文中粘贴至少一张图片");
+    }
+    if (imageIds.size() > 10 || imageIds.stream().distinct().count() != imageIds.size()) {
+      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    }
+    long totalImageBytes = 0;
+    for (String imageId : imageIds) {
+      var file = storedFileService.find(imageId);
+      requireFileOwner(actor, file.createdBy());
+      if (!("image/png".equals(file.mediaType()) || "image/jpeg".equals(file.mediaType()))) {
+        throw new BusinessRuleException("AI_IMAGE_TYPE_INVALID", "图片仅支持 PNG/JPEG");
+      }
+      if (file.byteSize() > 10L * 1024 * 1024) {
+        throw new BusinessRuleException("AI_IMAGE_TOO_LARGE", "单张分析图片不能超过 10 MiB");
+      }
+      totalImageBytes += file.byteSize();
+      if (totalImageBytes > 20L * 1024 * 1024) {
+        throw new BusinessRuleException("AI_IMAGES_TOO_LARGE", "分析图片总大小不能超过 20 MiB");
+      }
+    }
+  }
+
+  private void markImageAnalysisSucceeded(long draftId, String actor) {
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET analysis_status = 'AI_COMPLETED_PENDING_CONFIRMATION',
+               analysis_error_code = NULL,
+               analysis_completed_at = CURRENT_TIMESTAMP(3),
+               updated_at = CURRENT_TIMESTAMP(3),
+               updated_by = ?,
+               version = version + 1
+         WHERE id = ?
+        """,
+        actor,
+        draftId);
+  }
+
+  public void markImageAnalysisFailed(String publicId, String errorCode, String actor) {
+    Draft draft = loadDraft(publicId);
+    markImageAnalysisFailed(draft.id(), errorCode, actor);
+  }
+
+  private void markImageAnalysisFailed(long draftId, String errorCode, String actor) {
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET analysis_status = 'AI_FAILED',
+               analysis_error_code = ?,
+               analysis_completed_at = CURRENT_TIMESTAMP(3),
+               updated_at = CURRENT_TIMESTAMP(3),
+               updated_by = ?,
+               version = version + 1
+         WHERE id = ?
+        """,
+        errorCode,
+        actor,
+        draftId);
+  }
+
+  private String analysisErrorCode(RuntimeException exception) {
+    if (exception instanceof BusinessRuleException businessRule) {
+      return businessRule.code();
+    }
+    if (exception instanceof AiServiceException) {
+      return "AI_IMAGE_ANALYSIS_FAILED";
+    }
+    return "AI_IMAGE_ANALYSIS_FAILED";
+  }
+
   private List<Fact> facts(Draft draft) {
     return jdbcTemplate
         .query(
@@ -660,7 +926,6 @@ public class ReportDraftService {
               values.add(new Fact("账期", draft.period()));
               values.add(new Fact("稽核状态", value(rs.getString("audit_status"))));
               values.add(new Fact("超标类型", value(rs.getString("over_limit_type"))));
-              values.add(new Fact("最大超标比例", value(rs.getBigDecimal("max_ratio"))));
               values.add(new Fact("实际总用电量", value(rs.getBigDecimal("actual_energy"))));
               values.add(new Fact("日均用电量", value(rs.getBigDecimal("current_daily_avg_kwh"))));
               values.add(new Fact("实际报账金额", value(rs.getBigDecimal("actual_amount"))));
@@ -735,6 +1000,16 @@ public class ReportDraftService {
               draft.overLimitType(),
               draft.overLimitType()));
     }
+    var provinceReferences = new java.util.ArrayList<Reference>();
+    if (needsHistoricalCases) {
+      provinceReferences.addAll(
+          externalProvinceReportReferences(
+              "s.city_code <> ? AND (a.over_limit_type = ? OR ? IS NULL)",
+              Math.min(3, maxHistoryCases),
+              draft.cityCode(),
+              draft.overLimitType(),
+              draft.overLimitType()));
+    }
     List<Reference> imageEvidence = imageEvidenceReferences(draft.id());
     List<ConversationTurn> messages =
         jdbcTemplate
@@ -759,9 +1034,14 @@ public class ReportDraftService {
             .stream()
             .flatMap(List::stream)
             .toList();
-    validateContextCity(draft.cityCode(), samePoint, cityReferences);
+    validateCurrentCityContext(draft.cityCode(), samePoint, cityReferences);
+    validateProvinceReferences(draft.cityCode(), provinceReferences);
     return new AgentContext(
-        List.copyOf(samePoint), List.copyOf(cityReferences), imageEvidence, messages);
+        List.copyOf(samePoint),
+        List.copyOf(cityReferences),
+        List.copyOf(provinceReferences),
+        imageEvidence,
+        messages);
   }
 
   private List<Reference> imageEvidenceReferences(long draftId) {
@@ -825,7 +1105,7 @@ public class ReportDraftService {
         .orElse("");
   }
 
-  private void validateContextCity(
+  private void validateCurrentCityContext(
       String expectedCityCode, List<Reference> samePoint, List<Reference> cityReferences) {
     boolean crossCity =
         Stream.concat(samePoint.stream(), cityReferences.stream())
@@ -834,6 +1114,18 @@ public class ReportDraftService {
             .anyMatch(cityCode -> !expectedCityCode.equals(cityCode));
     if (crossCity) {
       throw new AiServiceException("AI_CONTEXT_CITY_SCOPE_VIOLATION", "检测到跨城市记忆，已停止模型调用", false);
+    }
+  }
+
+  private void validateProvinceReferences(
+      String expectedCityCode, List<Reference> provinceReferences) {
+    boolean currentCityMixedIn =
+        provinceReferences.stream()
+            .map(Reference::cityCode)
+            .filter(java.util.Objects::nonNull)
+            .anyMatch(expectedCityCode::equals);
+    if (currentCityMixedIn) {
+      throw new AiServiceException("AI_CONTEXT_CITY_SCOPE_VIOLATION", "检测到外市参考混入本市案例，已停止模型调用", false);
     }
   }
 
@@ -893,6 +1185,18 @@ public class ReportDraftService {
         parameters.toArray());
   }
 
+  private List<Reference> externalProvinceReportReferences(
+      String predicate, int limit, Object... args) {
+    return reportReferences(predicate, limit, args).stream()
+        .map(
+            reference ->
+                new Reference(
+                    "OUTCITY-" + reference.id(),
+                    "外市参考：城市=" + value(reference.cityCode()) + "；" + reference.summary(),
+                    reference.cityCode()))
+        .toList();
+  }
+
   private long saveMessage(
       Draft draft,
       String intent,
@@ -946,11 +1250,15 @@ public class ReportDraftService {
         draft.billingPointCode(),
         aiServiceClient.modelName(),
         modelImageCount,
-        writeJson(context.cityMemories().stream().map(Reference::id).toList()),
+        writeJson(
+            Stream.concat(context.cityMemories().stream(), context.provinceReferences().stream())
+                .map(Reference::id)
+                .toList()),
         writeJson(
             Map.of(
                 "samePointReferenceCount", context.samePointCases().size(),
                 "cityReferenceCount", context.cityMemories().size(),
+                "provinceReferenceCount", context.provinceReferences().size(),
                 "imageEvidenceCount", context.imageEvidence().size(),
                 "conversationTurnCount", context.recentMessages().size(),
                 "modelImageCount", modelImageCount)));
@@ -1058,7 +1366,7 @@ public class ReportDraftService {
 
   private ReportSections preserveInlineFigures(ReportSections original, ReportSections generated) {
     return new ReportSections(
-        generated.title(),
+        preserveInlineFigures(original.title(), generated.title()),
         preserveInlineFigures(original.situation(), generated.situation()),
         preserveInlineFigures(original.analysis(), generated.analysis()),
         preserveInlineFigures(original.rectification(), generated.rectification()));
@@ -1198,12 +1506,15 @@ public class ReportDraftService {
             SELECT d.id, d.public_id, d.status, d.title, d.situation, d.analysis,
                    d.rectification, d.current_version_no, d.formal_report_public_id,
                    d.current_image_file_ids_json,
+                   d.analysis_status, d.analysis_task_public_id, d.analysis_error_code,
+                   d.analysis_submitted_at, d.analysis_completed_at,
                    d.created_at, d.updated_at, d.version,
                    s.public_id AS snapshot_public_id, s.billing_point_code,
                    s.billing_point_name, s.city_code, c.name AS city_name, s.district_name,
                    s.data_period,
                    COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status,
-                   a.over_limit_type, a.max_ratio
+                    a.over_limit_type, a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
+                    a.rated_result, a.rated_ratio, a.max_ratio
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               JOIN city c ON c.code = s.city_code
@@ -1222,9 +1533,11 @@ public class ReportDraftService {
                     resultSet.getString("city_name"),
                     resultSet.getString("district_name"),
                     resultSet.getString("data_period"),
-                    resultSet.getString("audit_status"),
-                    resultSet.getString("over_limit_type"),
-                    resultSet.getBigDecimal("max_ratio"),
+                     resultSet.getString("audit_status"),
+                     resultSet.getString("over_limit_type"),
+                     overLimitDisplayType(resultSet),
+                     resultSet.getBigDecimal("max_ratio"),
+                     overLimitRatios(resultSet),
                     resultSet.getString("status"),
                     new ReportSections(
                         resultSet.getString("title"),
@@ -1234,6 +1547,11 @@ public class ReportDraftService {
                     resultSet.getInt("current_version_no"),
                     readStringList(resultSet.getString("current_image_file_ids_json")),
                     resultSet.getString("formal_report_public_id"),
+                    resultSet.getString("analysis_status"),
+                    resultSet.getString("analysis_task_public_id"),
+                    resultSet.getString("analysis_error_code"),
+                    resultSet.getObject("analysis_submitted_at", LocalDateTime.class),
+                    resultSet.getObject("analysis_completed_at", LocalDateTime.class),
                     loadMessages(resultSet.getLong("id")),
                     resultSet.getObject("created_at", LocalDateTime.class),
                     resultSet.getObject("updated_at", LocalDateTime.class),
@@ -1242,6 +1560,61 @@ public class ReportDraftService {
         .stream()
         .findFirst()
         .orElseThrow(() -> new ResourceNotFoundException("报告工作稿"));
+  }
+
+  private String overLimitTypeLabel(String value) {
+    if (value == null || value.isBlank()) {
+      return "未分类";
+    }
+    return switch (value) {
+      case "ONLY_YOY" -> "仅同比超标";
+      case "ONLY_MOM" -> "仅环比超标";
+      case "ONLY_RATED" -> "仅额定标杆超标";
+      case "MULTIPLE" -> "多项超标";
+      case "NONE" -> "未超标";
+      default -> value;
+    };
+  }
+
+  private String overLimitDisplayType(java.sql.ResultSet resultSet) throws SQLException {
+    String overLimitType = resultSet.getString("over_limit_type");
+    if (!"MULTIPLE".equals(overLimitType)) {
+      return overLimitTypeLabel(overLimitType);
+    }
+
+    var labels = new ArrayList<String>();
+    if ("OVER_LIMIT".equals(resultSet.getString("yoy_result"))) {
+      labels.add("同比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("mom_result"))) {
+      labels.add("环比");
+    }
+    if ("OVER_LIMIT".equals(resultSet.getString("rated_result"))) {
+      labels.add("额定标杆");
+    }
+
+    return labels.isEmpty() ? "超标" : String.join("、", labels) + "超标";
+  }
+
+  private List<OverLimitRatio> overLimitRatios(java.sql.ResultSet resultSet) throws SQLException {
+    var ratios = new ArrayList<OverLimitRatio>();
+    addOverLimitRatio(ratios, resultSet, "yoy_result", "yoy_ratio", "YOY", "同比");
+    addOverLimitRatio(ratios, resultSet, "mom_result", "mom_ratio", "MOM", "环比");
+    addOverLimitRatio(ratios, resultSet, "rated_result", "rated_ratio", "RATED", "额定标杆");
+    return ratios;
+  }
+
+  private void addOverLimitRatio(
+      List<OverLimitRatio> ratios,
+      java.sql.ResultSet resultSet,
+      String resultColumn,
+      String ratioColumn,
+      String type,
+      String label)
+      throws SQLException {
+    if ("OVER_LIMIT".equals(resultSet.getString(resultColumn))) {
+      ratios.add(new OverLimitRatio(type, label, resultSet.getBigDecimal(ratioColumn)));
+    }
   }
 
   private Snapshot snapshot(String publicId) {
@@ -1370,15 +1743,28 @@ public class ReportDraftService {
   private void requireSections(ReportSections sections) {
     if (sections == null
         || isBlank(sections.title())
-        || isBlank(sections.situation())
-        || isBlank(sections.analysis())
-        || isBlank(sections.rectification())) {
-      throw new BusinessRuleException("REPORT_SECTIONS_REQUIRED", "报告标题和固定三段正文不能为空");
+        || isBlank(sections.situation())) {
+      throw new BusinessRuleException("REPORT_SECTIONS_REQUIRED", "报告标题和情况说明不能为空");
     }
   }
 
   private boolean isBlank(String value) {
     return value == null || value.isBlank();
+  }
+
+  private boolean isBoundDraftImage(long draftId, String imageFileId) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            """
+            SELECT COUNT(*)
+              FROM report_draft_image i
+              JOIN stored_file f ON f.id = i.file_id
+             WHERE i.draft_id = ? AND f.public_id = ?
+            """,
+            Integer.class,
+            draftId,
+            imageFileId);
+    return count != null && count > 0;
   }
 
   private void requireScope(CurrentUser actor, String cityCode) {
@@ -1389,6 +1775,12 @@ public class ReportDraftService {
 
   private void requireFileOwner(CurrentUser actor, String owner) {
     if (!actor.roles().contains(Role.SUPER_ADMIN) && !actor.username().equals(owner)) {
+      throw new AccessDeniedException("Draft image is outside user scope");
+    }
+  }
+
+  private void requireFileOwner(String actor, String owner) {
+    if (actor == null || !actor.equals(owner)) {
       throw new AccessDeniedException("Draft image is outside user scope");
     }
   }
@@ -1702,16 +2094,25 @@ public class ReportDraftService {
       String period,
       String auditStatus,
       String overLimitType,
+      String overLimitDisplayType,
       java.math.BigDecimal maxExceedRatio,
+      List<OverLimitRatio> overLimitRatios,
       String status,
       ReportSections sections,
       int currentVersion,
       List<String> currentImageFileIds,
       String formalReportId,
+      String analysisStatus,
+      String analysisTaskId,
+      String analysisErrorCode,
+      LocalDateTime analysisSubmittedAt,
+      LocalDateTime analysisCompletedAt,
       List<DraftMessage> messages,
       LocalDateTime createdAt,
       LocalDateTime updatedAt,
       long entityVersion) {}
+
+  public record OverLimitRatio(String type, String label, java.math.BigDecimal ratio) {}
 
   public record DraftMessage(
       String id,
@@ -1731,9 +2132,14 @@ public class ReportDraftService {
       LocalDateTime createdAt,
       String createdBy) {}
 
+  public record DraftImageAccess(StoredFile file, InputStreamResource resource) {}
+
   public record UploadedImage(String fileId, long entityVersion) {}
 
   private record CorrectionContent(ReportSections sections, List<String> imageIds) {}
+
+  public record ImageAnalysisTaskPayload(
+      String draftId, String instruction, List<String> imageFileIds) {}
 
   private record Snapshot(
       long id,

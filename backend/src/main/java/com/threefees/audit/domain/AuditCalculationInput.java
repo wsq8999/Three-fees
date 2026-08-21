@@ -7,10 +7,30 @@ public record AuditCalculationInput(
     YearMonth period,
     boolean currentPaymentEligible,
     BigDecimal actualEnergy,
+    BigDecimal currentDailyEnergy,
     int currentPaymentDays,
     BigDecimal currentBenchmarkTotal,
     ReferencePeriod yoyReference,
     ReferencePeriod momReference) {
+
+  public AuditCalculationInput(
+      YearMonth period,
+      boolean currentPaymentEligible,
+      BigDecimal actualEnergy,
+      int currentPaymentDays,
+      BigDecimal currentBenchmarkTotal,
+      ReferencePeriod yoyReference,
+      ReferencePeriod momReference) {
+    this(
+        period,
+        currentPaymentEligible,
+        actualEnergy,
+        null,
+        currentPaymentDays,
+        currentBenchmarkTotal,
+        yoyReference,
+        momReference);
+  }
 
   public AuditCalculationInput(
       YearMonth period,
@@ -23,6 +43,7 @@ public record AuditCalculationInput(
         period,
         currentPaymentEligible,
         actualEnergy,
+        null,
         period.lengthOfMonth(),
         currentBenchmarkTotal,
         yoyReference,
@@ -33,6 +54,7 @@ public record AuditCalculationInput(
       YearMonth period,
       boolean paymentEligible,
       BigDecimal actualEnergy,
+      BigDecimal dailyEnergy,
       int paymentDays,
       BigDecimal benchmarkTotal) {
 
@@ -40,8 +62,17 @@ public record AuditCalculationInput(
         YearMonth period,
         boolean paymentEligible,
         BigDecimal actualEnergy,
+        int paymentDays,
         BigDecimal benchmarkTotal) {
-      this(period, paymentEligible, actualEnergy, period.lengthOfMonth(), benchmarkTotal);
+      this(period, paymentEligible, actualEnergy, null, paymentDays, benchmarkTotal);
+    }
+
+    public ReferencePeriod(
+        YearMonth period,
+        boolean paymentEligible,
+        BigDecimal actualEnergy,
+        BigDecimal benchmarkTotal) {
+      this(period, paymentEligible, actualEnergy, null, period.lengthOfMonth(), benchmarkTotal);
     }
   }
 }

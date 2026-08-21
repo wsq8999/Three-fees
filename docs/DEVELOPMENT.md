@@ -30,7 +30,7 @@
 | `INITIAL_ACCOUNT_BOOTSTRAP_ENABLED` | 空库首次启动时设为 `true` |
 | `INITIAL_ACCOUNT_PASSWORD` | 首批账号临时密码，当前约定为 `123456` |
 | `APP_FILE_ROOT` | 上传文件、报告文件存储根目录 |
-| `AI_ENABLED` | 是否启用生成报告 AI 助手，本地默认可设为 `false` |
+| `AI_ENABLED` | 是否启用生成报告 AI 助手，本地联调默认使用 `true` |
 | `KIMI_API_KEY` | Kimi 密钥，仅通过本机或服务环境注入，不要写入仓库 |
 | `KIMI_BASE_URL` | Kimi OpenAI 兼容接口，默认 `https://api.moonshot.cn/v1` |
 | `KIMI_MODEL` | Kimi 模型名，默认 `kimi-k3`，可按实际账号可用模型调整 |
@@ -38,7 +38,18 @@
 | `KIMI_MAX_COMPLETION_TOKENS` | 单次最大输出 token，默认 `8192` |
 | `KIMI_REQUEST_TIMEOUT` | Java 等待 Kimi 的时限，默认 `10m` |
 
-## 4. 后端启动
+## 4. 推荐本地启动
+
+本地真实联调优先使用统一脚本，避免不同 CMD/PowerShell 进程没有继承 Kimi
+环境变量。脚本会检查 `KIMI_API_KEY` 是否存在，只输出是否配置，不回显密钥。
+
+```powershell
+cd D:\Three-fees
+.\scripts\check-kimi-env.ps1
+.\scripts\start-local.ps1
+```
+
+## 5. 手动后端启动
 
 ```cmd
 cd /d D:\Three-fees\backend
@@ -51,12 +62,10 @@ set "DB_PASSWORD=你的数据库密码"
 set "INITIAL_ACCOUNT_BOOTSTRAP_ENABLED=true"
 set "INITIAL_ACCOUNT_PASSWORD=123456"
 set "APP_FILE_ROOT=D:\Three-fees\runtime\files"
-set "AI_ENABLED=false"
+set "AI_ENABLED=true"
 set "KIMI_BASE_URL=https://api.moonshot.cn/v1"
 set "KIMI_MODEL=kimi-k3"
-rem 如需启用生成报告 AI 助手，再设置：
-rem set "AI_ENABLED=true"
-rem set "KIMI_API_KEY=你的Kimi密钥"
+set "KIMI_API_KEY=你的Kimi密钥"
 
 mvnw.cmd spring-boot:run
 ```
@@ -67,7 +76,7 @@ mvnw.cmd spring-boot:run
 curl http://127.0.0.1:8080/actuator/health
 ```
 
-## 5. 前端启动
+## 6. 前端启动
 
 ```cmd
 cd /d D:\Three-fees\frontend
@@ -83,7 +92,7 @@ corepack pnpm dev --host 127.0.0.1 --port 5173
 http://127.0.0.1:5173/
 ```
 
-## 6. 验证命令
+## 7. 验证命令
 
 ```cmd
 cd /d D:\Three-fees\backend

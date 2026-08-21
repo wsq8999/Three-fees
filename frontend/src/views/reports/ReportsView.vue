@@ -2,10 +2,12 @@
 import { computed, nextTick, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Download, Refresh, Search, Upload } from "@element-plus/icons-vue";
-import type { TableInstance, UploadFile } from "element-plus";
+import type { TableInstance, UploadFile, UploadInstance } from "element-plus";
 import { ElMessage } from "element-plus";
 
 import { businessApi, formatPercent, saveBlob, triggerBrowserDownload } from "@/api/business-api";
+import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
+import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type {
@@ -35,6 +37,8 @@ const importSuccessVisible = ref(false);
 const importError = ref("");
 const selectedRows = ref<ReportSummary[]>([]);
 const tableRef = ref<TableInstance>();
+const historicalUploadRef = ref<UploadInstance>();
+const historicalUploadKey = ref(0);
 const focusedReport = ref<ReportSummary | null>(null);
 
 const importForm = reactive({
@@ -212,6 +216,7 @@ async function openImport(): Promise<void> {
     period: "",
     file: null,
   });
+  resetHistoricalUpload();
   historicalPoints.value = [];
   historicalPeriods.value = [];
   periodLoadFinished.value = false;
@@ -314,8 +319,20 @@ function noPeriodPlaceholder(): string {
   if (!periodLoadFinished.value) return "请选择账期";
   return "该报账点暂无缺失报告账期";
 }
-function removeFile(): void {
+
+function resetHistoricalUpload(): void {
   importForm.file = null;
+  historicalUploadRef.value?.clearFiles();
+  historicalUploadKey.value += 1;
+}
+
+function closeImport(): void {
+  resetHistoricalUpload();
+  importVisible.value = false;
+}
+
+function removeFile(): void {
+  resetHistoricalUpload();
 }
 
 function canSubmitImport(): boolean {
@@ -331,7 +348,7 @@ function fileChanged(file: UploadFile): void {
   if (raw === undefined) return;
   if (!/\.docx?$/i.test(raw.name)) {
     importError.value = "历史报告只支持 .doc 或 .docx 文件。";
-    importForm.file = null;
+    resetHistoricalUpload();
     return;
   }
   importError.value = "";
@@ -377,6 +394,7 @@ async function importHistorical(): Promise<void> {
 
 function closeImportSuccess(): void {
   importSuccessVisible.value = false;
+  resetHistoricalUpload();
   importVisible.value = false;
 }
 async function downloadWord(report: ReportSummary): Promise<void> {
@@ -409,7 +427,7 @@ function exportList(): void {
     "实际总耗电量",
     "实际报账金额",
     "超标类型",
-    "最大超标比例",
+    "超标比例",
   ];
   const content = [
     headers.join(","),
@@ -424,7 +442,9 @@ function exportList(): void {
         row.actualEnergy ?? "",
         row.actualAmount ?? "",
         row.overLimitType ?? "",
-        row.maxRatio ?? "",
+        (row.overLimitRatios ?? [])
+          .map((item) => `${item.label} ${formatPercent(item.ratio)}`)
+          .join("；"),
       ]
         .map(csvCell)
         .join(","),
@@ -493,14 +513,6 @@ function formatEnergy(value: string | number | null | undefined): string {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-}
-
-function overLimitClass(value: string | null | undefined): string {
-  if (value === "多项超标") return "overlimit-multiple";
-  if (value === "仅同比超标" || value === "同比超标") return "overlimit-yoy";
-  if (value === "仅环比超标" || value === "环比超标") return "overlimit-mom";
-  if (value === "仅额定标杆超标" || value === "额定标杆超标") return "overlimit-rated";
-  return "overlimit-none";
 }
 
 function currentHorizontalScroll(): number {
@@ -698,24 +710,15 @@ onMounted(async () => {
       </ElTableColumn>
       <ElTableColumn label="超标类型" width="150">
         <template #default="scope">
-          <ElTag
-            size="small"
-            effect="light"
-            :class="overLimitClass(asReport(scope.row).overLimitType)"
-          >
-            {{ emptyText(asReport(scope.row).overLimitType) }}
-          </ElTag>
+          <OverLimitTypeTags
+            :ratios="asReport(scope.row).overLimitRatios"
+            :fallback="asReport(scope.row).overLimitType"
+          />
         </template>
       </ElTableColumn>
-      <ElTableColumn label="最大超标比例" width="135" align="right">
+      <ElTableColumn label="超标比例" min-width="230">
         <template #default="scope">
-          <span
-            :class="{
-              'max-ratio-danger': hasText(String(asReport(scope.row).maxRatio ?? '')),
-            }"
-          >
-            {{ formatPercent(asReport(scope.row).maxRatio) }}
-          </span>
+          <OverLimitRatioTags :ratios="asReport(scope.row).overLimitRatios" />
         </template>
       </ElTableColumn>
       <ElTableColumn label="操作" width="140" fixed="right" align="center">
@@ -761,6 +764,7 @@ onMounted(async () => {
     append-to-body
     align-center
     :close-on-click-modal="false"
+    @closed="resetHistoricalUpload"
   >
     <section class="dialog-section">
       <h3>基本信息</h3>
@@ -815,6 +819,8 @@ onMounted(async () => {
     <section class="dialog-section upload-section">
       <h3>上传文件</h3>
       <ElUpload
+        :key="historicalUploadKey"
+        ref="historicalUploadRef"
         drag
         :auto-upload="false"
         :limit="1"
@@ -843,7 +849,7 @@ onMounted(async () => {
     />
 
     <template #footer>
-      <ElButton @click="importVisible = false">取消</ElButton>
+      <ElButton @click="closeImport">取消</ElButton>
       <ElButton type="primary" :loading="importing" @click="importHistorical">确认导入</ElButton>
     </template>
   </ElDialog>
@@ -1006,31 +1012,6 @@ onMounted(async () => {
   padding: 10px 16px;
   color: #607089;
   border-top: 1px solid #edf1f5;
-}
-
-.overlimit-yoy {
-  color: #b86100;
-  background: #fff4de;
-}
-
-.overlimit-mom {
-  color: #2368ad;
-  background: #e8f3ff;
-}
-
-.overlimit-rated {
-  color: #b4232d;
-  background: #ffe8eb;
-}
-
-.overlimit-multiple {
-  color: #8a3ffc;
-  background: #f1e8ff;
-}
-
-.overlimit-none {
-  color: #667486;
-  background: #edf1f5;
 }
 
 .dialog-section + .dialog-section {

@@ -74,7 +74,7 @@ async function startExport(): Promise<void> {
     if (completed.downloadUrl === null) {
       throw new Error("导出任务尚未生成下载文件");
     }
-    await triggerBrowserDownload(completed.downloadUrl, "报账点导出.xlsx");
+    await triggerBrowserDownload(completed.downloadUrl, exportFallbackFileName());
     status.value = "success";
     emit("exported");
     ElMessage.success("导出文件已生成并开始下载。");
@@ -83,6 +83,49 @@ async function startExport(): Promise<void> {
     status.value = "failed";
     errorMessage.value = error instanceof Error ? error.message : "导出失败";
   }
+}
+
+function exportFallbackFileName(): string {
+  if (selectedTypes.value.length === 1) {
+    return sanitizeFileName(
+      `${periodLabel(props.period)}电费稽核${datasetLabel(selectedTypes.value[0])}导出${scopeFileLabel()}.xlsx`,
+    );
+  }
+  return sanitizeFileName(
+    `${periodLabel(props.period)}电费稽核多类数据导出（共${selectedTypes.value.length}类）${scopeFileLabel()}.zip`,
+  );
+}
+
+function datasetLabel(datasetType: DatasetType | undefined): string {
+  switch (datasetType) {
+    case "BILLING_POINT":
+      return "报账点清单";
+    case "PAYMENT":
+      return "缴费明细";
+    case "METER_READING":
+      return "电表读数";
+    case "BENCHMARK":
+      return "标杆值";
+    default:
+      return "数据";
+  }
+}
+
+function periodLabel(period: string): string {
+  if (/^\d{4}-\d{2}$/.test(period)) {
+    return `${period.slice(0, 4)}年${period.slice(5, 7)}月`;
+  }
+  return period;
+}
+
+function scopeFileLabel(): string {
+  return props.selectedCount <= 0
+    ? "（全部报账点）"
+    : `（选中${props.selectedCount}个报账点）`;
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, "_");
 }
 
 watch(

@@ -9,6 +9,8 @@ import com.threefees.importing.domain.ImportBatchStatus;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +26,20 @@ class FormalImportTableWriterIntegrationTest {
 
   @Autowired private FormalImportTableWriter writer;
   @Autowired private JdbcTemplate jdbcTemplate;
+
+  @BeforeEach
+  void cleanTestData() {
+    jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY FALSE");
+    jdbcTemplate.update("DELETE FROM audit_report WHERE billing_point_snapshot_id IN (SELECT id FROM billing_point_snapshot WHERE billing_point_code LIKE 'BP-%')");
+    jdbcTemplate.update("DELETE FROM report_draft WHERE billing_point_snapshot_id IN (SELECT id FROM billing_point_snapshot WHERE billing_point_code LIKE 'BP-%')");
+    jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.update("DELETE FROM benchmark_value WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.update("DELETE FROM meter_reading WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.update("DELETE FROM payment_detail WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.update("DELETE FROM billing_point_snapshot WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.update("DELETE FROM billing_point_master WHERE billing_point_code LIKE 'BP-%'");
+    jdbcTemplate.execute("SET REFERENTIAL_INTEGRITY TRUE");
+  }
 
   @Test
   void billingPointImportUpsertsSamePointAndKeepsOtherPointsInSameCityPeriod() {
@@ -60,21 +76,20 @@ class FormalImportTableWriterIntegrationTest {
                 null,
                 billingPointJson("BP-001", "报账点一-更新", "南京市", "秦淮区"))));
 
-    assertThat(count("billing_point_snapshot", "2026-06", "320100")).isEqualTo(2);
+    assertThat(count("billing_point_snapshot", "2026-06", "320100")).isZero();
+    assertThat(countMaster("320100")).isEqualTo(2);
     assertThat(
             jdbcTemplate.queryForObject(
-                "SELECT billing_point_name FROM billing_point_snapshot WHERE city_code=? AND data_period=? AND billing_point_code=?",
+                "SELECT billing_point_name FROM billing_point_master WHERE city_code=? AND billing_point_code=?",
                 String.class,
                 "320100",
-                "2026-06",
                 "BP-001"))
         .isEqualTo("报账点一-更新");
     assertThat(
             jdbcTemplate.queryForObject(
-                "SELECT billing_point_name FROM billing_point_snapshot WHERE city_code=? AND data_period=? AND billing_point_code=?",
+                "SELECT billing_point_name FROM billing_point_master WHERE city_code=? AND billing_point_code=?",
                 String.class,
                 "320100",
-                "2026-06",
                 "BP-002"))
         .isEqualTo("报账点二");
   }
@@ -105,18 +120,16 @@ class FormalImportTableWriterIntegrationTest {
                 billingPointJsonWithResource(
                     "BP-MULTI", "多资源报账点", "南京市", "玄武区", "RES-2", "资源二", "M-2"))));
 
-    assertThat(countByPoint("billing_point_snapshot", "2026-09", "320100", "BP-MULTI"))
-        .isEqualTo(1);
+    assertThat(countByPoint("billing_point_snapshot", "2026-09", "320100", "BP-MULTI")).isZero();
     String dataJson =
         jdbcTemplate.queryForObject(
-            "SELECT data_json FROM billing_point_snapshot WHERE city_code=? AND data_period=? AND billing_point_code=?",
+            "SELECT resource_summary_json FROM billing_point_master WHERE city_code=? AND billing_point_code=?",
             String.class,
             "320100",
-            "2026-09",
             "BP-MULTI");
-    assertThat(dataJson).contains("\"关联资源编码\":\"RES-1、RES-2\"");
-    assertThat(dataJson).contains("\"关联资源名称\":\"资源一、资源二\"");
-    assertThat(dataJson).contains("\"关联电表编码\":\"M-1、M-2\"");
+    assertThat(dataJson).contains("RES-1、RES-2");
+    assertThat(dataJson).contains("资源一、资源二");
+    assertThat(dataJson).contains("M-1、M-2");
   }
 
   @Test
@@ -246,14 +259,200 @@ class FormalImportTableWriterIntegrationTest {
                 null,
                 billingPointJson("BP-SAME", "泰州报账点", "泰州市", "海陵区"))));
 
-    assertThat(count("billing_point_snapshot", "2026-08", "320100")).isEqualTo(1);
-    assertThat(count("billing_point_snapshot", "2026-08", "321200")).isEqualTo(1);
+    assertThat(count("billing_point_snapshot", "2026-08", "320100")).isZero();
+    assertThat(count("billing_point_snapshot", "2026-08", "321200")).isZero();
     assertThat(
             jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM billing_point_master WHERE billing_point_code=?",
                 Integer.class,
                 "BP-SAME"))
         .isEqualTo(2);
+  }
+
+  @Test
+  void onlyPaymentImportCreatesBusinessSnapshot() {
+    ImportBatch billingPointBatch = batch(DatasetType.BILLING_POINT, "2026-10", "320100");
+    ImportBatch benchmarkBatch = batch(DatasetType.BENCHMARK, "2026-10", "320100");
+    ImportBatch meterBatch = batch(DatasetType.METER_READING, "2026-10", "320100");
+    ImportBatch paymentBatch = batch(DatasetType.PAYMENT, "2026-10", "320100");
+
+    writer.replace(
+        billingPointBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-BENCH-ONLY",
+                "仅标杆报账点",
+                null,
+                null,
+                billingPointJson("BP-BENCH-ONLY", "仅标杆报账点", "南京市", "玄武区"))));
+
+    writer.replace(
+        benchmarkBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-BENCH-ONLY",
+                "仅标杆报账点",
+                null,
+                null,
+                benchmarkJson("BP-BENCH-ONLY", "仅标杆报账点", "31"))));
+
+    assertThat(countByPoint("benchmark_value", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isEqualTo(1);
+    assertThat(countByPoint("billing_point_snapshot", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isZero();
+
+    writer.replace(
+        meterBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-BENCH-ONLY",
+                "仅标杆报账点",
+                "PAY-BENCH-ONLY",
+                "M-BENCH-ONLY",
+                meterJson("BP-BENCH-ONLY", "仅标杆报账点", "PAY-BENCH-ONLY", "M-BENCH-ONLY", "30"))));
+
+    assertThat(countByPoint("meter_reading", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isEqualTo(1);
+    assertThat(countByPoint("billing_point_snapshot", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isZero();
+
+    writer.replace(
+        paymentBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-BENCH-ONLY",
+                "仅标杆报账点",
+                "PAY-BENCH-ONLY",
+                null,
+                paymentJson("BP-BENCH-ONLY", "仅标杆报账点", "PAY-BENCH-ONLY", "100.00"))));
+
+    assertThat(countByPoint("billing_point_snapshot", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isEqualTo(1);
+    assertThat(countByPoint("benchmark_value", "2026-10", "320100", "BP-BENCH-ONLY"))
+        .isEqualTo(1);
+    assertThat(
+            jdbcTemplate.queryForObject(
+                "SELECT data_json FROM billing_point_snapshot WHERE city_code=? AND data_period=? AND billing_point_code=?",
+                String.class,
+                "320100",
+                "2026-10",
+                "BP-BENCH-ONLY"))
+        .contains("缴费单编码");
+    assertThat(
+            jdbcTemplate.queryForObject(
+                "SELECT actual_total_kwh FROM payment_detail WHERE city_code=? AND data_period=? AND billing_point_code=?",
+                java.math.BigDecimal.class,
+                "320100",
+                "2026-10",
+                "BP-BENCH-ONLY"))
+        .isEqualByComparingTo("310.00");
+  }
+
+  @Test
+  void paymentImportPersistsExternalAuditBenchmarkFieldsWhenProvided() {
+    ImportBatch paymentBatch = batch(DatasetType.PAYMENT, "2026-07", "320100");
+
+    writer.replace(
+        paymentBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-AUDIT-FIELDS",
+                "稽核字段报账点",
+                "PAY-AUDIT-FIELDS",
+                null,
+                paymentJson("BP-AUDIT-FIELDS", "稽核字段报账点", "PAY-AUDIT-FIELDS", "100.00")
+                    .replace(
+                        "}",
+                        ","
+                            + jsonPair("标杆是否超标", "是")
+                            + ","
+                            + jsonPair("历史电费标杆-同比", "3.11%")
+                            + ","
+                            + jsonPair("历史电费标杆-环比", "否")
+                            + ","
+                            + jsonPair("历史日均电量标杆-同比", "8.12%")
+                            + ","
+                            + jsonPair("历史日均电量标杆-环比", "21.81%")
+                            + ","
+                            + jsonPair("额定功率标杆", "否")
+                            + "}"))));
+
+    Map<String, Object> stored =
+        jdbcTemplate.queryForMap(
+            """
+            SELECT benchmark_over_limit, historical_fee_benchmark_yoy,
+                   historical_fee_benchmark_mom, historical_daily_energy_yoy,
+                   historical_daily_energy_mom, rated_power_benchmark
+              FROM payment_detail
+             WHERE city_code=? AND data_period=? AND billing_point_code=?
+            """,
+            "320100",
+            "2026-07",
+            "BP-AUDIT-FIELDS");
+
+    assertThat(stored.get("BENCHMARK_OVER_LIMIT")).isEqualTo("是");
+    assertThat(stored.get("HISTORICAL_FEE_BENCHMARK_YOY")).isEqualTo("3.11%");
+    assertThat(stored.get("HISTORICAL_FEE_BENCHMARK_MOM")).isEqualTo("否");
+    assertThat((java.math.BigDecimal) stored.get("HISTORICAL_DAILY_ENERGY_YOY"))
+        .isEqualByComparingTo("8.12");
+    assertThat((java.math.BigDecimal) stored.get("HISTORICAL_DAILY_ENERGY_MOM"))
+        .isEqualByComparingTo("21.81");
+    assertThat(stored.get("RATED_POWER_BENCHMARK")).isNull();
+  }
+
+  @Test
+  void benchmarkImportUsesMonthlyBenchmarkAsAuditTotalWhenDailyValuesAreIncomplete() {
+    ImportBatch benchmarkBatch = batch(DatasetType.BENCHMARK, "2026-07", "320100");
+
+    writer.replace(
+        benchmarkBatch,
+        List.of(
+            row(
+                2,
+                "320100",
+                "BP-MONTH-BENCHMARK",
+                "月总标杆报账点",
+                null,
+                null,
+                benchmarkJson("BP-MONTH-BENCHMARK", "月总标杆报账点", "310.00"))));
+
+    Map<String, Object> stored =
+        jdbcTemplate.queryForMap(
+            """
+            SELECT day_total, calculated_month_avg, benchmark_month_value, calculated_day_total
+              FROM benchmark_value
+             WHERE city_code=? AND data_period=? AND billing_point_code=?
+            """,
+            "320100",
+            "2026-07",
+            "BP-MONTH-BENCHMARK");
+
+    assertThat((java.math.BigDecimal) stored.get("DAY_TOTAL")).isEqualByComparingTo("2.00");
+    assertThat((java.math.BigDecimal) stored.get("BENCHMARK_MONTH_VALUE"))
+        .isEqualByComparingTo("310.00");
+    assertThat((java.math.BigDecimal) stored.get("CALCULATED_DAY_TOTAL"))
+        .isEqualByComparingTo("310.00");
+    assertThat((java.math.BigDecimal) stored.get("CALCULATED_MONTH_AVG"))
+        .isEqualByComparingTo("10.00");
+  }
+
+  private int countMaster(String cityCode) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM billing_point_master WHERE city_code = ?",
+            Integer.class,
+            cityCode);
+    return count == null ? 0 : count;
   }
 
   private int count(String table, String period, String cityCode) {
@@ -378,7 +577,13 @@ class FormalImportTableWriterIntegrationTest {
         + ","
         + jsonPair("缴费期终", "2026-07-31")
         + ","
+        + jsonPair("缴费天数", "31")
+        + ","
+        + jsonPair("日均耗电量", "10.00")
+        + ","
         + jsonPair("实际报账金额", amount)
+        + ","
+        + jsonPair("实际总耗电量", "310.00")
         + "}";
   }
 

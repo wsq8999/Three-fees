@@ -8,8 +8,11 @@ Java 21 / Spring Boot 4.1 模块化单体。MySQL 是业务事实源，浏览器
 1. 创建 MySQL 8.0.31 或 8.4 数据库，字符集使用 `utf8mb4`。
 2. 在当前终端设置 `DB_URL`、`DB_USERNAME`、`DB_PASSWORD`。
 3. 首次空库启动时设置 `INITIAL_ACCOUNT_PASSWORD` 为项目约定的临时初始口令。
-4. 启用 AI 稽核时设置 `AI_ENABLED=true`、`KIMI_API_KEY`、`KIMI_MODEL`，密钥只放进进程环境。
-5. 执行 `./mvnw spring-boot:run`（Windows 使用 `mvnw.cmd`）。
+4. 本机联调推荐在仓库根目录执行 `.\scripts\check-kimi-env.ps1` 和
+   `.\scripts\start-local.ps1`，脚本会给后端进程注入 `AI_ENABLED=true`、
+   `KIMI_API_KEY`、`KIMI_MODEL`，密钥只放进进程环境。
+5. 手动启动时必须自行设置 `AI_ENABLED=true`、`KIMI_API_KEY`、`KIMI_MODEL`，
+   然后执行 `./mvnw spring-boot:run`（Windows 使用 `mvnw.cmd`）。
 
 AI 能力由 Spring AI 直接在 Spring Boot 内调用 Kimi 的 OpenAI 兼容接口，不需要启动 Python/FastAPI 服务。
 

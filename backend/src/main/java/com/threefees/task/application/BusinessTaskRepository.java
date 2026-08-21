@@ -24,4 +24,6 @@ public interface BusinessTaskRepository {
   boolean fail(BusinessTask task, String errorCode, boolean retryable, Duration retryDelay);
 
   boolean retry(String publicId);
+
+  boolean requeueWithPayload(String publicId, String payloadJson, String actor);
 }

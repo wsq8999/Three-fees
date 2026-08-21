@@ -27,7 +27,9 @@ public class AuditCalculator {
     }
 
     BigDecimal currentDaily =
-        divide(input.actualEnergy(), BigDecimal.valueOf(input.currentPaymentDays()));
+        input.currentDailyEnergy() == null
+            ? divide(input.actualEnergy(), BigDecimal.valueOf(input.currentPaymentDays()))
+            : input.currentDailyEnergy();
     MetricResult yoy =
         historicalMetric(
             currentDaily,
@@ -109,16 +111,21 @@ public class AuditCalculator {
     if (b.signum() <= 0) {
       return MetricResult.notApplicable(label + "参考缴费额定日均 B 小于等于 0");
     }
-    BigDecimal c = divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()));
+    BigDecimal c =
+        reference.dailyEnergy() == null
+            ? divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()))
+            : reference.dailyEnergy();
     BigDecimal k = a.divide(b, INTERNAL_CONTEXT).max(BigDecimal.ONE);
     BigDecimal threshold =
-        c.multiply(k, INTERNAL_CONTEXT).multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT);
+        c.multiply(k, INTERNAL_CONTEXT)
+            .multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT)
+            .setScale(2, RoundingMode.HALF_UP);
     boolean overLimit = currentDaily.compareTo(threshold) > 0;
     BigDecimal ratio = overLimit ? ratio(currentDaily, threshold) : BigDecimal.ZERO;
-    String note = label + "阈值 = 参考日均 C * max(1, A/B) * 1.20";
+    String note = label + "正常上限 = 参考日均 C * max(1, A/B) * 1.20";
     if (threshold.signum() == 0 && overLimit) {
       ratio = null;
-      note += "；阈值为 0，比例不定义";
+      note += "；正常上限为 0，比例不定义";
     }
     return new MetricResult(true, overLimit, currentDaily, threshold, ratio, note);
   }
@@ -135,7 +142,7 @@ public class AuditCalculator {
           actualEnergy,
           benchmarkTotal,
           overLimit ? null : BigDecimal.ZERO,
-          overLimit ? "额定标杆阈值为 0，实际用电大于 0" : "额定标杆与实际用电均为 0");
+          overLimit ? "额定标杆正常上限为 0，实际用电大于 0" : "额定标杆与实际用电均为 0");
     }
     return new MetricResult(
         true,
@@ -143,7 +150,7 @@ public class AuditCalculator {
         actualEnergy,
         benchmarkTotal,
         overLimit ? ratio(actualEnergy, benchmarkTotal) : BigDecimal.ZERO,
-        "额定标杆总量取当月有效日标杆值之和");
+        "额定标杆正常上限优先取系统计算后的当月标杆总量，缺失时回退日列合计");
   }
 
   private BigDecimal ratio(BigDecimal actual, BigDecimal threshold) {
