@@ -14,6 +14,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.springframework.dao.TransientDataAccessException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -80,7 +81,14 @@ public class TaskWorker {
     if (availableSlots <= 0) {
       return;
     }
-    for (BusinessTask task : repository.claimAvailable(leaseOwner, leaseDuration, availableSlots)) {
+    List<BusinessTask> tasks;
+    try {
+      tasks = repository.claimAvailable(leaseOwner, leaseDuration, availableSlots);
+    } catch (TransientDataAccessException exception) {
+      LOGGER.warn("后台任务领取遇到数据库临时并发冲突，本轮跳过，下次自动继续。");
+      return;
+    }
+    for (BusinessTask task : tasks) {
       runningTasks.incrementAndGet();
       taskExecutor.submit(
           () -> {

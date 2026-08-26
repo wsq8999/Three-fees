@@ -142,7 +142,11 @@ public class ImportBatchController {
     ImportBatch batch = findBatch(publicId);
     requireScope(batch, actor);
     boolean transientFailure =
-        batch.errors().stream().allMatch(error -> "IMPORT_PROCESSING_FAILED".equals(error.code()));
+        batch.errors().stream()
+            .allMatch(
+                error ->
+                    "IMPORT_PROCESSING_FAILED".equals(error.code())
+                        || "IMPORT_CONCURRENT_DATABASE_CONFLICT".equals(error.code()));
     if (!transientFailure) {
       throw new ResourceConflictException("IMPORT_REQUIRES_NEW_FILE", "校验失败需要修正文件后创建新的导入批次");
     }

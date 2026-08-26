@@ -2,7 +2,10 @@ package com.threefees.importing.application;
 
 import com.threefees.file.application.StoredFileService;
 import com.threefees.identity.application.BusinessRuleException;
+import com.threefees.identity.application.ResourceNotFoundException;
+import com.threefees.importing.application.ImportActivationService.ActivationItem;
 import com.threefees.importing.domain.ImportError;
+import com.threefees.importing.domain.ImportBatch;
 import com.threefees.task.application.TaskExecutionException;
 import com.threefees.task.application.TaskProcessor;
 import com.threefees.task.domain.BusinessTask;
@@ -19,6 +22,7 @@ import tools.jackson.databind.ObjectMapper;
 public class ImportTaskProcessor implements TaskProcessor {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ImportTaskProcessor.class);
+  private static final Object IMPORT_PROCESS_MONITOR = new Object();
 
   private final ImportBatchRepository batchRepository;
   private final StoredFileService storedFileService;
@@ -50,8 +54,17 @@ public class ImportTaskProcessor implements TaskProcessor {
 
   @Override
   public String process(BusinessTask task) {
+    synchronized (IMPORT_PROCESS_MONITOR) {
+      return processSequentially(task);
+    }
+  }
+
+  private String processSequentially(BusinessTask task) {
 
     ImportTaskPayload payload = readPayload(task.payloadJson());
+    if (payload.items() != null && !payload.items().isEmpty()) {
+      return processFileTask(payload, task);
+    }
 
     String batchPublicId = payload.batchId();
 
@@ -147,6 +160,100 @@ public class ImportTaskProcessor implements TaskProcessor {
     }
   }
 
+  private String processFileTask(ImportTaskPayload payload, BusinessTask task) {
+    List<ImportTaskItem> payloadItems = List.copyOf(payload.items());
+    List<ImportBatch> batches =
+        payloadItems.stream()
+            .map(
+                item ->
+                    batchRepository
+                        .findByPublicId(item.batchId())
+                        .orElseThrow(() -> new ResourceNotFoundException("import batch")))
+            .toList();
+
+    for (ImportBatch batch : batches) {
+      batchRepository.markProcessing(batch.id());
+    }
+
+    try {
+      for (ImportBatch batch : batches) {
+        if (!batchRepository.prerequisitesActive(batch)) {
+          List<ImportError> errors =
+              List.of(
+                  new ImportError(
+                      0,
+                      "datasetType",
+                      "IMPORT_PREREQUISITE_MISSING",
+                      "请先导入报账点清单；缴费明细、电表读数、标杆值可任意顺序导入"));
+          markFailed(batches, errors);
+          throw new TaskExecutionException(
+              "IMPORT_PREREQUISITE_MISSING", errors.getFirst().message(), false);
+        }
+      }
+
+      List<ActivationItem> activationItems = new java.util.ArrayList<>();
+      for (int index = 0; index < batches.size(); index++) {
+        ImportBatch batch = batches.get(index);
+        ImportTaskItem item = payloadItems.get(index);
+        List<ImportRow> rows =
+            item.rows() == null || item.rows().isEmpty()
+                ? loadRowsFromSource(batch)
+                : List.copyOf(item.rows());
+        importActivationService.preflightValidate(batch, rows);
+        batchRepository.markPreflightCompleted(batch.id(), rows.size());
+        activationItems.add(new ActivationItem(batch, rows));
+      }
+
+      importActivationService.replaceActivateAndRecalculateAll(activationItems);
+
+      return writeJson(
+          Map.of(
+              "batchIds",
+              batches.stream().map(ImportBatch::publicId).toList(),
+              "status",
+              "ACTIVE"));
+
+    } catch (ImportValidationException exception) {
+
+      markFailed(batches, exception.errors());
+
+      throw new TaskExecutionException("IMPORT_VALIDATION_FAILED", exception.getMessage(), false);
+
+    } catch (BusinessRuleException exception) {
+
+      markFailed(batches, List.of(new ImportError(0, "file", exception.code(), exception.getMessage())));
+
+      throw new TaskExecutionException(exception.code(), exception.getMessage(), false);
+
+    } catch (TaskExecutionException exception) {
+
+      throw exception;
+
+    } catch (RuntimeException exception) {
+
+      LOGGER.error(
+          "Import file processing failed taskId={} batchCount={}",
+          task.publicId(),
+          batches.size(),
+          exception);
+
+      String message =
+          exception.getMessage() == null || exception.getMessage().isBlank()
+              ? "导入处理失败，可通过任务重试"
+              : exception.getMessage();
+
+      markFailed(batches, List.of(new ImportError(0, "system", "IMPORT_PROCESSING_FAILED", message)));
+
+      throw new TaskExecutionException("IMPORT_PROCESSING_FAILED", message, true);
+    }
+  }
+
+  private void markFailed(List<ImportBatch> batches, List<ImportError> errors) {
+    for (ImportBatch batch : batches) {
+      batchRepository.markFailed(batch.id(), errors);
+    }
+  }
+
   /**
    * 兼容旧任务。
    *
@@ -202,7 +309,10 @@ public class ImportTaskProcessor implements TaskProcessor {
     try {
       ImportTaskPayload payload = objectMapper.readValue(json, ImportTaskPayload.class);
 
-      if (payload == null || payload.batchId() == null || payload.batchId().isBlank()) {
+      boolean hasSingleBatch = payload != null && payload.batchId() != null && !payload.batchId().isBlank();
+      boolean hasFileItems = payload != null && payload.items() != null && !payload.items().isEmpty();
+
+      if (!hasSingleBatch && !hasFileItems) {
 
         throw new IllegalStateException("Import task payload does not contain batchId");
       }
@@ -229,5 +339,7 @@ public class ImportTaskProcessor implements TaskProcessor {
    *
    * <p>用于兼容升级前只有 batchId 的旧任务。
    */
-  private record ImportTaskPayload(String batchId, List<ImportRow> rows) {}
+  private record ImportTaskPayload(String batchId, List<ImportRow> rows, List<ImportTaskItem> items) {}
+
+  private record ImportTaskItem(String batchId, List<ImportRow> rows) {}
 }

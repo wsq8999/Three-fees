@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 class BenchmarkRuleControllerTest {
 
   @Test
-  void benchmarkRulesDescribeNormalUpperLimitAndDailyBenchmarkTotals() {
+  void benchmarkRulesDescribeNormalUpperLimitAndPaymentDayBenchmarkAverages() {
     var rules = new BenchmarkRuleController().list();
 
     assertThat(rules)
@@ -19,7 +19,7 @@ class BenchmarkRuleControllerTest {
             });
 
     var yoy = rules.stream().filter(rule -> rule.key().equals("YEAR_ON_YEAR")).findFirst().orElseThrow();
-    assertThat(yoy.formula()).contains("标杆日列合计", "C×K×1.20");
-    assertThat(yoy.chain()).contains("当前日均大于正常上限则超标");
+    assertThat(yoy.formula()).contains("额定功率标杆月总值", "缴费天数", "C×K×1.20");
+    assertThat(yoy.chain()).contains("本期日均耗电量大于正常上限则超标");
   }
 }

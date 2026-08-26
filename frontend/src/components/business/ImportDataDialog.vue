@@ -4,7 +4,12 @@ import type { UploadFile, UploadInstance } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
-import type { DatasetType, ImportBatch, ImportSessionItem } from "@/types/business";
+import type {
+  DatasetType,
+  ImportBatch,
+  ImportErrorItem,
+  ImportSessionItem,
+} from "@/types/business";
 
 /* =========================================================
  * Props / Emits
@@ -66,7 +71,7 @@ const datasetMeta: Record<
 > = {
   BILLING_POINT: {
     label: "报账点清单",
-    description: "基础报账点和归属关系",
+    description: "全局基础信息，与账期无关，同城市同编码将覆盖",
     fieldCount: 73,
   },
 
@@ -211,6 +216,20 @@ const completedBatches = computed(() =>
   trackedBatches.value.filter(isTerminalBatch),
 );
 
+/**
+ * 已处理批次。
+ *
+ * 文件级导入为了保证全部成功才正式入库，
+ * 后端会先按账期逐个预检并写入 rowCount。
+ * PROCESSING + rowCount > 0 表示该账期预检已完成，
+ * 可以用于展示真实进度，但不能用于最终成功判定。
+ */
+const progressedBatches = computed(() =>
+  trackedBatches.value.filter(
+    (batch) => isTerminalBatch(batch) || (batch.status === "PROCESSING" && batch.rowCount > 0),
+  ),
+);
+
 
 /**
  * 失败批次。
@@ -258,7 +277,7 @@ const progressPercentage = computed(() => {
   }
 
   return Math.round(
-    (completedBatches.value.length / total) * 100,
+    (progressedBatches.value.length / total) * 100,
   );
 });
 
@@ -319,6 +338,10 @@ const progressSummary = computed(() => {
     return "导入成功";
   }
 
+  if (progressedBatches.value.length === total) {
+    return "正在写入正式数据";
+  }
+
   return total > 1
     ? "正在处理多个账期"
     : "正在处理导入任务";
@@ -338,7 +361,7 @@ const progressDetail = computed(() => {
     return "";
   }
 
-  return `总批次 ${total} 个，已完成 ${completedBatches.value.length} 个`;
+  return `总批次 ${total} 个，已完成 ${progressedBatches.value.length} 个`;
 });
 
 /* =========================================================
@@ -349,10 +372,7 @@ const retryableFailedBatches = computed(() =>
   failedBatches.value.filter(
     (batch) =>
       batch.errors.length > 0 &&
-      batch.errors.every(
-        (error) =>
-          error.code === "IMPORT_PROCESSING_FAILED",
-      ),
+      batch.errors.every(isRetryableImportError),
   ),
 );
 
@@ -369,6 +389,7 @@ const sampledErrors = computed(() =>
       batch.errors.map((error) => ({
         ...error,
         batchLabel: importBatchLabel(batch),
+        displayMessage: importErrorMessage(error),
       })),
     )
     .slice(0, 8),
@@ -546,12 +567,52 @@ function defaultImportStates(): Record<DatasetType, DatasetImportState> {
   };
 }
 
+function isDatabaseConflictMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("deadlock found") ||
+    normalized.includes("preparedstatementcallback") ||
+    normalized.includes("insert into audit_result") ||
+    normalized.includes("cannotacquirelock") ||
+    normalized.includes("deadlockloser")
+  );
+}
+
+function importErrorMessage(error: ImportErrorItem): string {
+  if (
+    error.code === "IMPORT_CONCURRENT_DATABASE_CONFLICT" ||
+    isDatabaseConflictMessage(error.message)
+  ) {
+    return "导入处理失败，请重试失败项。";
+  }
+
+  if (error.code === "IMPORT_PROCESSING_FAILED") {
+    return error.message.trim().length > 0
+      ? error.message
+      : "导入处理失败，请重试失败项。";
+  }
+
+  return error.message.trim().length > 0
+    ? error.message
+    : "导入失败，请查看失败详情后重试或重新上传该类文件。";
+}
+
+function isRetryableImportError(error: ImportErrorItem): boolean {
+  return (
+    error.code === "IMPORT_PROCESSING_FAILED" ||
+    error.code === "IMPORT_CONCURRENT_DATABASE_CONFLICT" ||
+    isDatabaseConflictMessage(error.message)
+  );
+}
+
 function sessionItemError(item: ImportSessionItem): string {
   const firstError = item.batches
     .flatMap((batch) => batch.errors)
     .find((error) => error.message.trim().length > 0);
 
-  return firstError?.message ?? "导入失败，请查看失败详情后重试或重新上传该类文件。";
+  return firstError === undefined
+    ? "导入失败，请查看失败详情后重试或重新上传该类文件。"
+    : importErrorMessage(firstError);
 }
 
 function applyRecoveredSessionItem(
@@ -1166,23 +1227,23 @@ async function retry(): Promise<void> {
   progressIssue.value = null;
 
   try {
-    const retried =
-      await Promise.all(
-        retryableFailedBatches.value.map(
-          (batch) =>
-            businessApi.imports.retry(
-              batch.id,
-            ),
-        ),
-      );
+    const retryTargets = Array.from(
+      new Map(
+        retryableFailedBatches.value.map((batch) => [batch.taskId ?? batch.id, batch]),
+      ).values(),
+    );
 
-    runningBatches.value = retried;
+    await Promise.all(
+      retryTargets.map((batch) => businessApi.imports.retry(batch.id)),
+    );
+
+    runningBatches.value = retryableFailedBatches.value;
 
     runningBatch.value =
-      retried[0] ?? null;
+      retryableFailedBatches.value[0] ?? null;
 
     await pollBatches(
-      retried.map(
+      retryableFailedBatches.value.map(
         (batch) => batch.id,
       ),
       selectedType.value,
@@ -1555,10 +1616,13 @@ watch(
               :key="`${item.batchLabel}-${item.row}-${item.column}-${item.code ?? ''}`"
             >
               {{ item.batchLabel }}：
-              第 {{ item.row }} 行
-              {{ item.column }}
-              {{ item.code ?? "" }}
-              {{ item.message }}
+              <span v-if="item.row > 0">
+                第 {{ item.row }} 行
+              </span>
+              <span v-if="item.column && item.column !== 'system'">
+                {{ item.column }}
+              </span>
+              {{ item.displayMessage }}
             </li>
           </ul>
 

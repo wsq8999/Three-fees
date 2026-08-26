@@ -113,7 +113,7 @@ public class ReportGenerationController {
       @NotBlank @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
       @NotBlank @Size(max = 2_000_000) String contentHtml,
       @Size(max = 4_000) String instruction,
-      @NotNull @Size(min = 1, max = 10) List<AnalyzeImage> images) {}
+      @NotNull @Size(min = 1) List<AnalyzeImage> images) {}
 
   public record AnalyzeImage(
       @NotBlank @Size(max = 255) String fileName,

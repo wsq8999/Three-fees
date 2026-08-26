@@ -25,6 +25,8 @@ public interface ImportBatchRepository {
 
   Optional<ImportBatch> findById(long id);
 
+  List<ImportBatch> findByTaskPublicId(String taskPublicId);
+
   List<ImportBatch> findPage(
       DatasetType datasetType, String period, String cityCode, int offset, int limit);
 
@@ -45,6 +47,8 @@ public interface ImportBatchRepository {
   Optional<String> findActiveCityForBillingPoint(String period, String billingPointCode);
 
   void markProcessing(long id);
+
+  void markPreflightCompleted(long id, int rowCount);
 
   void markSucceeded(ImportBatch batch, int rowCount);
 

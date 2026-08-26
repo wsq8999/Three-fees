@@ -51,12 +51,17 @@ public class AuditReportService {
                    d.current_version_no, d.title, d.situation, d.analysis, d.rectification,
                    d.current_image_file_ids_json, d.formal_report_public_id, d.ai_final_reason,
                    s.id AS snapshot_db_id, s.public_id AS snapshot_public_id,
-                   s.billing_point_code, s.billing_point_name, s.city_code, s.data_period,
-                   s.data_json AS snapshot_json,
+                   s.billing_point_code,
+                   COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+                   s.city_code, s.data_period,
+                   COALESCE(m.resource_summary_json, s.data_json) AS snapshot_json,
                    a.detail_json AS audit_json, a.audit_status, a.over_limit_type,
                    a.max_ratio, a.actual_energy, a.actual_amount
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
@@ -561,6 +566,119 @@ public class AuditReportService {
             total,
             totalPages);
     }
+
+    @Transactional(readOnly = true)
+    public ReportFilterOptions filterOptions(
+        String reportNumber,
+        String billingPointCode,
+        String billingPointName,
+        String period,
+        String cityCode,
+        String source,
+        CurrentUser actor) {
+
+        String scopedCity = scopeCity(actor, cityCode);
+        var arguments =
+            new java.util.ArrayList<Object>();
+
+        StringBuilder where =
+            new StringBuilder(" WHERE 1=1");
+
+        if (scopedCity != null && !scopedCity.isBlank()) {
+            where.append(" AND s.city_code = ?");
+            arguments.add(scopedCity);
+        }
+
+        if (period != null && !period.isBlank()) {
+            where.append(" AND s.data_period = ?");
+            arguments.add(period.trim());
+        }
+
+        if (reportNumber != null && !reportNumber.isBlank()) {
+            where.append(" AND r.report_number LIKE ?");
+            arguments.add("%" + reportNumber.trim() + "%");
+        }
+
+        if (billingPointCode != null && !billingPointCode.isBlank()) {
+            where.append(" AND s.billing_point_code LIKE ?");
+            arguments.add("%" + billingPointCode.trim() + "%");
+        }
+
+        if (billingPointName != null && !billingPointName.isBlank()) {
+            where.append(" AND s.billing_point_name LIKE ?");
+            arguments.add("%" + billingPointName.trim() + "%");
+        }
+
+        appendSourceFilter(where, arguments, source);
+
+        var periods =
+            new java.util.TreeSet<String>(
+                java.util.Comparator.reverseOrder());
+        var cities =
+            new java.util.LinkedHashMap<String, String>();
+        var districts =
+            new java.util.TreeSet<String>();
+
+        jdbcTemplate.query(
+            """
+            SELECT s.data_period,
+                   s.city_code,
+                   c.name AS city_name,
+                   COALESCE(
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''),
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."区县"')), ''),
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."行政区"')), ''),
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区域"')), ''),
+                     NULLIF(s.district_name, '')
+                   ) AS district
+              FROM audit_report r
+              JOIN billing_point_snapshot s
+                ON s.id = r.billing_point_snapshot_id
+              JOIN city c
+                ON c.code = s.city_code
+            """
+                + where
+                + " ORDER BY s.data_period DESC, c.name ASC",
+            resultSet -> {
+                periods.add(resultSet.getString("data_period"));
+                cities.put(
+                    resultSet.getString("city_code"),
+                    resultSet.getString("city_name"));
+
+                String district = resultSet.getString("district");
+                if (district != null && !district.isBlank()) {
+                    districts.add(district);
+                }
+            },
+            arguments.toArray());
+
+        return new ReportFilterOptions(
+            List.copyOf(periods),
+            cities.entrySet().stream()
+                .map(entry -> new ReportCityOption(entry.getKey(), entry.getValue()))
+                .toList(),
+            List.copyOf(districts));
+    }
+
+  private void appendSourceFilter(
+      StringBuilder where, List<Object> arguments, String source) {
+    if (source == null || source.isBlank()) {
+      return;
+    }
+
+    if ("HISTORICAL_IMPORT".equals(source)) {
+      where.append(" AND r.source_type IN ('HISTORICAL', 'IMPORTED')");
+      return;
+    }
+
+    if ("SYSTEM".equals(source)) {
+      where.append(" AND r.source_type NOT IN ('HISTORICAL', 'IMPORTED')");
+      return;
+    }
+
+    where.append(" AND r.source_type = ?");
+    arguments.add(source.trim());
+  }
 
   @Transactional(readOnly = true)
   public ReportDetail find(String publicId, CurrentUser actor) {
@@ -1176,6 +1294,13 @@ public class AuditReportService {
 
   public record ReportPage(
       List<ReportSummary> items, int page, int size, long total, int totalPages) {}
+
+  public record ReportFilterOptions(
+      List<String> periods,
+      List<ReportCityOption> cities,
+      List<String> districts) {}
+
+  public record ReportCityOption(String code, String name) {}
 
   public record ReportDetail(
       String id,

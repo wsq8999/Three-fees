@@ -50,6 +50,7 @@ public class FormalImportTableWriter {
   private static final String RATED_POWER_BENCHMARK = "额定功率标杆";
   private static final String METER_ACCOUNT_NO = "电表户号";
   private static final String METER_MULTIPLIER = "电表倍率";
+  private static final String METER_STATUS = "电表状态";
   private static final String ALLOCATED_ENERGY = "分摊后度数";
   private static final String RESOURCE_CODE = "关联资源编码";
   private static final String RESOURCE_NAME = "关联资源名称";
@@ -95,6 +96,9 @@ public class FormalImportTableWriter {
       mergeMultiValue(merged, group, RESOURCE_CODE);
       mergeMultiValue(merged, group, RESOURCE_NAME);
       mergeMultiValue(merged, group, METER_CODE);
+      mergeMultiValue(merged, group, METER_ACCOUNT_NO);
+      mergeMultiValue(merged, group, METER_MULTIPLIER);
+      mergeMultiValue(merged, group, METER_STATUS);
       aggregated.add(
           new ImportRow(
               first.sourceRow(),

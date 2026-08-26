@@ -15,7 +15,12 @@ class AuditCalculatorTest {
     var current = YearMonth.of(2024, 2);
     var reference =
         new AuditCalculationInput.ReferencePeriod(
-            YearMonth.of(2023, 2), true, new BigDecimal("2800"), new BigDecimal("2800"));
+            YearMonth.of(2023, 2),
+            true,
+            new BigDecimal("2800"),
+            new BigDecimal("200.00"),
+            28,
+            new BigDecimal("2800"));
 
     var result =
         calculator.calculate(
@@ -23,11 +28,13 @@ class AuditCalculatorTest {
                 current,
                 true,
                 new BigDecimal("4000"),
+                new BigDecimal("137.93"),
+                29,
                 new BigDecimal("5800"),
                 reference,
                 reference));
 
-    assertThat(result.yoy().threshold()).isEqualByComparingTo("240");
+    assertThat(result.yoy().threshold()).isEqualByComparingTo("480");
     assertThat(result.yoy().overLimit()).isFalse();
     assertThat(result.rated().overLimit()).isFalse();
     assertThat(result.status()).isEqualTo(AuditStatus.NORMAL);
@@ -44,6 +51,8 @@ class AuditCalculatorTest {
                 YearMonth.of(2024, 1),
                 true,
                 new BigDecimal("3200"),
+                new BigDecimal("103.23"),
+                31,
                 new BigDecimal("3100"),
                 reference,
                 null));
@@ -96,35 +105,48 @@ class AuditCalculatorTest {
   }
 
   @Test
-  void comparisonDoesNotRoundValuesBeforeThresholdDecision() {
+  void importedDailyValueUsesSixDecimalScaleBeforeThresholdDecision() {
     var reference =
         new AuditCalculationInput.ReferencePeriod(
-            YearMonth.of(2023, 1), true, new BigDecimal("31"), new BigDecimal("31"));
+            YearMonth.of(2023, 1),
+            true,
+            new BigDecimal("31"),
+            new BigDecimal("1.00"),
+            31,
+            new BigDecimal("31"));
     var result =
         calculator.calculate(
             new AuditCalculationInput(
                 YearMonth.of(2024, 1),
                 true,
                 new BigDecimal("37.200000000000000000000000000000031"),
+                new BigDecimal("1.200000000000000000000000000000001"),
+                31,
                 new BigDecimal("31"),
                 reference,
                 null));
 
     assertThat(result.yoy().threshold()).isEqualByComparingTo("1.20");
-    assertThat(result.yoy().overLimit()).isTrue();
+    assertThat(result.yoy().overLimit()).isFalse();
   }
 
   @Test
   void historicalDailyMetricsUsePaymentDaysAndDoNotReduceThresholdWhenRatedRatioIsBelowOne() {
     var reference =
         new AuditCalculationInput.ReferencePeriod(
-            YearMonth.of(2025, 6), true, new BigDecimal("300"), 10, new BigDecimal("400"));
+            YearMonth.of(2025, 6),
+            true,
+            new BigDecimal("300"),
+            new BigDecimal("30.00"),
+            10,
+            new BigDecimal("400"));
     var result =
         calculator.calculate(
             new AuditCalculationInput(
                 YearMonth.of(2026, 6),
                 true,
                 new BigDecimal("361"),
+                new BigDecimal("36.10"),
                 10,
                 new BigDecimal("200"),
                 reference,
@@ -137,7 +159,7 @@ class AuditCalculatorTest {
   }
 
   @Test
-  void historicalMetricsUseImportedDailyEnergyAndTwoDecimalThresholdForRatio() {
+  void historicalMetricsUseImportedDailyEnergyWhenAvailableForRatio() {
     var reference =
         new AuditCalculationInput.ReferencePeriod(
             YearMonth.of(2024, 5),
@@ -159,8 +181,65 @@ class AuditCalculatorTest {
                 reference,
                 null));
 
-    assertThat(result.currentDailyEnergy()).isEqualByComparingTo("46.00");
+    assertThat(result.currentDailyEnergy()).isEqualByComparingTo("46.000000");
     assertThat(result.yoy().threshold()).isEqualByComparingTo("42.16");
     assertThat(result.yoy().ratioPercent()).isEqualByComparingTo("9.108159");
+  }
+
+  @Test
+  void confirmedAbcFormulaUsesSixDecimalIntermediateValues() {
+    var yoyReference =
+        new AuditCalculationInput.ReferencePeriod(
+            YearMonth.of(2025, 1),
+            true,
+            new BigDecimal("5352.83"),
+            new BigDecimal("172.671935"),
+            31,
+            new BigDecimal("7014.24"));
+    var momReference =
+        new AuditCalculationInput.ReferencePeriod(
+            YearMonth.of(2025, 12),
+            true,
+            new BigDecimal("4329.48"),
+            new BigDecimal("139.660645"),
+            31,
+            new BigDecimal("7239.102"));
+
+    var result =
+        calculator.calculate(
+            new AuditCalculationInput(
+                YearMonth.of(2026, 1),
+                true,
+                new BigDecimal("6500"),
+                new BigDecimal("209.677419"),
+                31,
+                new BigDecimal("7020.7312"),
+                yoyReference,
+                momReference));
+
+    assertThat(result.yoy().threshold()).isEqualByComparingTo("207.40");
+    assertThat(result.mom().threshold()).isEqualByComparingTo("167.59");
+  }
+
+  @Test
+  void historicalMetricsDoNotInferDailyEnergyWhenImportedDailyFieldIsMissing() {
+    var reference =
+        new AuditCalculationInput.ReferencePeriod(
+            YearMonth.of(2025, 1), true, new BigDecimal("3100"), 31, new BigDecimal("3100"));
+
+    var result =
+        calculator.calculate(
+            new AuditCalculationInput(
+                YearMonth.of(2026, 1),
+                true,
+                new BigDecimal("3200"),
+                new BigDecimal("103.23"),
+                31,
+                new BigDecimal("3100"),
+                reference,
+                null));
+
+    assertThat(result.yoy().applicable()).isFalse();
+    assertThat(result.yoy().note()).contains("A、B、C");
   }
 }

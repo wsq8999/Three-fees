@@ -41,17 +41,13 @@ public class AiImageAnalysisTaskProcessor implements TaskProcessor {
       draftService.markImageAnalysisFailed(payload.draftId(), exception.code(), task.createdBy());
       throw exception;
     } catch (AiServiceException exception) {
-      if (!exception.retryable() || task.attempts() >= task.maxAttempts()) {
-        draftService.markImageAnalysisFailed(payload.draftId(), exception.code(), task.createdBy());
-      }
-      throw new TaskExecutionException(exception.code(), exception.getMessage(), exception.retryable());
+      draftService.markImageAnalysisFailed(payload.draftId(), exception.code(), task.createdBy());
+      throw new TaskExecutionException(exception.code(), exception.getMessage(), false);
     } catch (RuntimeException exception) {
-      if (task.attempts() >= task.maxAttempts()) {
-        draftService.markImageAnalysisFailed(
-            payload.draftId(), "AI_IMAGE_ANALYSIS_FAILED", task.createdBy());
-      }
+      draftService.markImageAnalysisFailed(
+          payload.draftId(), "AI_IMAGE_ANALYSIS_FAILED", task.createdBy());
       throw new TaskExecutionException(
-          "AI_IMAGE_ANALYSIS_FAILED", "AI图片分析失败，请稍后重试", true);
+          "AI_IMAGE_ANALYSIS_FAILED", "AI图片分析失败，请稍后重试", false);
     }
   }
 

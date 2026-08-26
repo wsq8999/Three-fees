@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.threefees.ThreeFeesApplication;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.domain.Role;
+import com.threefees.report.application.AuditReportService;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class DashboardQueryServiceIntegrationTest {
 
   @Autowired private DashboardQueryService dashboardQueryService;
+  @Autowired private AuditReportService auditReportService;
   @Autowired private JdbcTemplate jdbcTemplate;
 
   @BeforeEach
@@ -95,10 +97,10 @@ public class DashboardQueryServiceIntegrationTest {
   void listUpdatedAtComesFromActiveBillingPointImportCompletionTime() {
     insertSnapshot("BP-IMPORT-TIME", "320100", "2026-08");
     insertAudit("BP-IMPORT-TIME", "320100", "2026-08", "OVER_LIMIT", "WAITING");
-    insertImportJob("BILLING_POINT", "320100", "2026-08", "ACTIVE", "2026-08-13 09:30:15.000");
-    insertImportJob("BILLING_POINT", "320100", "2026-08", "FAILED", "2026-08-13 12:00:00.000");
+    insertImportJob("BILLING_POINT", "320100", "MASTER", "ACTIVE", "2026-08-13 09:30:15.000");
+    insertImportJob("BILLING_POINT", "320100", "MASTER", "FAILED", "2026-08-13 12:00:00.000");
     insertImportJob("PAYMENT", "320100", "2026-08", "ACTIVE", "2026-08-13 13:00:00.000");
-    insertImportJob("BILLING_POINT", "321200", "2026-08", "ACTIVE", "2026-08-13 14:00:00.000");
+    insertImportJob("BILLING_POINT", "321200", "MASTER", "ACTIVE", "2026-08-13 14:00:00.000");
 
     DashboardSummary citySummary =
         dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-08");
@@ -108,14 +110,71 @@ public class DashboardQueryServiceIntegrationTest {
     assertThat(adminSummary.lastUpdatedAt()).isEqualTo("2026-08-13T14:00:00");
   }
 
+  @Test
+  void monthlySnapshotCountsAndChartsUseRequestedPeriod() {
+    insertSnapshot("BP-MONTHLY-NORMAL", "320100", "2026-09", "玄武区", "SITE-A");
+    insertSnapshot("BP-MONTHLY-OVER-1", "320100", "2026-09", "玄武区", "SITE-B");
+    insertSnapshot("BP-MONTHLY-OVER-2", "320100", "2026-09", "鼓楼区", "SITE-C");
+    insertSnapshot("BP-MONTHLY-PENDING", "320100", "2026-09", "秦淮区", "SITE-D");
+    insertSnapshot("BP-MONTHLY-OTHER-PERIOD", "320100", "2026-08", "玄武区", "SITE-E");
+
+    insertAudit("BP-MONTHLY-NORMAL", "320100", "2026-09", "NORMAL", "WAITING");
+    insertAudit("BP-MONTHLY-OVER-1", "320100", "2026-09", "OVER_LIMIT", "WAITING");
+    insertAudit("BP-MONTHLY-OVER-2", "320100", "2026-09", "OVER_LIMIT", "WAITING");
+
+    DashboardSummary summary =
+        dashboardQueryService.summarize(cityUser("320100", "南京市"), "2026-09");
+
+    assertThat(summary.billingPointCount()).isEqualTo(4);
+    assertThat(summary.normalBillingPointCount()).isEqualTo(1);
+    assertThat(summary.overLimitBillingPointCount()).isEqualTo(2);
+    assertThat(summary.pendingReviewCount()).isEqualTo(1);
+    assertThat(summary.districtOverLimitCounts())
+        .extracting(DashboardSummary.NameCount::name, DashboardSummary.NameCount::count)
+        .containsExactlyInAnyOrder(
+            org.assertj.core.groups.Tuple.tuple("玄武区", 1L),
+            org.assertj.core.groups.Tuple.tuple("鼓楼区", 1L));
+    assertThat(summary.overLimitTypeCounts())
+        .extracting(DashboardSummary.NameCount::name, DashboardSummary.NameCount::count)
+        .contains(org.assertj.core.groups.Tuple.tuple("多项超标", 2L));
+  }
+
+  @Test
+  void reportFilterOptionsAreNotCappedByListPageSize() {
+    for (int index = 1; index <= 101; index++) {
+      String code = "BP-REPORT-OPTION-" + index;
+      String district = index == 101 ? "第101区" : "普通区";
+      insertSnapshot(code, "320100", "2026-10", district, "SITE-REPORT-" + index);
+      insertAudit(code, "320100", "2026-10", "OVER_LIMIT", "WAITING");
+      insertReport(code, "320100", "2026-10", "GENERATED");
+    }
+
+    var options =
+        auditReportService.filterOptions(null, null, null, "2026-10", "320100", null, adminUser());
+
+    assertThat(options.districts()).contains("普通区", "第101区");
+  }
+
   private void insertSnapshot(String code, String cityCode, String period) {
+    insertSnapshot(code, cityCode, period, "", "");
+  }
+
+  private void insertSnapshot(
+      String code, String cityCode, String period, String district, String siteCode) {
+    String json =
+        "{\"所属区县\":\""
+            + district
+            + "\",\"关联资源编码\":\""
+            + siteCode
+            + "\"}";
     jdbcTemplate.update(
         """
         INSERT INTO billing_point_snapshot (
             public_id, data_period, period_start, period_end, city_code, district_code,
+            district_name,
             source_import_job_id, source_row_no, raw_row_json, billing_point_code,
             billing_point_name, city_name, data_json
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, '{}', ?, ?, ?, '{}')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, '{}', ?, ?, ?, ?)
         """,
         UUID.randomUUID().toString(),
         period,
@@ -123,9 +182,11 @@ public class DashboardQueryServiceIntegrationTest {
         period + "-28",
         cityCode,
         cityCode + "01",
+        district,
         code,
         code + "名称",
-        cityCode.equals("321200") ? "泰州市" : "南京市");
+        cityCode.equals("321200") ? "泰州市" : "南京市",
+        json);
   }
 
   private void insertAudit(
@@ -228,7 +289,34 @@ public class DashboardQueryServiceIntegrationTest {
   }
 
   public static String jsonExtract(String json, String path) {
+    if (json == null || path == null) {
+      return null;
+    }
+    if (path.contains("所属区县")) {
+      return jsonValue(json, "所属区县");
+    }
+    if (path.contains("关联资源编码")) {
+      return jsonValue(json, "关联资源编码");
+    }
     return null;
+  }
+
+  private static String jsonValue(String json, String key) {
+    String quotedKey = "\"" + key + "\"";
+    int keyIndex = json.indexOf(quotedKey);
+    if (keyIndex < 0) {
+      return null;
+    }
+    int colon = json.indexOf(':', keyIndex + quotedKey.length());
+    if (colon < 0) {
+      return null;
+    }
+    int valueStart = json.indexOf('"', colon);
+    if (valueStart < 0) {
+      return null;
+    }
+    int valueEnd = json.indexOf('"', valueStart + 1);
+    return valueEnd < 0 ? null : json.substring(valueStart + 1, valueEnd);
   }
 
   public static String jsonUnquote(String value) {

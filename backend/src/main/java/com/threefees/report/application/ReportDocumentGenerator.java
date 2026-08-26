@@ -13,8 +13,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
@@ -75,6 +77,40 @@ public class ReportDocumentGenerator {
   private static final Pattern HTML_TAG = Pattern.compile("(?is)<[a-z][^>]*>");
   private static final Pattern INLINE_FILE_ID =
       Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
+  private static final Pattern CAUSE_LABEL_BOUNDARY =
+      Pattern.compile(
+          "(?<!^)(?=本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因[：:])");
+  private static final Pattern CAUSE_LABEL =
+      Pattern.compile("(?:本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因|超标原因(?:是|为)?)[：:，,]?");
+  private static final double WORD_PAGE_IMAGE_MAX_WIDTH_POINTS = 420;
+  private static final int BODY_FIRST_LINE_INDENT_TWIPS = 480;
+  private static final Set<String> CAUSE_LABEL_PHRASES =
+      Set.of(
+          "本期电量同比超标原因：",
+          "本期电量环比超标原因：",
+          "本期额定标杆超标原因：",
+          "本期电量同比超标原因:",
+          "本期电量环比超标原因:",
+          "本期额定标杆超标原因:");
+  private static final List<String> IMPORTANT_REASON_PHRASES =
+      List.of(
+          "资管系统未及时更新",
+          "额定功率台账未及时更新",
+          "实际用电情况正常",
+          "极简站改造新增机柜及空调长时间运行所致",
+          "不存在用电量跑冒滴漏现象，不存在偷搭电问题",
+          "不存在用电量跑冒滴漏",
+          "不存在跑冒滴漏",
+          "不存在偷搭电",
+          "分摊比例变化",
+          "电信下电退出分摊",
+          "电信设备已下电退出电费分摊",
+          "设备新增",
+          "站址搬迁",
+          "合并电表",
+          "空调长时间运行");
+  private static final Pattern METRIC_COMPARISON_EMPHASIS =
+      Pattern.compile(".*(?:本期日均|正常上限|超标\\d+(?:\\.\\d+)?%|超标比例).*");
 
   private final String configuredFontPath;
 
@@ -120,10 +156,20 @@ public class ReportDocumentGenerator {
 
   private String normalizeHtml(String value) {
     String html = value == null ? "" : value.trim();
-    html = html.replaceAll("(?i)<br\\s*/?>", "<br />");
-    html = html.replaceAll("(?i)<img\\b([^>]*?)(?<!/)>", "<img$1 />");
     html = html.replace("&nbsp;", " ");
+    html = html.replaceAll("(?i)\\scontenteditable=(\"[^\"]*\"|'[^']*'|[^\\s>]+)", "");
+    html = html.replaceAll("(?i)\\sdraggable=(\"[^\"]*\"|'[^']*'|[^\\s>]+)", "");
+    html = html.replaceAll("(?i)\\sdata-inline-image-spacer=(\"[^\"]*\"|'[^']*'|[^\\s>]+)", "");
+    html = normalizeVoidHtmlTag(html, "br");
+    html = normalizeVoidHtmlTag(html, "img");
+    html = normalizeVoidHtmlTag(html, "hr");
+    html = normalizeVoidHtmlTag(html, "input");
     return html;
+  }
+
+  private String normalizeVoidHtmlTag(String html, String tag) {
+    return html.replaceAll("(?i)<" + tag + "\\b([^>]*)>", "<" + tag + "$1 />")
+        .replaceAll("(?i)<" + tag + "\\b([^>]*)/\\s*/>", "<" + tag + "$1 />");
   }
 
   private void appendHtmlFragment(
@@ -159,27 +205,381 @@ public class ReportDocumentGenerator {
     if (!(node instanceof Element element)) {
       return;
     }
+    if (hasEditorOnlyClass(element)) {
+      return;
+    }
+    if (hasClass(element, "inline-image-row")) {
+      appendHtmlImageRow(document, element, imagesById);
+      return;
+    }
     String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
     switch (tag) {
-      case "h1" -> appendWordParagraph(document, element.getTextContent(), true, 18);
-      case "h2", "h3" -> appendWordParagraph(document, element.getTextContent(), true, 14);
-      case "p", "div", "section", "article", "figure" ->
-          appendHtmlChildren(document, element, imagesById);
-      case "br" -> appendWordParagraph(document, " ", false, 12);
+      case "h1" -> appendWordParagraph(document, element.getTextContent(), true, 18, true);
+      case "h2", "h3" -> appendWordParagraph(document, element.getTextContent(), true, 14, false);
+      case "p", "div" -> appendHtmlBlock(document, element, imagesById);
+      case "section", "article" -> appendHtmlChildren(document, element, imagesById);
+      case "figure" -> appendHtmlInlineBlock(document, element, imagesById);
+      case "br" -> appendBlankWordParagraph(document);
       case "table" -> appendHtmlTable(document, element);
       case "img" -> appendHtmlImage(document, element, imagesById);
       default -> appendHtmlChildren(document, element, imagesById);
     }
   }
 
+  private void appendHtmlBlock(
+      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      throws Exception {
+    if (containsElement(element, Set.of("table", "h1", "h2", "h3"))) {
+      appendHtmlChildren(document, element, imagesById);
+      return;
+    }
+    if (containsElement(element, Set.of("img", "figure"))) {
+      appendHtmlInlineBlock(document, element, imagesById);
+      return;
+    }
+    String text = cleanWordText(element.getTextContent());
+    if (text.isBlank()) {
+      return;
+    }
+    var paragraph = document.createParagraph();
+    applyParagraphStyle(paragraph, false, false);
+    appendInlineRuns(paragraph, element, false, 12);
+  }
+
+  private void appendHtmlInlineBlock(
+      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      throws Exception {
+    if (cleanWordText(element.getTextContent()).isBlank()
+        && !containsElement(element, Set.of("img"))) {
+      return;
+    }
+    var paragraph = document.createParagraph();
+    applyParagraphStyle(paragraph, false, false);
+    appendInlineRunsWithImages(paragraph, element, imagesById, false, 12);
+  }
+
+  private void appendHtmlImageRow(
+      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      throws Exception {
+    var images = descendantElements(element, "img");
+    if (images.isEmpty()) {
+      return;
+    }
+    var sizes = new ArrayList<ImageSize>();
+    for (Element image : images) {
+      ImageBytes bytes = htmlImageBytes(image, imagesById);
+      if (bytes == null) {
+        continue;
+      }
+      sizes.add(wordImageSize(bytes.bytes(), htmlImageDisplaySize(image)));
+    }
+    if (sizes.isEmpty()) {
+      return;
+    }
+    double totalWidthPoints =
+        sizes.stream().mapToDouble(size -> emuToPoints(size.widthEmu())).sum()
+            + Math.max(0, sizes.size() - 1) * 6.0;
+    double scale = Math.min(1.0, WORD_PAGE_IMAGE_MAX_WIDTH_POINTS / Math.max(1.0, totalWidthPoints));
+    var paragraph = document.createParagraph();
+    applyParagraphStyle(paragraph, false, false);
+    for (Element image : images) {
+      appendHtmlImageRun(paragraph, image, imagesById, scale);
+      paragraph.createRun().setText(" ");
+    }
+  }
+
+  private void appendInlineImageRowRuns(
+      XWPFParagraph paragraph, Element element, Map<String, ReportImage> imagesById)
+      throws Exception {
+    var images = descendantElements(element, "img");
+    if (images.isEmpty()) {
+      return;
+    }
+    var sizes = new ArrayList<ImageSize>();
+    for (Element image : images) {
+      ImageBytes bytes = htmlImageBytes(image, imagesById);
+      if (bytes != null) {
+        sizes.add(wordImageSize(bytes.bytes(), htmlImageDisplaySize(image)));
+      }
+    }
+    double totalWidthPoints =
+        sizes.stream().mapToDouble(size -> emuToPoints(size.widthEmu())).sum()
+            + Math.max(0, sizes.size() - 1) * 6.0;
+    double scale = Math.min(1.0, WORD_PAGE_IMAGE_MAX_WIDTH_POINTS / Math.max(1.0, totalWidthPoints));
+    for (Element image : images) {
+      appendHtmlImageRun(paragraph, image, imagesById, scale);
+      paragraph.createRun().setText(" ");
+    }
+  }
+
+  private boolean containsElement(Element element, Set<String> tags) {
+    for (String tag : tags) {
+      if (element.getElementsByTagName(tag).getLength() > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void appendInlineRuns(XWPFParagraph paragraph, Node node, boolean bold, int size) {
+    if (node.getNodeType() == Node.TEXT_NODE) {
+      String text = cleanWordText(node.getTextContent());
+      if (!text.isBlank()) {
+        if (bold && shouldKeepImportedBold(text)) {
+          appendRun(paragraph, text, true, size);
+        } else {
+          appendStyledText(paragraph, text, false, size);
+        }
+      }
+      return;
+    }
+    if (!(node instanceof Element element)) {
+      return;
+    }
+    if (hasEditorOnlyClass(element)) {
+      return;
+    }
+    String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
+    boolean childBold = bold || tag.equals("strong") || tag.equals("b");
+    if (tag.equals("br")) {
+      paragraph.createRun().addBreak();
+      return;
+    }
+    for (Node child = node.getFirstChild(); child != null; child = child.getNextSibling()) {
+      appendInlineRuns(paragraph, child, childBold, size);
+    }
+  }
+
+  private void appendInlineRunsWithImages(
+      XWPFParagraph paragraph,
+      Node node,
+      Map<String, ReportImage> imagesById,
+      boolean bold,
+      int size)
+      throws Exception {
+    if (node.getNodeType() == Node.TEXT_NODE) {
+      String text = cleanWordText(node.getTextContent());
+      if (!text.isBlank()) {
+        if (bold && shouldKeepImportedBold(text)) {
+          appendRun(paragraph, text, true, size);
+        } else {
+          appendStyledText(paragraph, text, false, size);
+        }
+      }
+      return;
+    }
+    if (!(node instanceof Element element)) {
+      return;
+    }
+    if (hasEditorOnlyClass(element)) {
+      return;
+    }
+    String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
+    if (hasClass(element, "inline-image-row")) {
+      appendInlineImageRowRuns(paragraph, element, imagesById);
+      return;
+    }
+    if (tag.equals("img")) {
+      appendHtmlImageRun(paragraph, element, imagesById);
+      paragraph.createRun().setText(" ");
+      return;
+    }
+    boolean childBold = bold || tag.equals("strong") || tag.equals("b");
+    if (tag.equals("br")) {
+      paragraph.createRun().addBreak();
+      return;
+    }
+    for (Node child = node.getFirstChild(); child != null; child = child.getNextSibling()) {
+      appendInlineRunsWithImages(paragraph, child, imagesById, childBold, size);
+    }
+  }
+
+  private boolean hasEditorOnlyClass(Element element) {
+    String className = element.getAttribute("class");
+    return List.of(
+            "inline-image-resize-handle",
+            "inline-image-drop-marker",
+            "inline-image-uploading")
+        .stream()
+        .anyMatch(className::contains);
+  }
+
+  private boolean hasClass(Element element, String expected) {
+    String className = element.getAttribute("class");
+    if (className == null || className.isBlank()) {
+      return false;
+    }
+    return List.of(className.split("\\s+")).contains(expected);
+  }
+
+  private List<Element> descendantElements(Element element, String tagName) {
+    var elements = new ArrayList<Element>();
+    var nodes = element.getElementsByTagName(tagName);
+    for (int index = 0; index < nodes.getLength(); index++) {
+      if (nodes.item(index) instanceof Element child) {
+        elements.add(child);
+      }
+    }
+    return elements;
+  }
+
   private void appendWordParagraph(XWPFDocument document, String text, boolean bold, int size) {
+    appendWordParagraph(document, text, bold, size, false);
+  }
+
+  private void appendWordParagraph(
+      XWPFDocument document, String text, boolean bold, int size, boolean centered) {
     String cleaned = cleanWordText(text);
     if (cleaned.isBlank()) {
       return;
     }
     var paragraph = document.createParagraph();
+    applyParagraphStyle(paragraph, bold, centered);
+    appendStyledText(paragraph, cleaned, bold, size);
+  }
+
+  private void appendBlankWordParagraph(XWPFDocument document) {
+    var paragraph = document.createParagraph();
+    paragraph.setSpacingAfter(80);
+    paragraph.createRun().setText(" ");
+  }
+
+  private void applyParagraphStyle(XWPFParagraph paragraph, boolean heading, boolean centered) {
+    if (centered) {
+      paragraph.setAlignment(ParagraphAlignment.CENTER);
+    }
+    paragraph.setSpacingBefore(heading ? 140 : 40);
+    paragraph.setSpacingAfter(heading ? 120 : 80);
+    if (!heading && !centered) {
+      paragraph.setIndentationFirstLine(BODY_FIRST_LINE_INDENT_TWIPS);
+    }
+  }
+
+  private void appendStyledText(XWPFParagraph paragraph, String text, boolean defaultBold, int size) {
+    String cleaned = cleanWordText(text);
+    if (cleaned.isBlank()) {
+      return;
+    }
+    if (defaultBold) {
+      appendRun(paragraph, cleaned, true, size);
+      return;
+    }
+    int index = 0;
+    while (index < cleaned.length()) {
+      Match phrase = nextImportantPhrase(cleaned, index);
+      Match causeLabel = nextCauseLabel(cleaned, index);
+      Match match = firstMatch(phrase, causeLabel);
+      if (match == null) {
+        appendRun(paragraph, cleaned.substring(index), false, size);
+        break;
+      }
+      if (match == causeLabel) {
+        if (match.start() > index) {
+          appendRun(paragraph, cleaned.substring(index, match.start()), false, size);
+        }
+        appendRun(paragraph, cleaned.substring(match.start(), match.end()), false, size);
+        int emphasisEnd = sentenceEnd(cleaned, match.end());
+        appendReasonAfterLabel(paragraph, cleaned.substring(match.end(), emphasisEnd), size);
+        index = emphasisEnd;
+        continue;
+      }
+      if (match.start() > index) {
+        appendRun(paragraph, cleaned.substring(index, match.start()), false, size);
+      }
+      int emphasisEnd = sentenceEnd(cleaned, match.start());
+      appendRun(paragraph, cleaned.substring(match.start(), emphasisEnd), true, size);
+      index = emphasisEnd;
+    }
+  }
+
+  private Match firstMatch(Match first, Match second) {
+    if (first == null) return second;
+    if (second == null) return first;
+    return first.start() <= second.start() ? first : second;
+  }
+
+  private boolean shouldKeepImportedBold(String text) {
+    String cleaned = cleanWordText(text);
+    if (cleaned.isBlank()) {
+      return false;
+    }
+    if (METRIC_COMPARISON_EMPHASIS.matcher(cleaned).matches()
+        && IMPORTANT_REASON_PHRASES.stream().noneMatch(cleaned::contains)) {
+      return false;
+    }
+    return CAUSE_LABEL.matcher(cleaned).find()
+            && IMPORTANT_REASON_PHRASES.stream().noneMatch(cleaned::contains)
+        ? false
+        : CAUSE_LABEL_PHRASES.stream().noneMatch(cleaned::contains);
+  }
+
+  private void appendReasonAfterLabel(XWPFParagraph paragraph, String text, int size) {
+    if (text == null || text.isEmpty()) {
+      return;
+    }
+    int leadingEnd = 0;
+    while (leadingEnd < text.length() && Character.isWhitespace(text.charAt(leadingEnd))) {
+      leadingEnd++;
+    }
+    if (leadingEnd > 0) {
+      appendRun(paragraph, text.substring(0, leadingEnd), false, size);
+    }
+    String cause = text.substring(leadingEnd);
+    if (cause.isBlank()) {
+      return;
+    }
+    if (isMetricOnlyText(cause)) {
+      appendRun(paragraph, cause, false, size);
+      return;
+    }
+    appendRun(paragraph, cause, true, size);
+  }
+
+  private boolean isMetricOnlyText(String text) {
+    String cleaned = cleanWordText(text);
+    return METRIC_COMPARISON_EMPHASIS.matcher(cleaned).matches()
+        && IMPORTANT_REASON_PHRASES.stream().noneMatch(cleaned::contains);
+  }
+
+  private Match nextCauseLabel(String text, int startIndex) {
+    Matcher matcher = CAUSE_LABEL.matcher(text);
+    if (!matcher.find(startIndex)) {
+      return null;
+    }
+    return new Match(matcher.start(), matcher.end(), matcher.group());
+  }
+
+  private Match nextImportantPhrase(String text, int startIndex) {
+    Match best = null;
+    for (String phrase : IMPORTANT_REASON_PHRASES) {
+      int start = text.indexOf(phrase, startIndex);
+      if (start < 0) {
+        continue;
+      }
+      Match candidate = new Match(start, start + phrase.length(), phrase);
+      if (best == null || candidate.start() < best.start()) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  private int sentenceEnd(String text, int start) {
+    for (int index = start; index < text.length(); index++) {
+      char character = text.charAt(index);
+      if (character == '。' || character == '；' || character == ';' || character == '\n') {
+        return index + 1;
+      }
+    }
+    return text.length();
+  }
+
+  private void appendRun(XWPFParagraph paragraph, String text, boolean bold, int size) {
+    if (text == null || text.isEmpty()) {
+      return;
+    }
     var run = paragraph.createRun();
-    run.setText(cleaned);
+    run.setText(text);
     run.setBold(bold);
     run.setFontFamily(bold ? "SimHei" : "SimSun");
     run.setFontSize(size);
@@ -210,34 +610,237 @@ public class ReportDocumentGenerator {
 
   private void appendHtmlImage(
       XWPFDocument document, Element image, Map<String, ReportImage> imagesById) throws Exception {
+    Optional<DisplaySize> displaySize = htmlImageDisplaySize(image);
+    ImageBytes bytes = htmlImageBytes(image, imagesById);
+    if (bytes == null) return;
+    appendWordImage(document, bytes.bytes(), bytes.mediaType(), bytes.name(), displaySize);
+  }
+
+  private void appendHtmlImageRun(
+      XWPFParagraph paragraph, Element image, Map<String, ReportImage> imagesById)
+      throws Exception {
+    appendHtmlImageRun(paragraph, image, imagesById, 1.0);
+  }
+
+  private void appendHtmlImageRun(
+      XWPFParagraph paragraph, Element image, Map<String, ReportImage> imagesById, double scale)
+      throws Exception {
+    Optional<DisplaySize> displaySize = htmlImageDisplaySize(image);
+    ImageBytes bytes = htmlImageBytes(image, imagesById);
+    if (bytes == null) return;
+    appendWordImageRun(paragraph, bytes.bytes(), bytes.mediaType(), bytes.name(), displaySize, scale);
+  }
+
+  private ImageBytes htmlImageBytes(Element image, Map<String, ReportImage> imagesById) {
     String src = image.getAttribute("src");
     String fileId = image.getAttribute("data-file-id");
     ReportImage stored = imagesById.get(fileId);
     if (stored != null) {
-      appendWordImage(document, stored.bytes(), stored.mediaType(), stored.name());
-      return;
+      return new ImageBytes(stored.bytes(), stored.mediaType(), stored.name());
     }
-    if (!src.startsWith("data:image/")) return;
+    if (!src.startsWith("data:image/")) return null;
     int comma = src.indexOf(',');
     int semicolon = src.indexOf(';');
-    if (comma < 0 || semicolon < 0 || semicolon > comma) return;
+    if (comma < 0 || semicolon < 0 || semicolon > comma) return null;
     String mediaType = src.substring("data:".length(), semicolon);
     byte[] bytes = Base64.getDecoder().decode(src.substring(comma + 1));
-    appendWordImage(document, bytes, mediaType, "pasted-image");
+    return new ImageBytes(bytes, mediaType, "pasted-image");
   }
 
   private void appendWordImage(
       XWPFDocument document, byte[] bytes, String mediaType, String imageName) throws Exception {
+    appendWordImage(document, bytes, mediaType, imageName, Optional.empty());
+  }
+
+  private void appendWordImage(
+      XWPFDocument document,
+      byte[] bytes,
+      String mediaType,
+      String imageName,
+      Optional<DisplaySize> displaySize)
+      throws Exception {
     int type =
         "image/png".equals(mediaType)
             ? XWPFDocument.PICTURE_TYPE_PNG
             : XWPFDocument.PICTURE_TYPE_JPEG;
     var paragraph = document.createParagraph();
     paragraph.setAlignment(ParagraphAlignment.CENTER);
+    paragraph.setSpacingBefore(80);
+    paragraph.setSpacingAfter(120);
+    ImageSize size = wordImageSize(bytes, displaySize);
     paragraph
         .createRun()
         .addPicture(
-            new ByteArrayInputStream(bytes), type, imageName, Units.toEMU(420), Units.toEMU(260));
+            new ByteArrayInputStream(bytes), type, imageName, size.widthEmu(), size.heightEmu());
+  }
+
+  private void appendWordImageRun(
+      XWPFParagraph paragraph,
+      byte[] bytes,
+      String mediaType,
+      String imageName,
+      Optional<DisplaySize> displaySize)
+      throws Exception {
+    appendWordImageRun(paragraph, bytes, mediaType, imageName, displaySize, 1.0);
+  }
+
+  private void appendWordImageRun(
+      XWPFParagraph paragraph,
+      byte[] bytes,
+      String mediaType,
+      String imageName,
+      Optional<DisplaySize> displaySize,
+      double scale)
+      throws Exception {
+    int type =
+        "image/png".equals(mediaType)
+            ? XWPFDocument.PICTURE_TYPE_PNG
+            : XWPFDocument.PICTURE_TYPE_JPEG;
+    ImageSize size = scaleImageSize(wordImageSize(bytes, displaySize), scale);
+    XWPFRun run = paragraph.createRun();
+    run.addPicture(
+        new ByteArrayInputStream(bytes), type, imageName, size.widthEmu(), size.heightEmu());
+  }
+
+  private ImageSize scaleImageSize(ImageSize size, double scale) {
+    if (scale >= 0.999) return size;
+    return new ImageSize(
+        Math.max(1, (int) Math.round(size.widthEmu() * scale)),
+        Math.max(1, (int) Math.round(size.heightEmu() * scale)));
+  }
+
+  private ImageSize wordImageSize(byte[] bytes) throws IOException {
+    return wordImageSize(bytes, Optional.empty());
+  }
+
+  private ImageSize wordImageSize(byte[] bytes, Optional<DisplaySize> displaySize)
+      throws IOException {
+    BufferedImage buffered = ImageIO.read(new ByteArrayInputStream(bytes));
+    if (displaySize.isPresent()) {
+      return wordImageSizeFromDisplaySize(displaySize.get(), buffered);
+    }
+    if (buffered == null || buffered.getWidth() <= 0 || buffered.getHeight() <= 0) {
+      return new ImageSize(Units.toEMU(1), Units.toEMU(1));
+    }
+    return constrainImageToPageWidth(
+        cssPixelsToPoints(buffered.getWidth()), cssPixelsToPoints(buffered.getHeight()));
+  }
+
+  private ImageSize wordImageSizeFromDisplaySize(DisplaySize displaySize, BufferedImage buffered) {
+    double width = displaySize.widthPoints();
+    double height = displaySize.heightPoints();
+    if (buffered != null && buffered.getWidth() > 0 && buffered.getHeight() > 0) {
+      double ratio = (double) buffered.getWidth() / (double) buffered.getHeight();
+      if (width > 0) {
+        height = width / ratio;
+      } else if (height > 0) {
+        width = height * ratio;
+      }
+    }
+    if (width <= 0 && height <= 0) {
+      return buffered == null
+          ? new ImageSize(Units.toEMU(1), Units.toEMU(1))
+          : constrainImageToPageWidth(
+              cssPixelsToPoints(buffered.getWidth()), cssPixelsToPoints(buffered.getHeight()));
+    }
+    if (width <= 0 || height <= 0) {
+      return new ImageSize(Units.toEMU(1), Units.toEMU(1));
+    }
+    return constrainImageToPageWidth(width, height);
+  }
+
+  private ImageSize constrainImageToPageWidth(double widthPoints, double heightPoints) {
+    double width = Math.max(1, widthPoints);
+    double height = Math.max(1, heightPoints);
+    if (width > WORD_PAGE_IMAGE_MAX_WIDTH_POINTS) {
+      double scale = WORD_PAGE_IMAGE_MAX_WIDTH_POINTS / width;
+      width *= scale;
+      height *= scale;
+    }
+    return new ImageSize(Units.toEMU(width), Units.toEMU(height));
+  }
+
+  private Optional<DisplaySize> htmlImageDisplaySize(Element image) {
+    Optional<DisplaySize> imageSize = displaySizeFromElement(image);
+    if (imageSize.isPresent()) {
+      return imageSize;
+    }
+    Node parent = image.getParentNode();
+    if (parent instanceof Element parentElement) {
+      return displaySizeFromElement(parentElement);
+    }
+    return Optional.empty();
+  }
+
+  private Optional<DisplaySize> displaySizeFromElement(Element element) {
+    Double width =
+        firstCssPixels(
+            element.getAttribute("data-display-width"),
+            element.getAttribute("width"),
+            cssProperty(element.getAttribute("style"), "width"));
+    Double height =
+        firstCssPixels(
+            element.getAttribute("data-display-height"),
+            element.getAttribute("height"),
+            cssProperty(element.getAttribute("style"), "height"));
+    if (width == null || height == null) {
+      return Optional.empty();
+    }
+    return Optional.of(new DisplaySize(cssPixelsToPoints(width), cssPixelsToPoints(height)));
+  }
+
+  private Double firstCssPixels(String... values) {
+    for (String value : values) {
+      Double parsed = cssPixels(value);
+      if (parsed != null) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
+  private String cssProperty(String style, String name) {
+    if (style == null || style.isBlank()) {
+      return "";
+    }
+    for (String part : style.split(";")) {
+      int colon = part.indexOf(':');
+      if (colon < 0) {
+        continue;
+      }
+      String key = part.substring(0, colon).trim();
+      if (key.equalsIgnoreCase(name)) {
+        return part.substring(colon + 1).trim();
+      }
+    }
+    return "";
+  }
+
+  private Double cssPixels(String value) {
+    if (value == null || value.isBlank()) {
+      return null;
+    }
+    var matcher = Pattern.compile("^([0-9]+(?:\\.[0-9]+)?)(px|pt|in|cm|mm)?$", Pattern.CASE_INSENSITIVE)
+        .matcher(value.trim());
+    if (!matcher.matches()) {
+      return null;
+    }
+    double numeric = Double.parseDouble(matcher.group(1));
+    if (numeric <= 0) {
+      return null;
+    }
+    String unit = matcher.group(2) == null ? "px" : matcher.group(2).toLowerCase(java.util.Locale.ROOT);
+    return switch (unit) {
+      case "pt" -> numeric / 0.75;
+      case "in" -> numeric * 96;
+      case "cm" -> numeric / 2.54 * 96;
+      case "mm" -> numeric / 25.4 * 96;
+      default -> numeric;
+    };
+  }
+
+  private double cssPixelsToPoints(double pixels) {
+    return pixels * 0.75;
   }
 
   public String extractWordText(byte[] bytes, String originalName) {
@@ -346,11 +949,14 @@ public class ReportDocumentGenerator {
         appendStyledRun(text, runText, run.isBold(), run.getFontSize(), run.getFontFamily());
       }
       for (XWPFPicture picture : run.getEmbeddedPictures()) {
-        wroteContent |= appendBufferedParagraph(html, text, paragraphStyle(paragraph));
         XWPFPictureData data = picture.getPictureData();
         if (data != null) {
           appendImage(
-              html, data.getData(), data.getFileName(), data.getPackagePart().getContentType());
+              text,
+              data.getData(),
+              data.getFileName(),
+              data.getPackagePart().getContentType(),
+              displaySizeFromDocxPicture(picture));
           wroteContent = true;
         }
       }
@@ -376,11 +982,14 @@ public class ReportDocumentGenerator {
     for (int runIndex = 0; runIndex < paragraph.numCharacterRuns(); runIndex++) {
       CharacterRun run = paragraph.getCharacterRun(runIndex);
       if (picturesTable.hasPicture(run)) {
-        wroteContent |= appendBufferedParagraph(html, text, paragraphStyle(paragraph));
         Picture picture = picturesTable.extractPicture(run, false);
         if (picture != null) {
           appendImage(
-              html, picture.getContent(), picture.suggestFullFileName(), picture.getMimeType());
+              text,
+              picture.getContent(),
+              picture.suggestFullFileName(),
+              picture.getMimeType(),
+              displaySizeFromDocPicture(picture));
           wroteContent = true;
         }
       } else {
@@ -406,18 +1015,88 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void appendImage(StringBuilder html, byte[] bytes, String name, String mediaType) {
+  private Optional<DisplaySize> displaySizeFromDocxPicture(XWPFPicture picture) {
+    try {
+      var ext = picture.getCTPicture().getSpPr().getXfrm().getExt();
+      if (ext == null || ext.getCx() <= 0 || ext.getCy() <= 0) {
+        return Optional.empty();
+      }
+      return Optional.of(new DisplaySize(emuToPoints(ext.getCx()), emuToPoints(ext.getCy())));
+    } catch (RuntimeException exception) {
+      return Optional.empty();
+    }
+  }
+
+  private Optional<DisplaySize> displaySizeFromDocPicture(Picture picture) {
+    int widthTwips = picture.getDxaGoal();
+    int heightTwips = picture.getDyaGoal();
+    if (widthTwips <= 0 || heightTwips <= 0) {
+      return Optional.empty();
+    }
+    return Optional.of(new DisplaySize(twipsToPoints(widthTwips), twipsToPoints(heightTwips)));
+  }
+
+  private double emuToPoints(long emu) {
+    return emu / 12700.0;
+  }
+
+  private double twipsToPoints(int twips) {
+    return twips / 20.0;
+  }
+
+  private void appendImage(
+      StringBuilder html,
+      byte[] bytes,
+      String name,
+      String mediaType,
+      Optional<DisplaySize> displaySize) {
     if (bytes == null || bytes.length == 0) {
       return;
     }
     String type = mediaType == null || mediaType.isBlank() ? "image/png" : mediaType;
-    html.append("<figure><img alt=\"")
+    html.append("<span class=\"word-inline-image\"><img alt=\"")
         .append(escapeHtml(name == null ? "Word image" : name))
         .append("\" src=\"data:")
         .append(escapeHtml(type))
         .append(";base64,")
         .append(Base64.getEncoder().encodeToString(bytes))
-        .append("\" /></figure>");
+        .append("\"");
+    displaySize.ifPresent(size -> appendDisplaySizeAttributes(html, size));
+    html.append(" /></span>");
+  }
+
+  private void appendDisplaySizeAttributes(StringBuilder html, DisplaySize size) {
+    double widthPixels = pointsToCssPixels(size.widthPoints());
+    double heightPixels = pointsToCssPixels(size.heightPoints());
+    if (widthPixels <= 0 || heightPixels <= 0) {
+      return;
+    }
+    String width = formatCssPixelValue(widthPixels);
+    String height = formatCssPixelValue(heightPixels);
+    html.append(" data-display-width=\"")
+        .append(width)
+        .append("\" data-display-height=\"")
+        .append(height)
+        .append("\" width=\"")
+        .append(Math.round(widthPixels))
+        .append("\" height=\"")
+        .append(Math.round(heightPixels))
+        .append("\" style=\"width:")
+        .append(width)
+        .append("px;height:")
+        .append(height)
+        .append("px\"");
+  }
+
+  private double pointsToCssPixels(double points) {
+    return points / 0.75;
+  }
+
+  private String formatCssPixelValue(double value) {
+    if (Math.abs(value - Math.rint(value)) < 0.01) {
+      return String.valueOf(Math.round(value));
+    }
+    return String.format(java.util.Locale.ROOT, "%.2f", value);
   }
 
   private boolean appendBufferedParagraph(StringBuilder html, StringBuilder text, String style) {
@@ -426,7 +1105,7 @@ public class ReportDocumentGenerator {
     if (cleaned.isBlank()) {
       return false;
     }
-    appendHtmlParagraph(html, cleaned, style);
+    appendHtmlParagraphs(html, cleaned, style);
     return true;
   }
 
@@ -439,19 +1118,42 @@ public class ReportDocumentGenerator {
     if (cleaned.isBlank()) {
       return;
     }
-    html.append("<p");
-    if (!style.isBlank()) {
-      html.append(" style=\"").append(escapeHtml(style)).append("\"");
-    }
-    html.append(">");
-    appendText(html, cleaned);
-    html.append("</p>");
+    appendPlainTextParagraphs(html, cleaned, style);
   }
 
   private void appendHtmlParagraph(StringBuilder html, String contentHtml, String style) {
     if (contentHtml == null || contentHtml.isBlank()) {
       return;
     }
+    appendHtmlParagraphs(html, contentHtml, style);
+  }
+
+  private void appendPlainTextParagraphs(StringBuilder html, String text, String style) {
+    for (String paragraph : splitCauseParagraphs(text)) {
+      if (paragraph.isBlank()) {
+        continue;
+      }
+      html.append("<p");
+      if (style != null && !style.isBlank()) {
+        html.append(" style=\"").append(escapeHtml(style)).append("\"");
+      }
+      html.append(">");
+      appendText(html, paragraph);
+      html.append("</p>");
+    }
+  }
+
+  private void appendHtmlParagraphs(StringBuilder html, String contentHtml, String style) {
+    List<String> paragraphs = splitCauseParagraphs(contentHtml);
+    for (String paragraph : paragraphs) {
+      if (paragraph.isBlank()) {
+        continue;
+      }
+      appendSingleHtmlParagraph(html, paragraph, style);
+    }
+  }
+
+  private void appendSingleHtmlParagraph(StringBuilder html, String contentHtml, String style) {
     html.append("<p");
     if (style != null && !style.isBlank()) {
       html.append(" style=\"").append(escapeHtml(style)).append("\"");
@@ -459,6 +1161,17 @@ public class ReportDocumentGenerator {
     html.append(">");
     html.append(contentHtml);
     html.append("</p>");
+  }
+
+  private List<String> splitCauseParagraphs(String value) {
+    if (value == null || value.isBlank()) {
+      return List.of();
+    }
+    return CAUSE_LABEL_BOUNDARY
+        .splitAsStream(value)
+        .map(String::trim)
+        .filter(part -> !part.isBlank())
+        .toList();
   }
 
   private void appendStyledRun(
@@ -595,7 +1308,18 @@ public class ReportDocumentGenerator {
     normalized = WORD_FIELD_SWITCH_URL.matcher(normalized).replaceAll(" ");
     normalized = RAW_URL.matcher(normalized).replaceAll(" ");
     normalized = WORD_FIELD_REMAINDER.matcher(normalized).replaceAll(" ");
-    return stripUnsupportedControlCharacters(normalized).trim();
+    return normalizeReportWhitespace(stripUnsupportedControlCharacters(normalized));
+  }
+
+  private String normalizeReportWhitespace(String value) {
+    String normalized = value.replace('\u00a0', ' ').replace('\u3000', ' ');
+    normalized = normalized.replaceAll("[ \\t\\x0B\\f]+", " ");
+    normalized =
+        java.util.Arrays.stream(normalized.split("\\n", -1))
+            .map(String::trim)
+            .collect(Collectors.joining("\n"));
+    normalized = normalized.replaceAll("\\n{3,}", "\n\n");
+    return normalized.trim();
   }
 
   private String extractWordTextWithFallbacks(List<WordTextExtractor> extractors) {
@@ -647,6 +1371,7 @@ public class ReportDocumentGenerator {
               .collect(Collectors.toMap(ReportImage::fileId, Function.identity(), (a, b) -> a));
       var title = document.createParagraph();
       title.setAlignment(ParagraphAlignment.CENTER);
+      title.setSpacingAfter(240);
       var titleRun = title.createRun();
       titleRun.setText(sections.title());
       titleRun.setBold(true);
@@ -662,20 +1387,7 @@ public class ReportDocumentGenerator {
           inlineFileIds(situation, analysis, rectification);
       for (ReportImage image : images) {
         if (inlineIds.contains(image.fileId())) continue;
-        var paragraph = document.createParagraph();
-        paragraph.setAlignment(ParagraphAlignment.CENTER);
-        int type =
-            image.mediaType().equals("image/png")
-                ? XWPFDocument.PICTURE_TYPE_PNG
-                : XWPFDocument.PICTURE_TYPE_JPEG;
-        paragraph
-            .createRun()
-            .addPicture(
-                new ByteArrayInputStream(image.bytes()),
-                type,
-                image.name(),
-                Units.toEMU(420),
-                Units.toEMU(260));
+        appendWordImage(document, image.bytes(), image.mediaType(), image.name());
       }
       document.write(output);
       return output.toByteArray();
@@ -688,6 +1400,7 @@ public class ReportDocumentGenerator {
       XWPFDocument document, String heading, String content, Map<String, ReportImage> imagesById)
       throws Exception {
     var headingParagraph = document.createParagraph();
+    applyParagraphStyle(headingParagraph, true, false);
     var headingRun = headingParagraph.createRun();
     headingRun.setText(heading);
     headingRun.setBold(true);
@@ -698,11 +1411,13 @@ public class ReportDocumentGenerator {
       return;
     }
     for (String line : content.split("\\R", -1)) {
+      if (line.isBlank()) {
+        appendBlankWordParagraph(document);
+        continue;
+      }
       var paragraph = document.createParagraph();
-      var run = paragraph.createRun();
-      run.setText(line.isBlank() ? " " : line);
-      run.setFontFamily("SimSun");
-      run.setFontSize(12);
+      applyParagraphStyle(paragraph, false, false);
+      appendStyledText(paragraph, line, false, 12);
     }
   }
 
@@ -832,6 +1547,14 @@ public class ReportDocumentGenerator {
       return bytes.clone();
     }
   }
+
+  private record Match(int start, int end, String phrase) {}
+
+  private record ImageSize(int widthEmu, int heightEmu) {}
+
+  private record ImageBytes(byte[] bytes, String mediaType, String name) {}
+
+  private record DisplaySize(double widthPoints, double heightPoints) {}
 
   private static final class PdfWriter {
 

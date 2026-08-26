@@ -109,6 +109,17 @@ export interface BillingPointQuery {
   size: number;
 }
 
+export interface FilterOptionCity {
+  code: string;
+  name: string;
+}
+
+export interface BillingPointFilterOptions {
+  periods: string[];
+  cities: FilterOptionCity[];
+  districts: string[];
+}
+
 export interface BillingPointSummary {
   id: string;
   code: string;
@@ -305,6 +316,7 @@ export interface ReportDraft {
   blocks: DraftBlock[];
   imageFileIds: string[];
   messages: DraftMessage[];
+  currentVersion: number;
   updatedAt: string;
   formalReportId: string | null;
   entityVersion: number;
@@ -491,6 +503,12 @@ export interface ReportQuery {
 
   page: number;
   size: number;
+}
+
+export interface ReportFilterOptions {
+  periods: string[];
+  cities: FilterOptionCity[];
+  districts: string[];
 }
 
 export interface ManagedUser {

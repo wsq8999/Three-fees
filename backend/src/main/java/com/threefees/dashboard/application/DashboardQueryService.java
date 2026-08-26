@@ -217,8 +217,11 @@ public class DashboardQueryService {
     var sql =
         new StringBuilder(
             """
-            SELECT COUNT(DISTINCT NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."关联资源编码"')), ''))
+            SELECT COUNT(DISTINCT NULLIF(JSON_UNQUOTE(JSON_EXTRACT(COALESCE(m.resource_summary_json, s.data_json), '$."关联资源编码"')), ''))
               FROM billing_point_snapshot s
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
              WHERE s.data_period = ?
             """);
     var args = new ArrayList<>();
@@ -238,7 +241,7 @@ public class DashboardQueryService {
                AND b.status = 'ACTIVE'
             """);
     var args = new ArrayList<>();
-    args.add(period);
+    args.add("MASTER");
     appendCityScope(sql, args, cityScope, "b");
     LocalDateTime value =
         jdbcTemplate.queryForObject(sql.toString(), LocalDateTime.class, args.toArray());
@@ -267,7 +270,7 @@ public class DashboardQueryService {
             """);
     var args = new ArrayList<>();
     args.add(datasetType);
-    args.add(period);
+    args.add("BILLING_POINT".equals(datasetType) ? "MASTER" : period);
     appendCityScope(sql, args, cityScope, "b");
     sql.append(" ORDER BY b.completed_at DESC, b.id DESC LIMIT 1");
     return jdbcTemplate.query(sql.toString(), this::mapImportBatch, args.toArray()).stream()
@@ -280,9 +283,17 @@ public class DashboardQueryService {
     var sql =
         new StringBuilder(
             """
-            SELECT COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), ''), '未填写') AS name,
+            SELECT COALESCE(
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(COALESCE(m.resource_summary_json, s.data_json), '$."所属区县"')), ''),
+                     NULLIF(s.district_name, ''),
+                     NULLIF(s.district_code, ''),
+                     '未填写'
+                   ) AS name,
                    COUNT(DISTINCT CONCAT(s.billing_point_code, '|', s.data_period, '|', s.city_code)) AS total
               FROM billing_point_snapshot s
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code
                AND a.data_period = s.data_period
@@ -330,13 +341,23 @@ public class DashboardQueryService {
     var sql =
         new StringBuilder(
             """
-            SELECT s.public_id, s.billing_point_code, s.billing_point_name, s.data_period,
-                   COALESCE(JSON_UNQUOTE(JSON_EXTRACT(s.data_json, '$."所属区县"')), '') AS county,
+            SELECT s.public_id, s.billing_point_code,
+                   COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+                   s.data_period,
+                   COALESCE(
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(COALESCE(m.resource_summary_json, s.data_json), '$."所属区县"')), ''),
+                     NULLIF(s.district_name, ''),
+                     NULLIF(s.district_code, ''),
+                     ''
+                   ) AS county,
                    a.actual_amount, a.over_limit_type, a.max_ratio,
                    a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
                    a.rated_result, a.rated_ratio,
                    d.analysis_status AS draft_analysis_status
               FROM billing_point_snapshot s
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code
                AND a.data_period = s.data_period

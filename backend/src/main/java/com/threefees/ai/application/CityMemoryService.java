@@ -497,9 +497,17 @@ public class CityMemoryService {
   }
 
   private void upsertHistoricalCase(ReportMemorySource source, String trustLevel) {
+    HistoricalReasonInsight insight =
+        historicalReasonInsight(source.situation(), source.analysis(), source.rectification());
     String summary =
         compact(
-            "标题="
+            "历史原因类型="
+                + insight.reasonTypesText()
+                + "；历史原因候选="
+                + insight.reasonSummary()
+                + "；历史整改结论="
+                + insight.rectificationSummary()
+                + "；标题="
                 + source.title()
                 + "；情况="
                 + source.situation()
@@ -523,9 +531,117 @@ public class CityMemoryService {
         source.billingPointCode(),
         source.period(),
         source.overLimitType(),
-        blankToNull(source.finalReason()),
+        blankToNull(firstNonBlank(source.finalReason(), insight.reasonSummary())),
         summary,
         trustLevel);
+  }
+
+  private HistoricalReasonInsight historicalReasonInsight(
+      String situation, String analysis, String rectification) {
+    String analysisText = normalizeReportText(analysis);
+    String rectificationText = normalizeReportText(rectification);
+    String fullText = normalizeReportText(value(situation) + "。" + analysisText + "。" + rectificationText);
+    List<String> reasonTypes = reasonTypes(fullText);
+    String reasonSummary = extractReasonSummary(analysisText, rectificationText, fullText);
+    String rectificationSummary = extractRectificationSummary(rectificationText);
+    return new HistoricalReasonInsight(
+        reasonTypes.isEmpty() ? "未分类" : String.join("、", reasonTypes),
+        reasonSummary,
+        rectificationSummary);
+  }
+
+  private List<String> reasonTypes(String text) {
+    var types = new ArrayList<String>();
+    if (containsAny(text, "资管", "台账", "额定功率", "标杆", "功率未及时", "无功率")) {
+      types.add("资管系统/台账/额定功率未及时更新");
+    }
+    if (containsAny(text, "分摊", "下电", "退出分摊", "电信设备", "分摊比例")) {
+      types.add("分摊比例变化/电信下电/退出分摊");
+    }
+    if (containsAny(text, "新增", "搬迁", "扩容", "设备增加", "新增设备", "投运", "负载")) {
+      types.add("设备新增/搬迁/扩容");
+    }
+    if (containsAny(text, "空调", "高温", "夏季", "温度", "制冷")) {
+      types.add("空调/高温/季节运行");
+    }
+    if (containsAny(text, "电表", "倍率", "计量", "合表", "合并用一个电表", "共用1个电表", "直供电")) {
+      types.add("电表/倍率/合表/计量变化");
+    }
+    if (containsAny(text, "业务量", "用电量波动", "业务波动")) {
+      types.add("业务量波动");
+    }
+    return List.copyOf(types);
+  }
+
+  private String extractReasonSummary(String analysis, String rectification, String fullText) {
+    List<String> candidates = new ArrayList<>();
+    candidates.addAll(reasonSentences(analysis));
+    candidates.addAll(reasonSentences(rectification));
+    candidates.addAll(reasonSentences(fullText));
+    return candidates.stream()
+        .map(sentence -> compact(sentence, 420))
+        .filter(sentence -> !sentence.isBlank())
+        .distinct()
+        .limit(4)
+        .reduce((left, right) -> left + "；" + right)
+        .orElse("历史报告未提取到明确原因");
+  }
+
+  private List<String> reasonSentences(String text) {
+    String safeText = normalizeReportText(text);
+    if (safeText.isBlank()) {
+      return List.of();
+    }
+    List<String> sentences = new ArrayList<>();
+    for (String sentence : safeText.split("[。；;\\n]+")) {
+      String trimmed = sentence.trim();
+      if (trimmed.length() < 8) {
+        continue;
+      }
+      if (containsAny(trimmed, "原因", "因为", "导致", "引起", "分摊比例", "下电", "搬迁", "新增", "资管", "额定功率", "电表", "空调", "业务量")) {
+        sentences.add(trimmed);
+      }
+    }
+    return List.copyOf(sentences);
+  }
+
+  private String extractRectificationSummary(String rectification) {
+    String safeText = normalizeReportText(rectification);
+    if (safeText.isBlank()) {
+      return "历史报告未提取到整改结论";
+    }
+    return java.util.Arrays.stream(safeText.split("[。\\n]+"))
+        .map(String::trim)
+        .filter(sentence -> sentence.length() >= 8)
+        .filter(sentence -> containsAny(sentence, "已完成核查", "不存在", "跑冒滴漏", "偷搭电", "实际用电", "正常", "整改"))
+        .distinct()
+        .limit(2)
+        .reduce((left, right) -> left + "；" + right)
+        .map(value -> compact(value, 600))
+        .orElse(compact(safeText, 600));
+  }
+
+  private String normalizeReportText(String value) {
+    return value(value)
+        .replaceAll("(?is)<[^>]+>", " ")
+        .replace("&nbsp;", " ")
+        .replace("&#x20;", " ")
+        .replaceAll("\\s+", " ")
+        .trim();
+  }
+
+  private boolean containsAny(String text, String... candidates) {
+    String safeText = value(text);
+    for (String candidate : candidates) {
+      if (safeText.contains(candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private String firstNonBlank(String first, String second) {
+    return first == null || first.isBlank() ? second : first;
   }
 
   private void deactivateDraftCorrections(String draftPublicId, long replacementMemoryId) {
@@ -767,6 +883,9 @@ public class CityMemoryService {
       long id, String trustLevel, Long sourceReportId, Long sourceMessageId) {}
 
   private record ReasonAggregate(String reason, int confirmations) {}
+
+  private record HistoricalReasonInsight(
+      String reasonTypesText, String reasonSummary, String rectificationSummary) {}
 
   private record ReportMemorySource(
       long reportId,

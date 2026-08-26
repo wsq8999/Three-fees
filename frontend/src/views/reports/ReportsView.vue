@@ -27,7 +27,8 @@ const importing = ref(false);
 const downloadingId = ref("");
 const errorMessage = ref("");
 const pageData = ref<PageResult<ReportSummary> | null>(null);
-const optionReports = ref<ReportSummary[]>([]);
+const reportFilterOptions = ref({ periods: [] as string[], cities: [] as BusinessCity[], districts: [] as string[] });
+const allCities = ref<BusinessCity[]>([]);
 const historicalPoints = ref<HistoricalReportBillingPoint[]>([]);
 const historicalPeriods = ref<HistoricalReportPeriod[]>([]);
 const importOptionsLoading = ref(false);
@@ -67,23 +68,28 @@ const canImport = computed(
 );
 
 const periodOptions = computed(() =>
-  uniqueOptions(optionReports.value.map((item) => item.period)).sort().reverse(),
+  reportFilterOptions.value.periods,
 );
 const cityOptions = computed<BusinessCity[]>(() => {
   const map = new Map<string, BusinessCity>();
-  for (const report of optionReports.value) map.set(report.city.code, report.city);
+  const currentCity = session.currentUser?.city;
+  if (currentCity) map.set(currentCity.code, currentCity);
+  for (const city of allCities.value) map.set(city.code, city);
+  for (const city of reportFilterOptions.value.cities) {
+    const knownCity = map.get(city.code);
+    if (knownCity === undefined || knownCity.name === knownCity.code) {
+      map.set(city.code, city);
+    }
+  }
   return Array.from(map.values());
 });
 const districtOptions = computed(() =>
-  uniqueOptions(
-    optionReports.value
-      .filter(
-        (item) =>
-          filters.cityCode.length === 0 || item.city.code === filters.cityCode,
-      )
-      .map((item) => item.district ?? ""),
-  ),
+  reportFilterOptions.value.districts,
 );
+const selectedHistoricalPointLabel = computed(() => {
+  const selected = historicalPoints.value.find((point) => pointKey(point) === importForm.pointKey);
+  return selected === undefined ? "" : pointOptionLabel(selected);
+});
 const range = computed(() => {
   const total = pageData.value?.totalElements ?? 0;
   if (total === 0) return "已显示 0-0 条，共 0 条";
@@ -91,10 +97,6 @@ const range = computed(() => {
   const end = Math.min(filters.page * filters.size, total);
   return `已显示 ${start}-${end} 条，共 ${total} 条`;
 });
-
-function uniqueOptions(values: string[]): string[] {
-  return Array.from(new Set(values.filter((value) => value.length > 0)));
-}
 
 function hasText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
@@ -130,16 +132,20 @@ function reportQuery(page = filters.page, size = filters.size) {
 }
 
 async function loadOptions(): Promise<void> {
-  const result = await businessApi.reports.list({
-    cityCode: session.currentUser?.city?.code ?? "",
-    district: "",
-    period: "",
-    keyword: "",
-    source: "",
-    page: 1,
-    size: 100,
-  });
-  optionReports.value = result.items;
+  const [options, cities] = await Promise.all([
+    businessApi.reports.filterOptions({
+      reportNumber: filters.reportNumber.trim(),
+      billingPointCode: filters.billingPointCode.trim(),
+      billingPointName: filters.billingPointName.trim(),
+      keyword: "",
+      cityCode: filters.cityCode,
+      period: filters.period,
+      source: filters.source,
+    }),
+    businessApi.cities.list().catch(() => []),
+  ]);
+  reportFilterOptions.value = options;
+  allCities.value = cities;
 }
 
 async function load(): Promise<void> {
@@ -188,6 +194,9 @@ async function syncRouteAndLoad(resetPage = false): Promise<void> {
     },
   });
 
+  if (resetPage) {
+    await loadOptions();
+  }
   await load();
 }
 
@@ -203,7 +212,7 @@ function reset(): void {
     page: 1,
   });
 
-  void syncRouteAndLoad();
+  void syncRouteAndLoad(true);
 }
 
 async function openImport(): Promise<void> {
@@ -372,7 +381,6 @@ async function importHistorical(): Promise<void> {
       file,
     });
     focusedReport.value = imported;
-    await loadOptions();
     Object.assign(filters, {
       reportNumber: "",
       billingPointCode: "",
@@ -383,7 +391,7 @@ async function importHistorical(): Promise<void> {
       source: "",
       page: 1,
     });
-    await syncRouteAndLoad();
+    await syncRouteAndLoad(true);
     importSuccessVisible.value = true;
   } catch (error) {
     importError.value = error instanceof Error ? error.message : "历史报告导入失败";
@@ -778,6 +786,7 @@ onMounted(async () => {
             :loading="importOptionsLoading"
             placeholder="请选择报账点"
             no-data-text="暂无报账点"
+            :title="selectedHistoricalPointLabel || '请选择报账点'"
             @change="importPointChanged"
           >
             <ElOption
@@ -1076,18 +1085,61 @@ onMounted(async () => {
 }
 
 .full-point-select {
-  width: 100%;
+  width: 100% !important;
+  min-width: 0;
 }
 
 .full-point-select :deep(.el-select__wrapper) {
+  width: 100%;
+  min-width: 0;
   min-height: 36px;
-  height: auto;
+  height: 36px;
+  overflow: hidden;
+  border-color: #d8e0ea !important;
+  box-shadow: 0 0 0 1px #d8e0ea inset !important;
+}
+
+.full-point-select :deep(.el-select__wrapper.is-focused),
+.full-point-select :deep(.el-select__wrapper.is-hovering) {
+  border-color: #9db6cf !important;
+  box-shadow: 0 0 0 1px #9db6cf inset !important;
+}
+
+.full-point-select :deep(.el-select__selection) {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .full-point-select :deep(.el-select__selected-item) {
-  overflow: visible;
-  white-space: normal;
-  word-break: break-word;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.full-point-select :deep(.el-select__selected-item span),
+.full-point-select :deep(.el-select__selected-item div),
+.full-point-select :deep(.el-select__input),
+.full-point-select :deep(.el-select__placeholder) {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
 }
 
 .upload-section :deep(.el-upload),

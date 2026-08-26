@@ -232,7 +232,7 @@ function comparisons(
         ? "A/B/C 缺失、参考月不合格或 B≤0，同比不适用"
         : `C=${formatNumber(year.referenceDaily)}，A=${formatNumber(year.a)}，B=${formatNumber(year.b)}，K=${formatNumber(year.k, 4)}，正常上限=${formatNumber(year.threshold)}`,
       formula:
-        "C=上年同月合格参考月日均；A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
+        "C=上年同月缴费明细日均耗电量；A=本月额定功率标杆月总值÷本月缴费天数；B=参考月额定功率标杆月总值÷参考月缴费天数；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
     },
     {
       key: "MONTH_ON_MONTH",
@@ -254,9 +254,9 @@ function comparisons(
       ratio: month.overLimit ? formatRatio(month.ratio) : null,
       reason: !month.applicable
         ? "找不到最近合格参考月、A/B/C 缺失或 B≤0，环比不适用"
-        : `最近合格参考月：C=${formatNumber(month.referenceDaily)}，A=${formatNumber(month.a)}，B=${formatNumber(month.b)}，K=${formatNumber(month.k, 4)}，正常上限=${formatNumber(month.threshold)}`,
+        : `上一笔审核通过缴费单：C=${formatNumber(month.referenceDaily)}，A=${formatNumber(month.a)}，B=${formatNumber(month.b)}，K=${formatNumber(month.k, 4)}，正常上限=${formatNumber(month.threshold)}`,
       formula:
-        "C=当前月之前最近合格自然月日均；A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
+        "C=上一笔审核通过缴费明细日均耗电量；A=本月额定功率标杆月总值÷本月缴费天数；B=参考账期额定功率标杆月总值÷参考账期缴费天数；K=max(1,A/B)；正常上限=C×K×1.20；当前日均>正常上限则超标",
     },
     {
       key: "RATED_BENCHMARK",
@@ -716,6 +716,7 @@ function initialDraft(): ReportDraft {
     blocks,
     imageFileIds: [],
     messages: [],
+    currentVersion: 0,
     updatedAt: FIXED_TIME,
     formalReportId: null,
     entityVersion: 1,
@@ -843,11 +844,11 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     key: "YEAR_ON_YEAR",
     name: "历史日均电量同比标杆",
     version: "audit-rule-v2026.1",
-    description: "以上一年度同自然月的合格日均电量为 C，并按标杆变化系数上浮。",
+    description: "以上一年度同月审核通过缴费明细的日均耗电量字段为 C，并按标杆变化系数上浮。",
     formula:
-      "A=本月标杆日列合计÷本月自然日；B=上年同月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20",
+      "A=本月额定功率标杆月总值÷本月缴费天数；B=上年同月额定功率标杆月总值÷参考月缴费天数；K=max(1,A/B)；正常上限=C×K×1.20",
     chain: [
-      "筛选上年同月合格参考月 C",
+      "筛选上年同月审核通过缴费单并读取日均耗电量 C",
       "计算 A/B 与 K=max(1,A/B)",
       "计算正常上限 C×K×1.20",
       "当前日均大于正常上限则超标",
@@ -859,8 +860,8 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     ],
     boundaries: [
       "A/B/C 任一缺失或 B≤0 时不适用",
-      "闰年按各自自然月天数计算",
-      "参考月所有参与汇总缴费单必须审核通过",
+      "缴费天数取缴费明细字段",
+      "参考月缴费单必须审核通过",
     ],
     snapshotNote: "正式报告保存计算输入、输出与规则版本快照。",
   },
@@ -868,11 +869,11 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     key: "MONTH_ON_MONTH",
     name: "历史日均电量环比标杆",
     version: "audit-rule-v2026.1",
-    description: "向前寻找结束日最近的合格自然月，不强制固定上一月。",
+    description: "向前寻找最近一笔审核通过缴费单作为参考。",
     formula:
-      "A=本月标杆日列合计÷本月自然日；B=参考月标杆日列合计÷参考月自然日；K=max(1,A/B)；正常上限=C×K×1.20",
+      "A=本月额定功率标杆月总值÷本月缴费天数；B=参考账期额定功率标杆月总值÷参考账期缴费天数；K=max(1,A/B)；正常上限=C×K×1.20",
     chain: [
-      "向前查找最近合格自然月 C",
+      "向前查找最近一笔审核通过缴费单并读取日均耗电量 C",
       "计算 A/B 与 K=max(1,A/B)",
       "计算正常上限 C×K×1.20",
       "当前日均大于正常上限则超标",
@@ -893,13 +894,13 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
     key: "RATED_BENCHMARK",
     name: "额定标杆（导入值）",
     version: "benchmark-v2026.1",
-    description: "比较有效电表行分摊后度数合计与适用的额定标杆。",
+    description: "比较本期缴费明细实际总电量与当月额定功率标杆月总值。",
     formula:
-      "额定标杆总量=当月1日至月末有效日标杆值之和；实际总耗电量>额定标杆总量则超标",
+      "正常上限=当月额定功率标杆月总值；实际总耗电量>正常上限则超标",
     chain: [
-      "汇总有效分摊后度数",
-      "求和当月有效日标杆值",
-      "比较实际总量与额定标杆总量",
+      "汇总本期缴费明细实际总电量",
+      "读取当月额定功率标杆月总值",
+      "比较实际总量与正常上限",
       "形成最终类型",
     ],
     example: [
@@ -908,7 +909,7 @@ export const BENCHMARK_RULES: readonly BenchmarkRule[] = [
       { label: "偏差率", value: "11.74%（额定标杆超标）" },
     ],
     boundaries: [
-      "日标杆不完整时不适用",
+      "月总标杆缺失时不适用",
       "正常上限为0且实际为0时正常",
       "正常上限为0且实际>0时超标且比例不显示无穷数",
     ],

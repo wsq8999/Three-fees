@@ -22,16 +22,27 @@ import com.threefees.task.application.BusinessTaskRepository;
 import com.threefees.task.domain.BusinessTask;
 import com.threefees.task.domain.TaskStatus;
 import com.threefees.task.domain.TaskType;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
+import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.InputStreamResource;
@@ -53,6 +64,9 @@ public class ReportDraftService {
   private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
   private static final Pattern INLINE_FIGURE =
       Pattern.compile("(?is)<figure\\b[^>]*data-file-id=[\"']([^\"']+)[\"'][^>]*>.*?</figure>");
+  private static final Pattern INLINE_IMAGE_ROW =
+      Pattern.compile(
+          "(?is)<div\\b[^>]*class=[\"'][^\"']*inline-image-row[^\"']*[\"'][^>]*>.*?</div>");
   private static final Pattern INLINE_FILE_REFERENCE =
       Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
   private static final Pattern INLINE_BASE64_FIGURE =
@@ -66,6 +80,41 @@ public class ReportDraftService {
   private static final Pattern BASE64_IMAGE_MARKER =
       Pattern.compile("(?is)data:image/(?:png|jpe?g);base64,");
   private static final Pattern HTML_ELEMENT = Pattern.compile("(?is)<[a-z][^>]*>");
+  private static final String NON_EQUIPMENT_IMAGE_LABELS =
+      "(?:缴费信息界面图|缴费标杆信息界面图|位置点信息界面图|系统界面图|表格截图|缴费截图|标杆截图|附件截图|票据截图|缴费信息图|标杆信息图|位置点图)";
+  private static final Pattern NON_EQUIPMENT_IMAGE_LABEL_BLOCK =
+      Pattern.compile(
+          "(?is)<(p|div|h[1-6])\\b[^>]*>\\s*(?:(?!<figure\\b).)*?"
+              + NON_EQUIPMENT_IMAGE_LABELS
+              + "\\s*[：:]?\\s*(?:(?!<figure\\b).)*?</\\1>\\s*(?=<figure\\b)");
+  private static final Pattern NON_EQUIPMENT_IMAGE_LABEL_TEXT =
+      Pattern.compile(
+          "(?is)(^|(?<=>))\\s*" + NON_EQUIPMENT_IMAGE_LABELS + "\\s*[：:]?\\s*(?=<figure\\b)");
+  private static final String EQUIPMENT_IMAGE_LABELS =
+      "(?:设备情况|机房全景图|设备机柜现场图)";
+  private static final Pattern IMAGE_FOLLOWED_BY_LABEL_BLOCK =
+      Pattern.compile(
+          "(?is)(<figure\\b[^>]*data-file-id=[\"'][^\"']+[\"'][^>]*>.*?</figure>)\\s*"
+              + "(<(p|div|h[1-6])\\b[^>]*>\\s*"
+              + EQUIPMENT_IMAGE_LABELS
+              + "\\s*[：:].*?</\\3>)");
+  private static final Pattern IMAGE_FOLLOWED_BY_LABEL_TEXT =
+      Pattern.compile(
+          "(?is)(<figure\\b[^>]*data-file-id=[\"'][^\"']+[\"'][^>]*>.*?</figure>)\\s*("
+              + EQUIPMENT_IMAGE_LABELS
+              + "\\s*[：:][^<\\r\\n]*)");
+  private static final String ANALYSIS_REASON_MARKERS =
+      "(?:本期[^<\\r\\n]{0,40}超标原因|超标原因|主要原因|原因分析)";
+  private static final Pattern ANALYSIS_REASON_BLOCK =
+      Pattern.compile(
+          "(?is)\\s*<(p|div)\\b[^>]*>\\s*(?:(?!</\\1>).)*?"
+              + ANALYSIS_REASON_MARKERS
+              + "(?:(?!</\\1>).)*?</\\1>\\s*");
+  private static final Pattern ANALYSIS_REASON_TEXT_LINE =
+      Pattern.compile("(?im)^\\s*.*" + ANALYSIS_REASON_MARKERS + ".*(?:\\R|$)");
+  private static final Pattern ADDITIVE_RATED_POWER_FORMULA =
+      Pattern.compile(
+          "(?is)（?\\(?\\s*\\d+(?:\\.\\d+)?\\s*(?:kW|KW)?\\s*[+＋]\\s*\\d+(?:\\.\\d+)?\\s*(?:kW|KW)?\\s*\\)?）?\\s*(?:kW|KW)?\\s*[*×xX]\\s*24\\s*(?:小时|H|h)(?:\\s*[*×xX]\\s*\\d+\\s*天?)?");
 
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
@@ -183,6 +232,11 @@ public class ReportDraftService {
                current_version_no = ?,
                formal_report_public_id = ?,
                ai_final_reason = ?,
+               analysis_status = 'PENDING_ANALYSIS',
+               analysis_task_public_id = NULL,
+               analysis_error_code = NULL,
+               analysis_submitted_at = NULL,
+               analysis_completed_at = NULL,
                updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
          WHERE id = ?
         """,
@@ -199,6 +253,54 @@ public class ReportDraftService {
     bindImages(existing.id(), imageIds, List.of(), actor.username());
     saveVersion(existing.id(), nextVersion, "CORRECTION", sections, imageIds, actor.username());
     return find(existing.publicId(), actor);
+  }
+
+  @Transactional
+  public boolean discardUnusedCorrection(String publicId, CurrentUser actor) {
+    Draft draft = find(publicId, actor);
+    if (!"CORRECTING".equals(draft.status())
+        || draft.formalReportId() == null
+        || draft.formalReportId().isBlank()
+        || draft.analysisSubmittedAt() != null) {
+      return false;
+    }
+    DraftVersion correctionBaseline = latestCorrectionVersion(draft.id());
+    if (correctionBaseline == null
+        || !sameSections(draft.sections(), correctionBaseline.sections())
+        || !draft.currentImageFileIds().equals(correctionBaseline.imageFileIds())
+        || hasMessagesSince(draft.id(), correctionBaseline.createdAt())) {
+      return false;
+    }
+    DraftVersion previous = previousVersion(draft.id(), correctionBaseline.version());
+    if (previous == null) {
+      jdbcTemplate.update("DELETE FROM report_draft WHERE id = ?", draft.id());
+      return true;
+    }
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET status = 'FORMALIZED',
+               title = ?, situation = ?, analysis = ?, rectification = ?,
+               current_version_no = ?,
+               current_image_file_ids_json = ?,
+               analysis_status = 'FORMALIZED',
+               analysis_task_public_id = NULL,
+               analysis_error_code = NULL,
+               analysis_submitted_at = NULL,
+               analysis_completed_at = NULL,
+               updated_at = CURRENT_TIMESTAMP(3), updated_by = ?, version = version + 1
+         WHERE id = ? AND status = 'CORRECTING'
+        """,
+        previous.sections().title(),
+        previous.sections().situation(),
+        previous.sections().analysis(),
+        previous.sections().rectification(),
+        previous.version(),
+        writeJson(previous.imageFileIds()),
+        actor.username(),
+        draft.id());
+    bindImages(draft.id(), previous.imageFileIds(), List.of(), actor.username());
+    return true;
   }
 
   @Transactional
@@ -243,9 +345,8 @@ public class ReportDraftService {
     if (!"IMAGE_ANALYSIS".equals(normalizedIntent) && !requestedImageIds.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_NOT_ALLOWED", "仅图片分析可以携带图片");
     }
-    if (requestedImageIds.size() > 10
-        || requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
-      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    if (requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
+      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片列表存在重复图片");
     }
     List<String> reportImageIds =
         "IMAGE_ANALYSIS".equals(normalizedIntent)
@@ -256,29 +357,11 @@ public class ReportDraftService {
     if ("IMAGE_ANALYSIS".equals(normalizedIntent) && reportImageIds.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告正文中粘贴至少一张图片");
     }
-    if (reportImageIds.size() > 10) {
-      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "当前报告最多支持 10 张分析图片");
-    }
-    long totalImageBytes = 0;
-    var images = new java.util.ArrayList<AiImage>();
-    List<String> modelImageIds =
-        "IMAGE_ANALYSIS".equals(normalizedIntent) ? reportImageIds : List.of();
-    for (String imageId : modelImageIds) {
-      var file = storedFileService.find(imageId);
-      requireFileOwner(actor, file.createdBy());
-      if (!("image/png".equals(file.mediaType()) || "image/jpeg".equals(file.mediaType()))) {
-        throw new BusinessRuleException("AI_IMAGE_TYPE_INVALID", "图片仅支持 PNG/JPEG");
-      }
-      if (file.byteSize() > 10L * 1024 * 1024) {
-        throw new BusinessRuleException("AI_IMAGE_TOO_LARGE", "单张分析图片不能超过 10 MiB");
-      }
-      totalImageBytes += file.byteSize();
-      if (totalImageBytes > 20L * 1024 * 1024) {
-        throw new BusinessRuleException("AI_IMAGES_TOO_LARGE", "分析图片总大小不能超过 20 MiB");
-      }
-      images.add(
-          new AiImage(file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
-    }
+    List<AnalysisImageInput> modelInputs =
+        "IMAGE_ANALYSIS".equals(normalizedIntent)
+            ? analysisImageInputs(draft, reportImageIds, actor.username(), true)
+            : List.of();
+    List<AiImage> images = modelInputs.stream().map(AnalysisImageInput::image).toList();
     List<Fact> facts = factsForIntent(draft, normalizedIntent);
     AgentContext context = agentContext(draft, normalizedIntent);
     ReportSections updated;
@@ -304,6 +387,7 @@ public class ReportDraftService {
     }
     if (changed) {
       updated = preserveInlineFigures(draft.sections(), updated);
+      updated = normalizeAiReportText(updated);
     }
     if ("CORRECTION".equals(normalizedIntent)
         && (result.finalReason() == null || result.finalReason().isBlank())) {
@@ -322,7 +406,11 @@ public class ReportDraftService {
           result.finalReason(),
           actor.username(),
           expectedVersion);
-      bindImages(draft.id(), reportImageIds, result.imageAnalyses(), actor.username());
+      bindImages(
+          draft.id(),
+          reportImageIds,
+          expandGroupedImageAnalyses(reportImageIds, modelInputs, result.imageAnalyses()),
+          actor.username());
       saveVersion(draft.id(), version, normalizedIntent, updated, reportImageIds, actor.username());
     } else {
       lockVersion(draft.id(), expectedVersion);
@@ -337,7 +425,7 @@ public class ReportDraftService {
             reportImageIds,
             result.initialReason(),
             result.finalReason(),
-            images.size(),
+            modelInputs.size(),
             context,
             actor.username());
     if ("CORRECTION".equals(normalizedIntent)) {
@@ -369,9 +457,8 @@ public class ReportDraftService {
     }
     String safeInstruction = requireInstruction(instruction);
     List<String> requestedImageIds = imageFileIds == null ? List.of() : List.copyOf(imageFileIds);
-    if (requestedImageIds.size() > 10
-        || requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
-      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    if (requestedImageIds.stream().distinct().count() != requestedImageIds.size()) {
+      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片列表存在重复图片");
     }
     List<String> reportImageIds =
         Stream.concat(draft.currentImageFileIds().stream(), requestedImageIds.stream())
@@ -495,6 +582,84 @@ public class ReportDraftService {
     }
   }
 
+  private DraftVersion latestCorrectionVersion(long draftId) {
+    return jdbcTemplate
+        .query(
+            """
+            SELECT public_id, version_no, change_type, title, situation, analysis,
+                   rectification, image_file_ids_json, created_at, created_by
+              FROM report_draft_version
+             WHERE draft_id = ? AND change_type = 'CORRECTION'
+             ORDER BY version_no DESC, id DESC
+             LIMIT 1
+            """,
+            (rs, row) ->
+                new DraftVersion(
+                    rs.getString("public_id"),
+                    rs.getInt("version_no"),
+                    rs.getString("change_type"),
+                    new ReportSections(
+                        rs.getString("title"),
+                        rs.getString("situation"),
+                        rs.getString("analysis"),
+                        rs.getString("rectification")),
+                    readStringList(rs.getString("image_file_ids_json")),
+                    rs.getObject("created_at", LocalDateTime.class),
+                    rs.getString("created_by")),
+            draftId)
+        .stream()
+        .findFirst()
+        .orElse(null);
+  }
+
+  private DraftVersion previousVersion(long draftId, int version) {
+    return jdbcTemplate
+        .query(
+            """
+            SELECT public_id, version_no, change_type, title, situation, analysis,
+                   rectification, image_file_ids_json, created_at, created_by
+              FROM report_draft_version
+             WHERE draft_id = ? AND version_no < ?
+             ORDER BY version_no DESC, id DESC
+             LIMIT 1
+            """,
+            (rs, row) ->
+                new DraftVersion(
+                    rs.getString("public_id"),
+                    rs.getInt("version_no"),
+                    rs.getString("change_type"),
+                    new ReportSections(
+                        rs.getString("title"),
+                        rs.getString("situation"),
+                        rs.getString("analysis"),
+                        rs.getString("rectification")),
+                    readStringList(rs.getString("image_file_ids_json")),
+                    rs.getObject("created_at", LocalDateTime.class),
+                    rs.getString("created_by")),
+            draftId,
+            version)
+        .stream()
+        .findFirst()
+        .orElse(null);
+  }
+
+  private boolean hasMessagesSince(long draftId, LocalDateTime since) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM report_draft_message WHERE draft_id = ? AND created_at >= ?",
+            Integer.class,
+            draftId,
+            since);
+    return count != null && count > 0;
+  }
+
+  private boolean sameSections(ReportSections first, ReportSections second) {
+    return java.util.Objects.equals(first.title(), second.title())
+        && java.util.Objects.equals(first.situation(), second.situation())
+        && java.util.Objects.equals(first.analysis(), second.analysis())
+        && java.util.Objects.equals(first.rectification(), second.rectification());
+  }
+
   @Transactional
   public Draft edit(
       String publicId, ReportSections sections, long expectedVersion, CurrentUser actor) {
@@ -540,12 +705,9 @@ public class ReportDraftService {
     List<String> reportImageIds = imageFileIds == null ? draft.currentImageFileIds() : imageFileIds;
     try {
       validateAnalysisImages(reportImageIds, actor);
-      var images = new java.util.ArrayList<AiImage>();
-      for (String imageId : reportImageIds) {
-        var file = storedFileService.find(imageId);
-        images.add(
-            new AiImage(file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
-      }
+      List<AnalysisImageInput> modelInputs =
+          analysisImageInputs(draft, reportImageIds, actor, false);
+      List<AiImage> images = modelInputs.stream().map(AnalysisImageInput::image).toList();
       List<Fact> facts = factsForIntent(draft, "IMAGE_ANALYSIS");
       AgentContext context = agentContext(draft, "IMAGE_ANALYSIS");
       var result =
@@ -563,6 +725,11 @@ public class ReportDraftService {
         throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整报告正文", false);
       }
       updated = preserveInlineFigures(draft.sections(), updated);
+      updated = normalizeImageCaptionPositions(updated);
+      updated = removeNonEquipmentImageLabels(updated);
+      updated = normalizeAnalysisReasonPosition(updated);
+      updated = normalizeAiReportText(updated);
+      updated = normalizePositionRatedPowerFormula(draft, updated);
       int version = draft.currentVersion() + 1;
       updateDraft(
           draft.id(),
@@ -573,20 +740,17 @@ public class ReportDraftService {
           result.finalReason(),
           actor,
           draft.entityVersion());
-      bindImages(draft.id(), reportImageIds, result.imageAnalyses(), actor);
-      saveVersion(draft.id(), version, "IMAGE_ANALYSIS", updated, reportImageIds, actor);
-      saveMessage(
-          draft,
-          "IMAGE_ANALYSIS",
-          instruction,
-          result.answer(),
-          true,
+      bindImages(
+          draft.id(),
           reportImageIds,
-          result.initialReason(),
-          result.finalReason(),
-          images.size(),
-          context,
+          expandGroupedImageAnalyses(reportImageIds, modelInputs, result.imageAnalyses()),
           actor);
+      saveVersion(draft.id(), version, "IMAGE_ANALYSIS", updated, reportImageIds, actor);
+      saveAnalysisRun(
+          draft,
+          null,
+          modelInputs.size(),
+          context);
       markImageAnalysisSucceeded(draft.id(), actor);
     } catch (RuntimeException exception) {
       markImageAnalysisFailed(draft.id(), analysisErrorCode(exception), actor);
@@ -678,9 +842,6 @@ public class ReportDraftService {
   public UploadedImage uploadImage(String publicId, MultipartFile image, CurrentUser actor) {
     Draft draft = find(publicId, actor);
     ensureEditable(draft);
-    if (draft.currentImageFileIds().size() >= 10) {
-      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "一份报告最多包含 10 张图片");
-    }
     var stored =
         storedFileService.storeUpload(
             image, java.util.Set.of("png", "jpg", "jpeg"), "DRAFT_IMAGE", actor.username());
@@ -771,6 +932,9 @@ public class ReportDraftService {
         .replaceAll(
             "(?is)<figure\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>.*?</figure>", "")
         .replaceAll("(?is)<img\\b[^>]*data-file-id=[\"']" + quotedId + "[\"'][^>]*>", "")
+        .replaceAll(
+            "(?is)<div\\b([^>]*class=[\"'][^\"']*inline-image-row[^\"']*[\"'][^>]*)>\\s*</div>",
+            "")
         .trim();
   }
 
@@ -815,7 +979,16 @@ public class ReportDraftService {
     String businessKey = formalTaskBusinessKey(draft.publicId(), draft.currentVersion());
     var existing = taskRepository.findByTypeAndBusinessKey(TaskType.FORMAL_REPORT, businessKey);
     if (existing.isPresent()) {
-      return existing.orElseThrow();
+      BusinessTask task = existing.orElseThrow();
+      if (task.status() == TaskStatus.FAILED || task.status() == TaskStatus.SUCCEEDED) {
+        String payloadJson =
+            writeJson(Map.of("draftId", publicId, "contentVersion", draft.currentVersion()));
+        if (!taskRepository.requeueWithPayload(task.publicId(), payloadJson, actor.username())) {
+          throw new ResourceConflictException("FORMAL_REPORT_REQUEUE_FAILED", "正式报告任务状态已变化，请刷新后重试");
+        }
+        return taskRepository.findByPublicId(task.publicId()).orElse(task);
+      }
+      return task;
     }
     ensureEditable(draft);
     requireExpectedVersion(draft, expectedVersion);
@@ -856,10 +1029,9 @@ public class ReportDraftService {
     if (imageIds == null || imageIds.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请先在报告正文中粘贴至少一张图片");
     }
-    if (imageIds.size() > 10 || imageIds.stream().distinct().count() != imageIds.size()) {
-      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片数量超过限制或存在重复图片");
+    if (imageIds.stream().distinct().count() != imageIds.size()) {
+      throw new BusinessRuleException("AI_IMAGES_INVALID", "图片列表存在重复图片");
     }
-    long totalImageBytes = 0;
     for (String imageId : imageIds) {
       var file = storedFileService.find(imageId);
       requireFileOwner(actor, file.createdBy());
@@ -868,10 +1040,6 @@ public class ReportDraftService {
       }
       if (file.byteSize() > 10L * 1024 * 1024) {
         throw new BusinessRuleException("AI_IMAGE_TOO_LARGE", "单张分析图片不能超过 10 MiB");
-      }
-      totalImageBytes += file.byteSize();
-      if (totalImageBytes > 20L * 1024 * 1024) {
-        throw new BusinessRuleException("AI_IMAGES_TOO_LARGE", "分析图片总大小不能超过 20 MiB");
       }
     }
   }
@@ -929,6 +1097,7 @@ public class ReportDraftService {
         .query(
             """
             SELECT c.name AS city_name, s.district_name,
+                   m.resource_summary_json AS master_json,
                    a.audit_status, a.over_limit_type, a.max_ratio,
                    COALESCE(a.actual_total_kwh, a.actual_energy) AS actual_energy,
                    a.current_daily_avg_kwh,
@@ -940,9 +1109,12 @@ public class ReportDraftService {
                    a.rated_result, COALESCE(a.rated_total_kwh, a.rated_benchmark_energy) AS rated_energy,
                    COALESCE(a.rated_exceed_ratio, a.rated_ratio) AS rated_ratio,
                    a.payment_count, a.payment_eligibility_reason, a.aggregated_payment_days,
-                   s.data_json, a.detail_json
+                   COALESCE(m.resource_summary_json, s.data_json) AS data_json, a.detail_json
               FROM billing_point_snapshot s
               JOIN city c ON c.code = s.city_code
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code
                AND a.data_period = s.data_period
@@ -954,7 +1126,13 @@ public class ReportDraftService {
               values.add(new Fact("报账点编码", draft.billingPointCode()));
               values.add(new Fact("报账点名称", draft.billingPointName()));
               values.add(new Fact("所属城市", value(rs.getString("city_name"))));
-              values.add(new Fact("所属区县", value(rs.getString("district_name"))));
+              values.add(
+                  new Fact(
+                      "所属区县",
+                      value(
+                          firstNonBlank(
+                              jsonLikeValue(rs.getString("master_json"), "所属区县"),
+                              rs.getString("district_name")))));
               values.add(new Fact("账期", draft.period()));
               values.add(new Fact("稽核状态", value(rs.getString("audit_status"))));
               values.add(new Fact("超标类型", value(rs.getString("over_limit_type"))));
@@ -969,9 +1147,25 @@ public class ReportDraftService {
               values.add(new Fact("环比参考账期", value(rs.getString("mom_reference_period"))));
               values.add(new Fact("环比参考电量", value(rs.getBigDecimal("mom_reference_total_kwh"))));
               values.add(new Fact("环比超标比例", value(rs.getBigDecimal("mom_ratio"))));
-              values.add(new Fact("额定标杆结果", value(rs.getString("rated_result"))));
+              String ratedResult = rs.getString("rated_result");
+              var ratedContext =
+                  positionRatedPowerContext(
+                      draft,
+                      rs.getString("data_json"),
+                      rs.getObject("aggregated_payment_days"),
+                      rs.getBigDecimal("rated_energy"));
+              values.add(new Fact("额定标杆结果", value(ratedResult)));
               values.add(new Fact("额定标杆电量", value(rs.getBigDecimal("rated_energy"))));
               values.add(new Fact("额定标杆超标比例", value(rs.getBigDecimal("rated_ratio"))));
+              ratedContext.ifPresent(
+                  context ->
+                      values.add(new Fact("位置点额定功率标杆公式", context.factText())));
+              if ("OVER_LIMIT".equals(ratedResult)) {
+                values.add(
+                    new Fact(
+                        "额定超标重点排查方向",
+                        "历史稽核报告中较常见原因为资管系统未及时更新、额定功率台账未及时更新、现场设备功率未纳入系统、直放站或设备功率信息缺失；生成报告时应优先围绕这些原因核对当前图片、设备数量、资管信息和额定功率材料，不要默认写待核实。"));
+              }
               values.add(new Fact("缴费记录数", Integer.toString(rs.getInt("payment_count"))));
               values.add(new Fact("缴费核验说明", value(rs.getString("payment_eligibility_reason"))));
               values.add(new Fact("汇总缴费天数", value(rs.getObject("aggregated_payment_days"))));
@@ -998,6 +1192,65 @@ public class ReportDraftService {
     return allFacts.stream()
         .filter(fact -> !"报账点完整业务快照".equals(fact.fieldName()) && !"稽核计算明细".equals(fact.fieldName()))
         .toList();
+  }
+
+  private boolean isPositionPoint(Draft draft, String dataJson) {
+    return value(draft.billingPointName()).contains("位置点")
+        || value(draft.billingPointCode()).contains("位置点")
+        || value(dataJson).contains("位置点");
+  }
+
+  private Optional<PositionRatedPowerContext> positionRatedPowerContext(
+      Draft draft, String dataJson, Object aggregatedPaymentDays, Object ratedEnergy) {
+    String resourceSummary =
+        jdbcTemplate
+            .query(
+                """
+                SELECT resource_summary_json
+                  FROM billing_point_master
+                 WHERE city_code = ?
+                   AND billing_point_code = ?
+                 LIMIT 1
+                """,
+                (rs, row) -> value(rs.getString("resource_summary_json")),
+                draft.cityCode(),
+                draft.billingPointCode())
+            .stream()
+            .findFirst()
+            .orElse("");
+    String combined = value(dataJson) + " " + resourceSummary;
+    if (!isPositionPoint(draft, combined)) {
+      return Optional.empty();
+    }
+    int days = periodDays(draft.period(), aggregatedPaymentDays);
+    int month = periodMonth(draft.period());
+    boolean summer = month >= 5 && month <= 10;
+    String mainPower = firstNonBlank(jsonLikeValue(resourceSummary, "主设备功率"), jsonLikeValue(combined, "主设备总额定功率"));
+    String airPower = firstNonBlank(jsonLikeValue(resourceSummary, "空调总功率"), jsonLikeValue(combined, "空调总额定功率"));
+    String towerAirPower = jsonLikeValue(resourceSummary, "铁塔空调总额定功率");
+    String ratedTotal = decimalText(ratedEnergy);
+    return Optional.of(
+        new PositionRatedPowerContext(
+            summer, days, mainPower, airPower, towerAirPower, ratedTotal));
+  }
+
+  private int periodMonth(String period) {
+    try {
+      return YearMonth.parse(period).getMonthValue();
+    } catch (RuntimeException exception) {
+      return 0;
+    }
+  }
+
+  private int periodDays(String period, Object aggregatedPaymentDays) {
+    if (aggregatedPaymentDays instanceof Number number && number.intValue() > 0) {
+      return number.intValue();
+    }
+    try {
+      return YearMonth.parse(period).lengthOfMonth();
+    } catch (RuntimeException exception) {
+      return 30;
+    }
   }
 
   private AgentContext agentContext(Draft draft, String intent) {
@@ -1172,7 +1425,7 @@ public class ReportDraftService {
         SELECT r.public_id, s.city_code, s.billing_point_code, s.data_period,
                r.title, r.situation, r.analysis, r.rectification,
                a.over_limit_type, hc.image_count, hc.image_analysis_status,
-               hc.image_analysis_text
+               hc.image_analysis_text, hc.final_reason, hc.summary AS historical_summary
           FROM audit_report r
           JOIN billing_point_snapshot s ON s.id = r.billing_point_snapshot_id
           LEFT JOIN historical_audit_case hc ON hc.report_id = r.id
@@ -1184,36 +1437,49 @@ public class ReportDraftService {
         """
             + predicate
             + " ORDER BY r.generated_at DESC, r.id DESC LIMIT ?",
-        (rs, row) ->
-            new Reference(
-                "CASE-" + rs.getString("public_id"),
-                compact(
-                        "城市="
-                            + rs.getString("city_code")
-                            + "；报账点="
-                            + rs.getString("billing_point_code")
-                            + "；账期="
-                            + rs.getString("data_period")
-                            + "；超标类型="
-                            + value(rs.getString("over_limit_type"))
-                            + "；标题="
-                            + value(rs.getString("title"))
-                            + "；情况="
-                            + value(rs.getString("situation"))
-                            + "；分析="
-                            + value(rs.getString("analysis"))
-                            + "；整改="
-                            + value(rs.getString("rectification")),
-                        6000)
-                    + compact(
-                        "；历史图片数="
-                            + rs.getInt("image_count")
-                            + "；历史图片分析状态="
-                            + value(rs.getString("image_analysis_status"))
-                            + "；历史图片证据="
-                            + value(rs.getString("image_analysis_text")),
-                        6000),
-                rs.getString("city_code")),
+        (rs, row) -> {
+          String situation = value(rs.getString("situation"));
+          String analysis = value(rs.getString("analysis"));
+          String rectification = value(rs.getString("rectification"));
+          String historicalSummary = value(rs.getString("historical_summary"));
+          String reasonSummary =
+              firstNonBlank(
+                  value(rs.getString("final_reason")),
+                  historicalReasonSummary(situation + "。" + analysis + "。" + rectification + "。" + historicalSummary));
+          return new Reference(
+              "CASE-" + rs.getString("public_id"),
+              compact(
+                      "城市="
+                          + rs.getString("city_code")
+                          + "；报账点="
+                          + rs.getString("billing_point_code")
+                          + "；账期="
+                          + rs.getString("data_period")
+                          + "；超标类型="
+                          + value(rs.getString("over_limit_type"))
+                          + "；历史明确原因="
+                          + reasonSummary
+                          + "；历史原因类型="
+                          + historicalReasonTypes(reasonSummary + "。" + historicalSummary)
+                          + "；标题="
+                          + value(rs.getString("title"))
+                          + "；情况="
+                          + situation
+                          + "；分析="
+                          + analysis
+                          + "；整改="
+                          + rectification,
+                      6000)
+                  + compact(
+                      "；历史图片数="
+                          + rs.getInt("image_count")
+                          + "；历史图片分析状态="
+                          + value(rs.getString("image_analysis_status"))
+                          + "；历史图片证据="
+                          + value(rs.getString("image_analysis_text")),
+                      6000),
+              rs.getString("city_code"));
+        },
         parameters.toArray());
   }
 
@@ -1275,26 +1541,47 @@ public class ReportDraftService {
         VALUES (?, ?, ?, ?, ?, ?, 'three-fees-agent-v4', ?, ?, ?,
                 'SUCCEEDED', CURRENT_TIMESTAMP(3))
         """,
-        UUID.randomUUID().toString(),
-        draft.id(),
-        messageId,
-        draft.cityCode(),
-        draft.billingPointCode(),
-        aiServiceClient.modelName(),
-        modelImageCount,
-        writeJson(
-            Stream.concat(context.cityMemories().stream(), context.provinceReferences().stream())
-                .map(Reference::id)
-                .toList()),
-        writeJson(
-            Map.of(
-                "samePointReferenceCount", context.samePointCases().size(),
-                "cityReferenceCount", context.cityMemories().size(),
-                "provinceReferenceCount", context.provinceReferences().size(),
-                "imageEvidenceCount", context.imageEvidence().size(),
-                "conversationTurnCount", context.recentMessages().size(),
-                "modelImageCount", modelImageCount)));
+        aiAnalysisRunArgs(draft, messageId, modelImageCount, context));
     return messageId;
+  }
+
+  private void saveAnalysisRun(
+      Draft draft, Long messageId, int modelImageCount, AgentContext context) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO ai_analysis_run
+          (public_id, draft_id, message_id, city_code, billing_point_code, model_name,
+           prompt_version, image_count, retrieved_memory_ids_json, context_summary_json,
+           status, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'three-fees-agent-v4', ?, ?, ?,
+                'SUCCEEDED', CURRENT_TIMESTAMP(3))
+        """,
+        aiAnalysisRunArgs(draft, messageId, modelImageCount, context));
+  }
+
+  private Object[] aiAnalysisRunArgs(
+      Draft draft, Long messageId, int modelImageCount, AgentContext context) {
+    return new Object[] {
+      UUID.randomUUID().toString(),
+      draft.id(),
+      messageId,
+      draft.cityCode(),
+      draft.billingPointCode(),
+      aiServiceClient.modelName(),
+      modelImageCount,
+      writeJson(
+          Stream.concat(context.cityMemories().stream(), context.provinceReferences().stream())
+              .map(Reference::id)
+              .toList()),
+      writeJson(
+          Map.of(
+              "samePointReferenceCount", context.samePointCases().size(),
+              "cityReferenceCount", context.cityMemories().size(),
+              "provinceReferenceCount", context.provinceReferences().size(),
+              "imageEvidenceCount", context.imageEvidence().size(),
+              "conversationTurnCount", context.recentMessages().size(),
+              "modelImageCount", modelImageCount))
+    };
   }
 
   private void saveVersion(
@@ -1321,6 +1608,148 @@ public class ReportDraftService {
         sections.rectification(),
         writeJson(imageIds),
         actor);
+  }
+
+  private List<AnalysisImageInput> analysisImageInputs(
+      Draft draft, List<String> reportImageIds, String actor, boolean validateOwner) {
+    if (reportImageIds == null || reportImageIds.isEmpty()) {
+      return List.of();
+    }
+    var requestedIds = new java.util.LinkedHashSet<>(reportImageIds);
+    var inputs = new ArrayList<AnalysisImageInput>();
+    var consumed = new java.util.LinkedHashSet<String>();
+    String html = draft.sections().title()
+        + draft.sections().situation()
+        + draft.sections().analysis()
+        + draft.sections().rectification();
+    var matcher = Pattern.compile(
+            "(?is)<div\\b[^>]*class=[\"'][^\"']*inline-image-row[^\"']*[\"'][^>]*>.*?</div>"
+                + "|<figure\\b[^>]*data-file-id=[\"'][^\"']+[\"'][^>]*>.*?</figure>")
+        .matcher(html);
+    while (matcher.find()) {
+      String fragment = matcher.group();
+      List<String> ids = inlineFileIdsInOrder(fragment).stream()
+          .filter(requestedIds::contains)
+          .filter(id -> !consumed.contains(id))
+          .toList();
+      if (ids.isEmpty()) {
+        continue;
+      }
+      inputs.add(analysisImageInput(ids, actor, validateOwner));
+      consumed.addAll(ids);
+    }
+    for (String id : requestedIds) {
+      if (!consumed.contains(id)) {
+        inputs.add(analysisImageInput(List.of(id), actor, validateOwner));
+      }
+    }
+    return inputs;
+  }
+
+  private AnalysisImageInput analysisImageInput(
+      List<String> imageIds, String actor, boolean validateOwner) {
+    var files = new ArrayList<StoredFile>();
+    var bytes = new ArrayList<byte[]>();
+    for (String imageId : imageIds) {
+      var file = storedFileService.find(imageId);
+      if (validateOwner) {
+        requireFileOwner(actor, file.createdBy());
+      }
+      if (!("image/png".equals(file.mediaType()) || "image/jpeg".equals(file.mediaType()))) {
+        throw new BusinessRuleException("AI_IMAGE_TYPE_INVALID", "图片仅支持 PNG/JPEG");
+      }
+      if (file.byteSize() > 10L * 1024 * 1024) {
+        throw new BusinessRuleException("AI_IMAGE_TOO_LARGE", "单张分析图片不能超过 10 MiB");
+      }
+      files.add(file);
+      bytes.add(storedFileService.readBytes(file));
+    }
+    if (imageIds.size() == 1) {
+      StoredFile file = files.getFirst();
+      return new AnalysisImageInput(
+          new AiImage(file.originalName(), file.mediaType(), bytes.getFirst()), imageIds);
+    }
+    return new AnalysisImageInput(
+        new AiImage("并排图片组-" + String.join("-", imageIds) + ".png", "image/png",
+            composeInlineImageRow(bytes)),
+        imageIds);
+  }
+
+  private byte[] composeInlineImageRow(List<byte[]> images) {
+    try {
+      var decoded = new ArrayList<BufferedImage>();
+      for (byte[] image : images) {
+        BufferedImage buffered = ImageIO.read(new ByteArrayInputStream(image));
+        if (buffered == null || buffered.getWidth() <= 0 || buffered.getHeight() <= 0) {
+          throw new BusinessRuleException("AI_IMAGE_TYPE_INVALID", "图片无法解析");
+        }
+        decoded.add(buffered);
+      }
+      int gap = 18;
+      int maxHeight = 900;
+      int totalWidth = gap * Math.max(0, decoded.size() - 1);
+      int rowHeight = 1;
+      var widths = new ArrayList<Integer>();
+      var heights = new ArrayList<Integer>();
+      for (BufferedImage image : decoded) {
+        double scale = Math.min(1.0, (double) maxHeight / image.getHeight());
+        int width = Math.max(1, (int) Math.round(image.getWidth() * scale));
+        int height = Math.max(1, (int) Math.round(image.getHeight() * scale));
+        widths.add(width);
+        heights.add(height);
+        totalWidth += width;
+        rowHeight = Math.max(rowHeight, height);
+      }
+      int maxWidth = 2400;
+      double rowScale = Math.min(1.0, (double) maxWidth / Math.max(1, totalWidth));
+      int canvasWidth = Math.max(1, (int) Math.round(totalWidth * rowScale));
+      int canvasHeight = Math.max(1, (int) Math.round(rowHeight * rowScale));
+      BufferedImage composed = new BufferedImage(canvasWidth, canvasHeight, BufferedImage.TYPE_INT_RGB);
+      Graphics2D graphics = composed.createGraphics();
+      graphics.setColor(Color.WHITE);
+      graphics.fillRect(0, 0, canvasWidth, canvasHeight);
+      graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+      int x = 0;
+      for (int index = 0; index < decoded.size(); index++) {
+        int width = Math.max(1, (int) Math.round(widths.get(index) * rowScale));
+        int height = Math.max(1, (int) Math.round(heights.get(index) * rowScale));
+        graphics.drawImage(decoded.get(index), x, 0, width, height, null);
+        x += width + (int) Math.round(gap * rowScale);
+      }
+      graphics.dispose();
+      var output = new ByteArrayOutputStream();
+      ImageIO.write(composed, "png", output);
+      return output.toByteArray();
+    } catch (IOException exception) {
+      throw new BusinessRuleException("AI_IMAGE_TYPE_INVALID", "图片无法解析");
+    }
+  }
+
+  private List<ImageAnalysis> expandGroupedImageAnalyses(
+      List<String> reportImageIds,
+      List<AnalysisImageInput> modelInputs,
+      List<ImageAnalysis> analyses) {
+    if (analyses == null || analyses.isEmpty()) {
+      return List.of();
+    }
+    var expanded = new ArrayList<ImageAnalysis>();
+    for (int modelIndex = 0; modelIndex < modelInputs.size(); modelIndex++) {
+      int imageNumber = modelIndex + 1;
+      ImageAnalysis analysis = analyses.stream()
+          .filter(value -> ("IMG-" + imageNumber).equals(value.imageId()))
+          .findFirst()
+          .orElse(null);
+      if (analysis == null) {
+        continue;
+      }
+      for (String fileId : modelInputs.get(modelIndex).fileIds()) {
+        int reportIndex = reportImageIds.indexOf(fileId);
+        if (reportIndex >= 0) {
+          expanded.add(withImageId(analysis, reportIndex + 1));
+        }
+      }
+    }
+    return expanded;
   }
 
   private void bindImages(
@@ -1404,6 +1833,148 @@ public class ReportDraftService {
         preserveInlineFigures(original.rectification(), generated.rectification()));
   }
 
+  private ReportSections removeNonEquipmentImageLabels(ReportSections sections) {
+    return new ReportSections(
+        removeNonEquipmentImageLabels(sections.title()),
+        removeNonEquipmentImageLabels(sections.situation()),
+        removeNonEquipmentImageLabels(sections.analysis()),
+        removeNonEquipmentImageLabels(sections.rectification()));
+  }
+
+  private ReportSections normalizeAiReportText(ReportSections sections) {
+    return new ReportSections(
+        normalizeAiReportText(sections.title()),
+        stripLeadingSectionHeading(normalizeAiReportText(sections.situation()), "一、情况说明"),
+        stripLeadingSectionHeading(normalizeAiReportText(sections.analysis()), "二、排查分析"),
+        stripLeadingSectionHeading(normalizeAiReportText(sections.rectification()), "三、整改小结"));
+  }
+
+  private ReportSections normalizePositionRatedPowerFormula(Draft draft, ReportSections sections) {
+    Optional<PositionRatedPowerContext> context =
+        positionRatedPowerContext(draft, draft.sections().analysis(), null, null);
+    if (context.isEmpty()) {
+      return sections;
+    }
+    return new ReportSections(
+        normalizePositionRatedPowerFormula(sections.title(), context.get()),
+        normalizePositionRatedPowerFormula(sections.situation(), context.get()),
+        normalizePositionRatedPowerFormula(sections.analysis(), context.get()),
+        normalizePositionRatedPowerFormula(sections.rectification(), context.get()));
+  }
+
+  private String normalizePositionRatedPowerFormula(String value, PositionRatedPowerContext context) {
+    if (value == null || value.isBlank() || !ADDITIVE_RATED_POWER_FORMULA.matcher(value).find()) {
+      return value;
+    }
+    if (!context.summer()) {
+      return ADDITIVE_RATED_POWER_FORMULA
+          .matcher(value)
+          .replaceAll(java.util.regex.Matcher.quoteReplacement(context.nonSummerExpressionPrefix()));
+    }
+    if (context.airPower().isBlank()) {
+      return value;
+    }
+    return ADDITIVE_RATED_POWER_FORMULA
+        .matcher(value)
+        .replaceAll(java.util.regex.Matcher.quoteReplacement(context.summerExpressionPrefix()));
+  }
+
+  private ReportSections normalizeAnalysisReasonPosition(ReportSections sections) {
+    return new ReportSections(
+        sections.title(),
+        sections.situation(),
+        moveAnalysisReasonToEnd(sections.analysis()),
+        sections.rectification());
+  }
+
+  private String moveAnalysisReasonToEnd(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    var blocks = new ArrayList<String>();
+    String withoutBlocks = extractMatches(ANALYSIS_REASON_BLOCK, value, blocks);
+    String withoutLines = extractMatches(ANALYSIS_REASON_TEXT_LINE, withoutBlocks, blocks);
+    if (blocks.isEmpty()) {
+      return value;
+    }
+    String body = withoutLines.stripTrailing();
+    String reason = String.join("", blocks).strip();
+    if (body.isBlank()) {
+      return reason;
+    }
+    return body + (HTML_ELEMENT.matcher(reason).find() ? "" : "\n") + reason;
+  }
+
+  private String extractMatches(Pattern pattern, String value, List<String> matches) {
+    var matcher = pattern.matcher(value);
+    var result = new StringBuffer();
+    while (matcher.find()) {
+      matches.add(matcher.group().strip());
+      matcher.appendReplacement(result, "");
+    }
+    matcher.appendTail(result);
+    return result.toString();
+  }
+
+  private String normalizeAiReportText(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    return value
+        .replace("主要系", "主要是")
+        .replace("原因系", "原因是")
+        .replace("判断系", "判断是")
+        .replace("确认系", "确认是")
+        .replace("超标系", "超标是")
+        .replace("差异系", "差异是")
+        .replace("增长系", "增长是")
+        .replace("升高系", "升高是")
+        .replace("增加系", "增加是")
+        .replace("问题系", "问题是")
+        .replace("系因为", "是因为")
+        .replace("系由于", "是由于")
+        .replace("系由", "是由");
+  }
+
+  private String stripLeadingSectionHeading(String value, String heading) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    String escaped = Pattern.quote(heading);
+    String withoutHtmlHeading =
+        value.replaceFirst(
+            "(?is)^\\s*<(?:h[1-6]|p|div)\\b[^>]*>\\s*"
+                + escaped
+                + "\\s*[：:]?\\s*</(?:h[1-6]|p|div)>\\s*",
+            "");
+    return withoutHtmlHeading.replaceFirst(
+        "(?is)^\\s*" + escaped + "\\s*[：:]?\\s*(?:<br\\s*/?>|\\R)?\\s*", "");
+  }
+
+  private ReportSections normalizeImageCaptionPositions(ReportSections sections) {
+    return new ReportSections(
+        normalizeImageCaptionPositions(sections.title()),
+        normalizeImageCaptionPositions(sections.situation()),
+        normalizeImageCaptionPositions(sections.analysis()),
+        normalizeImageCaptionPositions(sections.rectification()));
+  }
+
+  private String normalizeImageCaptionPositions(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    String normalized = IMAGE_FOLLOWED_BY_LABEL_BLOCK.matcher(value).replaceAll("$2$1");
+    return IMAGE_FOLLOWED_BY_LABEL_TEXT.matcher(normalized).replaceAll("$2$1");
+  }
+
+  private String removeNonEquipmentImageLabels(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    String cleaned = NON_EQUIPMENT_IMAGE_LABEL_BLOCK.matcher(value).replaceAll("");
+    return NON_EQUIPMENT_IMAGE_LABEL_TEXT.matcher(cleaned).replaceAll("$1");
+  }
+
   private String preserveInlineFigures(String original, String generated) {
     String merged = generated == null ? "" : generated;
     var matcher = INLINE_FIGURE.matcher(original == null ? "" : original);
@@ -1415,12 +1986,80 @@ public class ReportDraftService {
         figures.add(matcher.group());
       }
     }
-    if (figures.isEmpty()) return merged;
+    if (figures.isEmpty()) return restoreInlineImageRows(original, merged);
     if (!HTML_ELEMENT.matcher(merged).find()) {
       merged =
           "<div>" + htmlEscape(merged).replace("\r\n", "<br />").replace("\n", "<br />") + "</div>";
     }
-    return merged + String.join("", figures);
+    return restoreInlineImageRows(original, merged + String.join("", figures));
+  }
+
+  private String restoreInlineImageRows(String original, String generated) {
+    String merged = generated == null ? "" : generated;
+    var rowMatcher = INLINE_IMAGE_ROW.matcher(original == null ? "" : original);
+    int rowIndex = 0;
+    while (rowMatcher.find()) {
+      String rowHtml = rowMatcher.group();
+      List<String> rowIds = inlineFileIdsInOrder(rowHtml);
+      if (rowIds.size() < 2 || containsInlineImageRow(merged, rowIds)) {
+        rowIndex++;
+        continue;
+      }
+      String placeholder = "__INLINE_IMAGE_ROW_" + rowIndex + "__";
+      boolean inserted = false;
+      for (String id : rowIds) {
+        Pattern figurePattern =
+            Pattern.compile(
+                "(?is)\\s*<figure\\b[^>]*data-file-id=[\"']"
+                    + Pattern.quote(id)
+                    + "[\"'][^>]*>.*?</figure>\\s*");
+        var figureMatcher = figurePattern.matcher(merged);
+        if (!inserted && figureMatcher.find()) {
+          merged = figureMatcher.replaceFirst(java.util.regex.Matcher.quoteReplacement(placeholder));
+          inserted = true;
+        }
+        merged = figurePattern.matcher(merged).replaceAll("");
+      }
+      if (inserted) {
+        merged = merged.replace(placeholder, rowHtml);
+      } else if (!containsAnyInlineImageId(merged, rowIds)) {
+        merged += rowHtml;
+      }
+      rowIndex++;
+    }
+    return merged;
+  }
+
+  private boolean containsAllInlineImageIds(String html, List<String> ids) {
+    for (String id : ids) {
+      if (!containsInlineImageId(html, id)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean containsAnyInlineImageId(String html, List<String> ids) {
+    for (String id : ids) {
+      if (containsInlineImageId(html, id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean containsInlineImageId(String html, String id) {
+    return html.contains("data-file-id=\"" + id + "\"") || html.contains("data-file-id='" + id + "'");
+  }
+
+  private boolean containsInlineImageRow(String html, List<String> ids) {
+    var matcher = INLINE_IMAGE_ROW.matcher(html == null ? "" : html);
+    while (matcher.find()) {
+      if (containsAllInlineImageIds(matcher.group(), ids)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private String htmlEscape(String value) {
@@ -1475,8 +2114,8 @@ public class ReportDraftService {
             INSERT INTO report_draft
               (public_id, billing_point_snapshot_id, status, title, situation, analysis,
                rectification, current_version_no, formal_report_public_id, ai_final_reason,
-               current_image_file_ids_json, created_by, updated_by)
-            VALUES (?, ?, 'CORRECTING', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+               current_image_file_ids_json, analysis_status, created_by, updated_by)
+            VALUES (?, ?, 'CORRECTING', ?, ?, ?, ?, 0, ?, ?, ?, 'PENDING_ANALYSIS', ?, ?)
             """,
             new String[] {"id"});
     statement.setString(1, publicId);
@@ -1542,7 +2181,9 @@ public class ReportDraftService {
                    d.analysis_submitted_at, d.analysis_completed_at,
                    d.created_at, d.updated_at, d.version,
                    s.public_id AS snapshot_public_id, s.billing_point_code,
-                   s.billing_point_name, s.city_code, c.name AS city_name, s.district_name,
+                   COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+                   s.city_code, c.name AS city_name, s.district_name,
+                   m.resource_summary_json AS master_json,
                    s.data_period,
                    COALESCE(a.audit_status, 'NOT_APPLICABLE') AS audit_status,
                     a.over_limit_type, a.yoy_result, a.yoy_ratio, a.mom_result, a.mom_ratio,
@@ -1550,6 +2191,9 @@ public class ReportDraftService {
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               JOIN city c ON c.code = s.city_code
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
              WHERE d.public_id = ?
@@ -1563,7 +2207,9 @@ public class ReportDraftService {
                     resultSet.getString("billing_point_name"),
                     resultSet.getString("city_code"),
                     resultSet.getString("city_name"),
-                    resultSet.getString("district_name"),
+                    firstNonBlank(
+                        jsonLikeValue(resultSet.getString("master_json"), "所属区县"),
+                        resultSet.getString("district_name")),
                     resultSet.getString("data_period"),
                      resultSet.getString("audit_status"),
                      resultSet.getString("over_limit_type"),
@@ -1653,10 +2299,14 @@ public class ReportDraftService {
     return jdbcTemplate
         .query(
             """
-            SELECT s.id, s.public_id, s.billing_point_code, s.billing_point_name,
+            SELECT s.id, s.public_id, s.billing_point_code,
+                   COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
                    s.city_code, s.data_period, COALESCE(a.audit_status, 'NOT_APPLICABLE') audit_status,
                    r.public_id AS report_id
               FROM billing_point_snapshot s
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
               LEFT JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code AND a.data_period = s.data_period AND a.city_code = s.city_code
               LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
@@ -1871,12 +2521,193 @@ public class ReportDraftService {
     return normalized.length() <= maxLength ? normalized : normalized.substring(0, maxLength) + "…";
   }
 
+  private String historicalReasonSummary(String value) {
+    String normalized = normalizeHistoricalText(value);
+    if (normalized.isBlank()) {
+      return "历史报告未提取到明确原因";
+    }
+    var sentences = new ArrayList<String>();
+    for (String sentence : normalized.split("[。；;\\n]+")) {
+      String trimmed = sentence.trim();
+      if (trimmed.length() < 8) {
+        continue;
+      }
+      if (containsAny(
+          trimmed,
+          "原因",
+          "因为",
+          "导致",
+          "引起",
+          "分摊比例",
+          "下电",
+          "搬迁",
+          "新增",
+          "资管",
+          "额定功率",
+          "电表",
+          "空调",
+          "业务量")) {
+        sentences.add(trimmed);
+      }
+    }
+    return sentences.stream()
+        .map(sentence -> compact(sentence, 360))
+        .distinct()
+        .limit(4)
+        .reduce((left, right) -> left + "；" + right)
+        .orElse("历史报告未提取到明确原因");
+  }
+
+  private String historicalReasonTypes(String value) {
+    String text = normalizeHistoricalText(value);
+    var types = new ArrayList<String>();
+    if (containsAny(text, "资管", "台账", "额定功率", "标杆", "功率未及时", "无功率")) {
+      types.add("资管系统/台账/额定功率未及时更新");
+    }
+    if (containsAny(text, "分摊", "下电", "退出分摊", "电信设备", "分摊比例")) {
+      types.add("分摊比例变化/电信下电/退出分摊");
+    }
+    if (containsAny(text, "新增", "搬迁", "扩容", "设备增加", "新增设备", "投运", "负载")) {
+      types.add("设备新增/搬迁/扩容");
+    }
+    if (containsAny(text, "空调", "高温", "夏季", "温度", "制冷")) {
+      types.add("空调/高温/季节运行");
+    }
+    if (containsAny(text, "电表", "倍率", "计量", "合表", "合并用一个电表", "共用1个电表", "直供电")) {
+      types.add("电表/倍率/合表/计量变化");
+    }
+    if (containsAny(text, "业务量", "用电量波动", "业务波动")) {
+      types.add("业务量波动");
+    }
+    return types.isEmpty() ? "未分类" : String.join("、", types);
+  }
+
+  private String normalizeHistoricalText(String value) {
+    return value(value)
+        .replaceAll("(?is)<[^>]+>", " ")
+        .replace("&nbsp;", " ")
+        .replace("&#x20;", " ")
+        .replaceAll("\\s+", " ")
+        .trim();
+  }
+
+  private boolean containsAny(String text, String... candidates) {
+    String safeText = value(text);
+    for (String candidate : candidates) {
+      if (safeText.contains(candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private String value(Object value) {
     return value == null ? "" : value.toString();
   }
 
+  private String decimalText(Object value) {
+    if (value instanceof BigDecimal decimal) {
+      return decimal.stripTrailingZeros().toPlainString();
+    }
+    return value(value);
+  }
+
+  private String jsonLikeValue(String source, String key) {
+    if (source == null || source.isBlank() || key == null || key.isBlank()) {
+      return "";
+    }
+    try {
+      Map<String, Object> values = objectMapper.readValue(source, new TypeReference<>() {});
+      Object value = values.get(key);
+      if (value != null && !value.toString().isBlank()) {
+        return value.toString().trim();
+      }
+    } catch (JacksonException ignored) {
+      // Fall back to loose text extraction because some snapshots store raw text fragments.
+    }
+    String normalized = source.replace("\\\"", "\"");
+    if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
+      normalized = normalized.substring(1, normalized.length() - 1);
+    }
+    String quotedKey = Pattern.quote(key);
+    var matcher =
+        Pattern.compile(
+                "(?is)[\"']?"
+                    + quotedKey
+                    + "[\"']?\\s*[:：]\\s*[\"']?([^,\"'，}\\]\\s]+)")
+            .matcher(normalized);
+    return matcher.find() ? matcher.group(1).trim() : "";
+  }
+
+  private String firstNonBlank(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
+  }
+
   private String blankToNull(String value) {
     return value == null || value.isBlank() ? null : value;
+  }
+
+  private record PositionRatedPowerContext(
+      boolean summer,
+      int days,
+      String mainPower,
+      String airPower,
+      String towerAirPower,
+      String ratedTotal) {
+
+    private String factText() {
+      String formula =
+          summer
+              ? "夏季5月-10月，位置点额定功率=主设备功率+空调总功率"
+              : "非夏季1月-4月、11月-12月，位置点额定公式默认只取主设备功率";
+      String expression =
+          summer && !airPower().isBlank()
+              ? "（"
+                  + valueOrPending(mainPower(), "主设备功率待核实")
+                  + "KW+"
+                  + airPower()
+                  + "KW）*24小时*"
+                  + days()
+                  + "天"
+              : "（"
+                  + valueOrPending(mainPower(), "主设备功率待核实")
+                  + "KW）*24小时*"
+                  + days()
+                  + "天";
+      String total = ratedTotal().isBlank() ? "系统已计算额定标杆总量" : ratedTotal() + "度";
+      return formula
+          + "；主设备功率="
+          + valueOrPending(mainPower(), "主设备功率待核实")
+          + "KW；空调总功率="
+          + valueOrPending(airPower(), "空调总功率未提供")
+          + "KW；铁塔空调总额定功率="
+          + valueOrPending(towerAirPower(), "铁塔空调总额定功率未提供")
+          + "KW；本账期天数="
+          + days()
+          + "天；报告公式应写为：三费系统中对应额定功率标杆应为"
+          + expression
+          + "="
+          + total
+          + "。非夏季如果图片、历史报告或现场材料支持空调运行原因，可以先写“可能与空调运行有关，需人工确认”，但公式仍不得自动加入空调功率；禁止把铁塔空调总额定功率和空调总功率重复叠加。";
+    }
+
+    private String nonSummerExpressionPrefix() {
+      return "（" + valueOrPending(mainPower(), "主设备功率待核实") + "KW）*24小时*" + days() + "天";
+    }
+
+    private String summerExpressionPrefix() {
+      return "（"
+          + valueOrPending(mainPower(), "主设备功率待核实")
+          + "KW+"
+          + valueOrPending(airPower(), "空调总功率未提供")
+          + "KW）*24小时*"
+          + days()
+          + "天";
+    }
+
+    private static String valueOrPending(String value, String pending) {
+      return value == null || value.isBlank() || "-".equals(value) ? pending : value;
+    }
   }
 
   private String nonBlank(String value, String fallback) {
@@ -1905,10 +2736,6 @@ public class ReportDraftService {
 
     List<String> orderedImageIds = inlineFileIdsInOrder(rewrittenHtml);
 
-    if (orderedImageIds.size() > 10) {
-      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "原报告图片超过 10 张，暂无法进入更正工作稿");
-    }
-
     ReportSections sections = reportSections(source, rewrittenHtml);
 
     return new CorrectionContent(sections, orderedImageIds);
@@ -1921,8 +2748,6 @@ public class ReportDraftService {
     var output = new StringBuffer();
 
     while (matcher.find()) {
-      ensureCorrectionImageCapacity(generatedImageIds);
-
       String fileId =
           storeCorrectionInlineImage(
               matcher.group(1), matcher.group(2), actor, generatedImageIds.size() + 1);
@@ -1944,8 +2769,6 @@ public class ReportDraftService {
     var output = new StringBuffer();
 
     while (matcher.find()) {
-      ensureCorrectionImageCapacity(generatedImageIds);
-
       String fileId =
           storeCorrectionInlineImage(
               matcher.group(1), matcher.group(2), actor, generatedImageIds.size() + 1);
@@ -1976,8 +2799,6 @@ public class ReportDraftService {
       if (generatedImageIds.contains(existingId)) {
         continue;
       }
-
-      ensureCorrectionImageCapacity(generatedImageIds);
 
       var sourceFile = storedFileService.find(existingId);
 
@@ -2029,12 +2850,6 @@ public class ReportDraftService {
     return stored.publicId();
   }
 
-  private void ensureCorrectionImageCapacity(java.util.List<String> generatedImageIds) {
-    if (generatedImageIds.size() >= 10) {
-      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "一份报告最多包含 10 张图片");
-    }
-  }
-
   private List<String> inlineFileIdsInOrder(String html) {
     if (html == null || html.isBlank()) {
       return List.of();
@@ -2066,11 +2881,12 @@ public class ReportDraftService {
 
   private ReportSections reportSections(SourceReport source, String html) {
     if (looksLikeHtml(html)) {
+      String fullHtml = fullCorrectionHtml(source, html);
       return new ReportSections(
-          cleanReportText(firstMatch(html, "(?is)<h1[^>]*>(.*?)</h1>", source.title())),
-          html,
-          nonBlank(cleanReportText(source.analysis()), "请在此补充更正后的排查分析。"),
-          nonBlank(cleanReportText(source.rectification()), "请在此补充更正后的整改建议。"));
+          cleanReportText(firstMatch(fullHtml, "(?is)<h1[^>]*>(.*?)</h1>", source.title())),
+          fullHtml,
+          "",
+          "");
     }
 
     String title = cleanReportText(source.title());
@@ -2083,6 +2899,53 @@ public class ReportDraftService {
         nonBlank(situation, "原报告正文待补充。"),
         nonBlank(analysis, "请在此补充更正后的排查分析。"),
         nonBlank(rectification, "请在此补充更正后的整改建议。"));
+  }
+
+  private String fullCorrectionHtml(SourceReport source, String situationHtml) {
+    var html = new StringBuilder("<article class=\"correction-report-source\">");
+    if (!java.util.regex.Pattern.compile("(?is)<h1\\b").matcher(situationHtml).find()) {
+      html.append("<h1>").append(htmlEscape(nonBlank(source.title(), "电费稽核报告"))).append("</h1>");
+    }
+    if (!isHistoricalPlaceholderSections(source) && !hasSectionHeading(situationHtml, "一、情况说明")) {
+      html.append("<h2>一、情况说明</h2>");
+    }
+    html.append(situationHtml);
+    if (!isHistoricalPlaceholderSections(source)) {
+      appendCorrectionSection(html, "二、排查分析", source.analysis());
+      appendCorrectionSection(html, "三、整改小结", source.rectification());
+    }
+    html.append("</article>");
+    return html.toString();
+  }
+
+  private boolean isHistoricalPlaceholderSections(SourceReport source) {
+    return "历史报告原文转换预览".equals(cleanReportText(source.analysis()))
+        && "以原 Word 最终内容为准".equals(cleanReportText(source.rectification()));
+  }
+
+  private boolean hasSectionHeading(String html, String heading) {
+    if (html == null || html.isBlank()) {
+      return false;
+    }
+    String text = cleanReportText(html);
+    return text.startsWith(heading) || text.contains("\n" + heading);
+  }
+
+  private void appendCorrectionSection(StringBuilder html, String heading, String content) {
+    if (content == null || content.isBlank()) {
+      return;
+    }
+    html.append("<h2>").append(htmlEscape(heading)).append("</h2>");
+    if (looksLikeHtml(content)) {
+      html.append(content);
+      return;
+    }
+    for (String paragraph : content.split("\\R{2,}|\\R")) {
+      if (paragraph.isBlank()) {
+        continue;
+      }
+      html.append("<p>").append(htmlEscape(paragraph.trim())).append("</p>");
+    }
   }
 
   private boolean looksLikeHtml(String value) {
@@ -2167,6 +3030,8 @@ public class ReportDraftService {
   public record DraftImageAccess(StoredFile file, InputStreamResource resource) {}
 
   public record UploadedImage(String fileId, long entityVersion) {}
+
+  private record AnalysisImageInput(AiImage image, List<String> fileIds) {}
 
   private record CorrectionContent(ReportSections sections, List<String> imageIds) {}
 

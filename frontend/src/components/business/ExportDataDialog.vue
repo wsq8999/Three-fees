@@ -29,8 +29,6 @@ const currentJob = ref<ExportJob | null>(null);
 const canExport = computed(
   () =>
     props.selectedCount > 0 &&
-    props.period.length > 0 &&
-    props.cityCode.length > 0 &&
     selectedTypes.value.length > 0 &&
     status.value !== "processing",
 );
@@ -174,15 +172,6 @@ watch(
       :closable="false"
       show-icon
     />
-    <ElAlert
-      v-if="selectedCount > 0 && (!period || !cityCode)"
-      class="scope-alert"
-      title="请选择同一城市、同一账期的数据后再导出"
-      type="warning"
-      :closable="false"
-      show-icon
-    />
-
     <section v-if="status !== 'idle'" class="export-progress">
       <ElProgress
         :percentage="progress"

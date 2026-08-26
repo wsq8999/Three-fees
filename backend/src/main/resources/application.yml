@@ -7,12 +7,12 @@ spring:
     openai:
       base-url: ${KIMI_BASE_URL:https://api.moonshot.cn/v1}
       api-key: ${KIMI_API_KEY:not-configured-placeholder}
+      timeout: ${KIMI_REQUEST_TIMEOUT:10m}
       chat:
         model: ${KIMI_MODEL:kimi-k3}
         options:
           reasoning-effort: ${KIMI_REASONING_EFFORT:low}
           max-completion-tokens: ${KIMI_MAX_COMPLETION_TOKENS:8192}
-          timeout: ${KIMI_REQUEST_TIMEOUT:10m}
   servlet:
     multipart:
       max-file-size: -1

@@ -68,8 +68,37 @@ public class BillingPointController {
   }
 
   @GetMapping("/filter-options")
-  public FilterOptions filterOptions(@AuthenticationPrincipal CurrentUser actor) {
-    return queryService.filterOptions(actor);
+  public FilterOptions filterOptions(
+      @RequestParam(required = false) String code,
+      @RequestParam(required = false) String name,
+      @RequestParam(required = false) String cityCode,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
+      @RequestParam(required = false) String siteKeyword,
+      @RequestParam(required = false) String paymentKeyword,
+      @RequestParam(required = false) Boolean paymentEligible,
+      @RequestParam(required = false) String billingPointStatus,
+      @RequestParam(required = false) String auditStatus,
+      @RequestParam(required = false) String reportStatus,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])")
+          String focusPeriod,
+      @RequestParam(required = false) String focusCityCode,
+      @AuthenticationPrincipal CurrentUser actor) {
+    return queryService.filterOptions(
+        new BillingPointFilter(
+            code,
+            name,
+            cityCode,
+            null,
+            period,
+            siteKeyword,
+            paymentKeyword,
+            paymentEligible,
+            billingPointStatus,
+            auditStatus,
+            reportStatus,
+            focusPeriod,
+            focusCityCode),
+        actor);
   }
 
   @GetMapping("/{publicId}")

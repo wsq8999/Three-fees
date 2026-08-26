@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Download } from "@element-plus/icons-vue";
+import { Download } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
@@ -601,9 +601,9 @@ function auditLabel(key: AuditComparison["key"]): string {
 
 function auditReasonByKey(key: AuditComparison["key"]): string {
   const labels: Record<AuditComparison["key"], string> = {
-    YEAR_ON_YEAR: "固定对比去年同月，按参考日均和标杆修正系数计算正常上限",
-    MONTH_ON_MONTH: "固定对比上一个自然月，按参考日均和标杆修正系数计算正常上限",
-    RATED_BENCHMARK: "对比系统计算后的当月标杆总量正常上限，缺失时回退日列合计",
+    YEAR_ON_YEAR: "对比去年同月审核通过缴费单，C取缴费明细日均耗电量，A/B按月总标杆除以缴费天数",
+    MONTH_ON_MONTH: "对比上一笔审核通过缴费单，C取缴费明细日均耗电量，A/B按月总标杆除以缴费天数",
+    RATED_BENCHMARK: "本期实际总电量与当月额定功率标杆月总值比较",
   };
   return labels[key];
 }
@@ -921,7 +921,7 @@ onMounted(load);
     </section>
 
     <footer class="fixed-actions">
-      <ElButton :icon="ArrowLeft" @click="goBack">返回</ElButton>
+      <ElButton @click="goBack">返回</ElButton>
       <ElButton :icon="Download" :disabled="!canExport" @click="exportVisible = true">
         导出Excel
       </ElButton>

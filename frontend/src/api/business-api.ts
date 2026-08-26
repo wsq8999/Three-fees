@@ -5,6 +5,7 @@ import type {
   BenchmarkRule,
   BillingPointDetail,
   BillingPointQuery,
+  BillingPointFilterOptions,
   BusinessField,
   BusinessCity,
   CreateImportInput,
@@ -28,6 +29,7 @@ import type {
   ReportGenerationImageAnalysisResult,
   ReportGenerationInitialContent,
   ReportQuery,
+  ReportFilterOptions,
   ReportSummary,
   ReportStatus,
   SendDraftMessageInput,
@@ -537,24 +539,27 @@ function mapDraft(item: BackendReportDraft): ReportDraft {
     analysisCompletedAt: item.analysisCompletedAt ?? null,
     blocks: sectionsToBlocks(item.sections),
     imageFileIds: item.currentImageFileIds ?? [],
-    messages: (item.messages ?? []).flatMap((message) => [
-      {
-        id: `${message.id}-user`,
-        role: "USER" as const,
-        intent: message.intent,
-        content: message.userContent,
-        imageNames: message.imageFileIds,
-        createdAt: message.createdAt,
-      },
-      {
-        id: `${message.id}-assistant`,
-        role: "ASSISTANT" as const,
-        intent: message.intent,
-        content: message.assistantContent,
-        imageNames: [],
-        createdAt: message.createdAt,
-      },
-    ]),
+    messages: (item.messages ?? [])
+      .filter((message) => message.intent !== "IMAGE_ANALYSIS")
+      .flatMap((message) => [
+        {
+          id: `${message.id}-user`,
+          role: "USER" as const,
+          intent: message.intent,
+          content: message.userContent,
+          imageNames: message.imageFileIds,
+          createdAt: message.createdAt,
+        },
+        {
+          id: `${message.id}-assistant`,
+          role: "ASSISTANT" as const,
+          intent: message.intent,
+          content: message.assistantContent,
+          imageNames: [],
+          createdAt: message.createdAt,
+        },
+      ]),
+    currentVersion: item.currentVersion,
     updatedAt: item.updatedAt,
     formalReportId: item.formalReportId,
     entityVersion: item.version,
@@ -964,8 +969,8 @@ export const businessApi = {
 
   exportJobs: {
     async create(input: {
-      period: string;
-      cityCode: string;
+      period?: string;
+      cityCode?: string;
       datasetTypes: string[];
       billingPointIds: string[];
     }): Promise<ExportJob> {
@@ -991,6 +996,42 @@ export const businessApi = {
   },
 
   billingPoints: {
+    async filterOptions(
+      query: Omit<BillingPointQuery, "district" | "page" | "size">,
+    ): Promise<BillingPointFilterOptions> {
+      const backendReportStatus =
+        query.reportStatus === "DRAFT"
+          ? "PENDING"
+          : query.reportStatus === "FINAL" ||
+          query.reportStatus === "CORRECTED"
+            ? "GENERATED"
+            : query.reportStatus === "NONE"
+              ? "NONE"
+              : "";
+      const params = queryString({
+        code: query.code,
+        name: query.name,
+        cityCode: query.cityCode,
+        period: query.period,
+        paymentEligible:
+          query.paymentEligible === undefined
+            ? ""
+            : query.paymentEligible
+              ? "true"
+              : "false",
+        billingPointStatus: query.billingPointStatus,
+        auditStatus: query.auditStatus,
+        reportStatus: backendReportStatus,
+        focusPeriod: query.focusPeriod,
+        focusCityCode: query.focusCityCode,
+      });
+      return asResult<BillingPointFilterOptions>(
+        await httpClient.get(
+          `/api/v1/billing-point-periods/filter-options${params ? `?${params}` : ""}`,
+        ),
+      );
+    },
+
     async list(
       query: BillingPointQuery,
     ): Promise<PageResult<BillingPointDetail["summary"]>> {
@@ -1137,6 +1178,15 @@ export const businessApi = {
       return mapDraft(raw);
     },
 
+    async discardUnusedCorrection(id: string): Promise<boolean> {
+      const raw = asResult<{ discarded: boolean }>(
+        await httpClient.delete(
+          `/api/v1/report-drafts/${encodeURIComponent(id)}/unused-correction`,
+        ),
+      );
+      return raw.discarded;
+    },
+
     async get(id: string): Promise<ReportDraft | undefined> {
       const raw = asResult<BackendReportDraft>(
         await httpClient.get(`/api/v1/report-drafts/${encodeURIComponent(id)}`),
@@ -1235,6 +1285,24 @@ export const businessApi = {
   },
 
   reports: {
+    async filterOptions(
+      query: Omit<ReportQuery, "district" | "page" | "size">,
+    ): Promise<ReportFilterOptions> {
+      const params = queryString({
+        reportNumber: query.reportNumber,
+        billingPointCode: query.billingPointCode,
+        billingPointName: query.billingPointName,
+        period: query.period,
+        cityCode: query.cityCode,
+        source: query.source,
+      });
+      return asResult<ReportFilterOptions>(
+        await httpClient.get(
+          `/api/v1/reports/filter-options${params ? `?${params}` : ""}`,
+        ),
+      );
+    },
+
     async list(query: ReportQuery): Promise<PageResult<ReportSummary>> {
       const params = queryString({
         reportNumber: query.reportNumber,
@@ -1583,9 +1651,18 @@ export function buildReportPreviewHtml(
     | undefined,
 ): string | null {
   if (sections === null || sections === undefined) return null;
-  const situation = cleanReportPart(sections.situation);
-  const analysis = cleanReportPart(sections.analysis);
-  const rectification = cleanReportPart(sections.rectification);
+  const situation = stripLeadingSectionHeading(
+    cleanReportPart(sections.situation),
+    "一、情况说明",
+  );
+  const analysis = stripLeadingSectionHeading(
+    cleanReportPart(sections.analysis),
+    "二、排查分析",
+  );
+  const rectification = stripLeadingSectionHeading(
+    cleanReportPart(sections.rectification),
+    "三、整改小结",
+  );
   if (
     looksLikeHtml(situation) &&
     analysis.length === 0 &&
@@ -1609,6 +1686,20 @@ export function buildReportPreviewHtml(
 function reportPartHtml(value: string): string {
   if (looksLikeHtml(value)) return value;
   return `<p>${escapeReportHtml(value).replace(/\r?\n/g, "<br>")}</p>`;
+}
+
+function stripLeadingSectionHeading(content: string, heading: string): string {
+  if (content.trim().length === 0) return content;
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return content
+    .replace(
+      new RegExp(
+        `^\\s*<(?:h[1-6]|p|div)\\b[^>]*>\\s*${escaped}\\s*[：:]?\\s*</(?:h[1-6]|p|div)>\\s*`,
+        "i",
+      ),
+      "",
+    )
+    .replace(new RegExp(`^\\s*${escaped}\\s*[：:]?\\s*(?:<br\\s*/?>|\\r?\\n)?\\s*`, "i"), "");
 }
 
 function escapeReportHtml(value: string): string {

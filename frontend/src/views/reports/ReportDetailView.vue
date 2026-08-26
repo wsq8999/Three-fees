@@ -9,7 +9,7 @@ import {
   ref,
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Download } from "@element-plus/icons-vue";
+import { Download } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 
 import { businessApi, triggerBrowserDownload } from "@/api/business-api";
@@ -56,9 +56,12 @@ const rawContent = computed(
 const normalizedContent = computed(() =>
   normalizePreviewContent(rawContent.value),
 );
-const contentHtml = computed(() =>
-  looksLikeHtml(normalizedContent.value) ? normalizedContent.value : "",
-);
+const contentHtml = computed(() => {
+  if (!looksLikeHtml(normalizedContent.value)) return "";
+  return isHistorical.value
+    ? normalizeHistoricalPreviewHtml(normalizedContent.value)
+    : emphasizeReportCauses(normalizedContent.value);
+});
 const reportSections = computed(() => {
   if (contentHtml.value) return [];
   const summary = normalizedContent.value.trim();
@@ -87,6 +90,188 @@ function normalizePreviewContent(value: string): string {
       "",
     )
     .trim();
+}
+
+function emphasizeReportCauses(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = normalizeReportHtmlWhitespace(html);
+  normalizeReportEmphasis(template.content);
+  emphasizeTextNodes(template.content);
+  return template.innerHTML;
+}
+
+function emphasizeTextNodes(root: DocumentFragment): void {
+  const reasonPattern = reportReasonPattern();
+  const causeLabelPattern = causeLabelPatternForText();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!(node instanceof Text)) continue;
+    const parent = node.parentElement;
+    if (
+      parent?.closest("strong,b,figure,table,script,style") !== null ||
+      (!reasonPattern.test(node.data) && !causeLabelPattern.test(node.data))
+    ) {
+      reasonPattern.lastIndex = 0;
+      causeLabelPattern.lastIndex = 0;
+      continue;
+    }
+    reasonPattern.lastIndex = 0;
+    causeLabelPattern.lastIndex = 0;
+    textNodes.push(node);
+  }
+  textNodes.forEach((node) => {
+    node.replaceWith(emphasizedTextFragment(node.data));
+  });
+}
+
+function reportReasonPattern(): RegExp {
+  return new RegExp(
+    [
+      "资管系统未及时更新[^。；;\\n]*(?:[。；;]|$)",
+      "额定功率台账未及时更新[^。；;\\n]*(?:[。；;]|$)",
+      "实际用电情况正常",
+      "极简站改造新增机柜及空调长时间运行所致",
+      "不存在用电量跑冒滴漏现象，不存在偷搭电问题",
+      "不存在用电量跑冒滴漏",
+      "不存在跑冒滴漏",
+      "不存在偷搭电",
+      "分摊比例变化[^。；;\\n]*(?:[。；;]|$)",
+      "电信下电退出分摊[^。；;\\n]*(?:[。；;]|$)",
+      "电信设备已下电退出电费分摊[^。；;\\n]*(?:[。；;]|$)",
+      "设备新增[^。；;\\n]*(?:[。；;]|$)",
+      "站址搬迁[^。；;\\n]*(?:[。；;]|$)",
+      "合并电表[^。；;\\n]*(?:[。；;]|$)",
+      "空调长时间运行[^。；;\\n]*(?:[。；;]|$)",
+    ].join("|"),
+    "g",
+  );
+}
+
+function causeLabelPatternForText(): RegExp {
+  return /(?:本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因|超标原因(?:是|为)?)[：:，,]*/g;
+}
+
+function emphasizedTextFragment(text: string): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  const reasonPattern = reportReasonPattern();
+  const causeLabelPattern = causeLabelPatternForText();
+  let index = 0;
+  while (index < text.length) {
+    reasonPattern.lastIndex = index;
+    causeLabelPattern.lastIndex = index;
+    const reasonMatch = reasonPattern.exec(text);
+    const labelMatch = causeLabelPattern.exec(text);
+    const next =
+      labelMatch !== null &&
+      (reasonMatch === null || labelMatch.index <= reasonMatch.index)
+        ? { type: "label" as const, index: labelMatch.index, text: labelMatch[0] }
+        : reasonMatch !== null
+          ? { type: "reason" as const, index: reasonMatch.index, text: reasonMatch[0] }
+          : null;
+    if (next === null) {
+      fragment.append(document.createTextNode(text.slice(index)));
+      break;
+    }
+    if (next.index > index) {
+      fragment.append(document.createTextNode(text.slice(index, next.index)));
+    }
+    if (next.type === "label") {
+      fragment.append(document.createTextNode(next.text));
+      const start = next.index + next.text.length;
+      const end = sentenceEnd(text, start);
+      const cause = text.slice(start, end).trimStart();
+      if (cause.length > 0 && !isMetricOnlyText(cause)) {
+        const leading = text.slice(start, end).match(/^\s*/)?.[0] ?? "";
+        if (leading) fragment.append(document.createTextNode(leading));
+        appendStrong(fragment, cause);
+      } else {
+        fragment.append(document.createTextNode(text.slice(start, end)));
+      }
+      index = end;
+    } else {
+      appendStrong(fragment, next.text);
+      index = next.index + next.text.length;
+    }
+  }
+  return fragment;
+}
+
+function sentenceEnd(text: string, start: number): number {
+  for (let index = start; index < text.length; index += 1) {
+    if ("。；;\n".includes(text[index] ?? "")) return index + 1;
+  }
+  return text.length;
+}
+
+function appendStrong(fragment: DocumentFragment, text: string): void {
+  const strong = document.createElement("strong");
+  strong.className = "report-cause-emphasis";
+  strong.textContent = text;
+  fragment.append(strong);
+}
+
+function isMetricOnlyText(text: string): boolean {
+  return /(?:本期日均|正常上限|超标\d+(?:\.\d+)?%|超标比例)/.test(text) && !reportReasonPattern().test(text);
+}
+
+function normalizeReportEmphasis(root: DocumentFragment): void {
+  root.querySelectorAll<HTMLElement>("strong,b").forEach((element) => {
+    const text = normalizeReportText(element.textContent ?? "");
+    const hasReason = reportReasonPattern().test(text);
+    const isMetricOnly = isMetricOnlyText(text) && !hasReason;
+    const wrapsCauseLabel = /本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因[：:]/.test(text);
+    if (!isMetricOnly && !wrapsCauseLabel) return;
+    element.replaceWith(document.createTextNode(text));
+  });
+}
+
+function normalizeReportText(value: string): string {
+  return value.replace(/[\u00a0\u3000]/g, " ").replace(/[ \t\v\f]+/g, " ").trim();
+}
+
+function normalizeReportHtmlWhitespace(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, " ")
+    .replace(/[\u00a0\u3000]/g, " ")
+    .replace(/[ \t\v\f]{2,}/g, " ")
+    .replace(/(?:<br\s*\/?>\s*){2,}/gi, "<br>");
+}
+
+function normalizeHistoricalPreviewHtml(value: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = normalizeReportHtmlWhitespace(value);
+  template.content.querySelectorAll<HTMLElement>("img,figure").forEach((element) => {
+    element.removeAttribute("data-display-width");
+    element.removeAttribute("data-display-height");
+    element.removeAttribute("width");
+    element.removeAttribute("height");
+    removeSizingStyle(element);
+  });
+  template.content.querySelectorAll<HTMLElement>("p").forEach((paragraph) => {
+    const hasVisibleContent =
+      (paragraph.textContent ?? "").trim().length > 0 ||
+      paragraph.querySelector("img,table") !== null;
+    if (!hasVisibleContent) paragraph.remove();
+  });
+  return template.innerHTML;
+}
+
+function removeSizingStyle(element: HTMLElement): void {
+  const rawStyle = element.getAttribute("style");
+  if (rawStyle === null) return;
+  const kept = rawStyle
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !/^(?:min-|max-)?(?:width|height)\s*:/i.test(item))
+    .join(";");
+  if (kept.length > 0) {
+    element.setAttribute("style", kept);
+  } else {
+    element.removeAttribute("style");
+  }
 }
 
 function clearPreviewImageHandlers(): void {
@@ -145,11 +330,57 @@ function enhanceReportPreviewImages(): void {
     image.alt ||= "稽核报告图片";
     image.loading = "lazy";
     image.decoding = "async";
+    if (!isHistorical.value) reconcilePreviewImageSize(image);
     const onError = (): void => showImageFallback(image);
+    const onLoad = (): void => {
+      if (!isHistorical.value) reconcilePreviewImageSize(image);
+    };
     image.addEventListener("error", onError, { once: true });
+    image.addEventListener("load", onLoad, { once: true });
     previewImageCleanup.push(() => image.removeEventListener("error", onError));
+    previewImageCleanup.push(() => image.removeEventListener("load", onLoad));
     if (image.complete && image.naturalWidth === 0) showImageFallback(image);
   });
+}
+
+function reconcilePreviewImageSize(image: HTMLImageElement): void {
+  if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+  const width =
+    parseCssPixelValue(image.dataset.displayWidth ?? null) ??
+    parseCssPixelValue(image.getAttribute("width")) ??
+    parseCssPixelValue(cssProperty(image.getAttribute("style"), "width"));
+  if (width === undefined) return;
+  const height = Math.round((width * image.naturalHeight * 100) / image.naturalWidth) / 100;
+  image.dataset.displayWidth = String(width);
+  image.dataset.displayHeight = String(height);
+  image.setAttribute("width", String(Math.round(width)));
+  image.setAttribute("height", String(Math.round(height)));
+  image.style.width = `${width}px`;
+  image.style.height = `${height}px`;
+}
+
+function parseCssPixelValue(value: string | null): number | undefined {
+  if (value === null || value.trim().length === 0) return undefined;
+  const trimmed = value.trim().toLowerCase();
+  const match = trimmed.match(/^([0-9]+(?:\.[0-9]+)?)(px|pt|in|cm|mm)?$/);
+  if (match === null) return undefined;
+  const numeric = Number(match[1]);
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+  const unit = match[2] ?? "px";
+  if (unit === "pt") return numeric / 0.75;
+  if (unit === "in") return numeric * 96;
+  if (unit === "cm") return (numeric / 2.54) * 96;
+  if (unit === "mm") return (numeric / 25.4) * 96;
+  return numeric;
+}
+
+function cssProperty(style: string | null, name: string): string | null {
+  if (style === null || style.trim().length === 0) return null;
+  for (const part of style.split(";")) {
+    const [key, ...rest] = part.split(":");
+    if (key?.trim().toLowerCase() === name) return rest.join(":").trim();
+  }
+  return null;
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -245,10 +476,18 @@ async function beginCorrection(): Promise<void> {
     report.value.id,
     correctionForm.reason.trim(),
   );
+  const fromQuery = { ...route.query };
+  delete fromQuery.autoDownload;
   await router.push({
     name: "report-draft",
     params: { draftId: draft.id },
-    query: { from: route.fullPath },
+    query: {
+      from: router.resolve({
+        name: "report-detail",
+        params: { reportId: report.value.id },
+        query: fromQuery,
+      }).fullPath,
+    },
   });
 }
 
@@ -337,6 +576,7 @@ onBeforeUnmount(() => {
           v-if="contentHtml"
           ref="previewContentRef"
           class="word-preview-content"
+          :class="{ 'word-preview-content--historical': isHistorical }"
           v-html="contentHtml"
         />
         <template v-else>
@@ -359,7 +599,7 @@ onBeforeUnmount(() => {
     </section>
 
     <footer class="report-actions">
-      <ElButton :icon="ArrowLeft" @click="goBack">返回</ElButton>
+      <ElButton @click="goBack">返回</ElButton>
       <ElButton :icon="Download" :loading="downloading" @click="downloadWord">
         下载 Word
       </ElButton>
@@ -484,18 +724,39 @@ onBeforeUnmount(() => {
   margin: 0 0 28px;
   text-align: center;
   font-size: 24px;
+  font-weight: 800;
 }
 
 .report-sheet h2,
 .report-sheet :deep(h2) {
-  margin: 24px 0 10px;
+  margin: 26px 0 12px;
   font-size: 18px;
+  font-weight: 800;
 }
 
 .report-sheet p,
 .report-sheet :deep(p) {
-  margin: 8px 0;
+  margin: 10px 0;
+  text-indent: 2em;
   white-space: pre-wrap;
+}
+
+.report-sheet :deep(strong),
+.report-sheet :deep(b),
+.word-preview-content :deep(strong),
+.word-preview-content :deep(b) {
+  font-weight: 800;
+}
+
+.word-preview-content :deep(p) {
+  margin: 10px 0;
+  text-indent: 2em;
+  white-space: pre-wrap;
+}
+
+.word-preview-content :deep(p[style*="text-align:center"]),
+.word-preview-content :deep(p[style*="text-align: center"]) {
+  text-indent: 0;
 }
 
 .word-preview-content :deep(table) {
@@ -513,9 +774,54 @@ onBeforeUnmount(() => {
 .word-preview-content :deep(img) {
   display: block;
   max-width: 100%;
-  height: auto;
+  height: auto !important;
   margin: 12px auto;
   object-fit: contain;
+}
+
+.word-preview-content:not(.word-preview-content--historical) :deep(img:not([height]):not([style*="height"])) {
+  height: auto !important;
+}
+
+.word-preview-content--historical :deep(img) {
+  display: inline-block;
+  max-width: 100%;
+  height: auto !important;
+  margin: 0 8px 8px 0;
+  vertical-align: top;
+  object-fit: contain;
+}
+
+.word-preview-content--historical :deep(.word-inline-image) {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+}
+
+.word-preview-content :deep(.inline-image-row) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 100%;
+  margin: 8px 0;
+}
+
+.word-preview-content :deep(.inline-image-row figure),
+.word-preview-content :deep(.inline-image-row img) {
+  display: inline-block;
+  max-width: 100%;
+  margin: 0;
+  vertical-align: top;
+}
+
+.report-sheet .word-preview-content--historical :deep(p) {
+  text-indent: 0;
+}
+
+.report-sheet .word-preview-content--historical :deep(.word-preview > p:first-child) {
+  text-align: center;
+  text-indent: 0;
 }
 
 .word-preview-content :deep(.report-image-fallback) {

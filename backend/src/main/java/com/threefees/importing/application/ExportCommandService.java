@@ -10,8 +10,8 @@ import com.threefees.task.domain.TaskType;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.YearMonth;
-import java.time.format.DateTimeParseException;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,8 +51,6 @@ public class ExportCommandService {
       List<String> billingPointIds,
       String idempotencyKey,
       CurrentUser actor) {
-    validatePeriod(period);
-    String cityCode = cityScope(actor, requestedCityCode);
     List<DatasetType> types = List.copyOf(new LinkedHashSet<>(requestedTypes));
     if (types.isEmpty()) {
       throw new BusinessRuleException("EXPORT_TYPE_REQUIRED", "至少选择一种导出数据类型");
@@ -60,7 +58,10 @@ public class ExportCommandService {
     if (billingPointIds == null || billingPointIds.isEmpty()) {
       throw new BusinessRuleException("EXPORT_SELECTION_REQUIRED", "请至少选择一个报账点");
     }
-    validateBillingPointScope(period, cityCode, billingPointIds);
+    List<SelectedBillingPoint> selectedPoints = selectedBillingPoints(billingPointIds);
+    validateBillingPointScope(selectedPoints, billingPointIds, actor);
+    SelectedBillingPoint firstPoint = selectedPoints.get(0);
+    String cityCode = firstPoint.cityCode();
     String jobId = UUID.randomUUID().toString();
     String normalizedKey =
         idempotencyKey == null || idempotencyKey.isBlank()
@@ -75,53 +76,50 @@ public class ExportCommandService {
             actor.username(),
             3);
     return jobRepository.create(
-        jobId, period, cityCode, types, billingPointIds, task.publicId(), actor.username());
+        jobId,
+        firstPoint.period(),
+        cityCode,
+        types,
+        billingPointIds,
+        task.publicId(),
+        actor.username());
+  }
+
+  private List<SelectedBillingPoint> selectedBillingPoints(List<String> billingPointIds) {
+    String placeholders =
+        String.join(",", java.util.Collections.nCopies(billingPointIds.size(), "?"));
+    return jdbcTemplate.query(
+            """
+            SELECT public_id, data_period, city_code
+              FROM billing_point_snapshot
+             WHERE public_id IN (
+            """
+                + placeholders
+                + ") ORDER BY data_period, city_code, billing_point_code",
+            this::mapSelectedBillingPoint,
+            billingPointIds.toArray());
   }
 
   private void validateBillingPointScope(
-      String period, String cityCode, List<String> billingPointIds) {
-    String placeholders =
-        String.join(",", java.util.Collections.nCopies(billingPointIds.size(), "?"));
-    var arguments = new java.util.ArrayList<Object>();
-    arguments.add(period);
-    arguments.add(cityCode);
-    arguments.addAll(billingPointIds);
-    Integer count =
-        jdbcTemplate.queryForObject(
-            """
-            SELECT COUNT(*) FROM billing_point_snapshot s
-             WHERE s.data_period = ? AND s.city_code = ? AND s.public_id IN (
-            """
-                + placeholders
-                + ")",
-            Integer.class,
-            arguments.toArray());
-    if (count == null || count != new LinkedHashSet<>(billingPointIds).size()) {
-      throw new AccessDeniedException("Export selection is outside city scope or not active");
+      List<SelectedBillingPoint> selectedPoints,
+      List<String> billingPointIds,
+      CurrentUser actor) {
+    int selectedCount = new LinkedHashSet<>(billingPointIds).size();
+    if (selectedPoints.size() != selectedCount) {
+      throw new AccessDeniedException("Export selection contains unavailable billing points");
+    }
+    if (!actor.roles().contains(Role.SUPER_ADMIN)
+        && selectedPoints.stream().anyMatch(point -> !point.cityCode().equals(actor.cityCode()))) {
+      throw new AccessDeniedException("Export selection is outside city scope");
     }
   }
 
-  private String cityScope(CurrentUser actor, String requestedCityCode) {
-    if (!actor.roles().contains(Role.SUPER_ADMIN)) {
-      if (requestedCityCode != null
-          && !requestedCityCode.isBlank()
-          && !requestedCityCode.equals(actor.cityCode())) {
-        throw new AccessDeniedException("City scope mismatch");
-      }
-      return actor.cityCode();
-    }
-    if (requestedCityCode == null || requestedCityCode.isBlank()) {
-      throw new BusinessRuleException("CITY_REQUIRED", "超级管理员导出时必须选择地市");
-    }
-    return requestedCityCode;
-  }
-
-  private void validatePeriod(String period) {
-    try {
-      YearMonth.parse(period);
-    } catch (DateTimeParseException exception) {
-      throw new BusinessRuleException("PERIOD_INVALID", "账期必须使用 YYYY-MM 格式");
-    }
+  private SelectedBillingPoint mapSelectedBillingPoint(ResultSet resultSet, int rowNumber)
+      throws SQLException {
+    return new SelectedBillingPoint(
+        resultSet.getString("public_id"),
+        resultSet.getString("data_period"),
+        resultSet.getString("city_code"));
   }
 
   private String digest(String value) {
@@ -142,4 +140,6 @@ public class ExportCommandService {
       throw new IllegalStateException("Export task payload could not be serialized", exception);
     }
   }
+
+  private record SelectedBillingPoint(String publicId, String period, String cityCode) {}
 }

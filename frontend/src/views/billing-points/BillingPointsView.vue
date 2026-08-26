@@ -32,6 +32,7 @@ const session = useSessionStore();
 const table = ref<TableInstance>();
 const pageData = ref<PageResult<Summary> | null>(null);
 const cities = ref<BusinessCity[]>([]);
+const filterOptions = ref({ periods: [] as string[], cities: [] as BusinessCity[], districts: [] as string[] });
 const loading = ref(false);
 const errorMessage = ref("");
 const importVisible = ref(false);
@@ -68,39 +69,9 @@ const selectedIdList = computed(() =>
   Array.from(selectedIds.value),
 );
 
-const selectedRows = computed(() =>
-  (pageData.value?.items ?? []).filter((item) =>
-    selectedIds.value.has(item.id),
-  ),
-);
-
 function isAiAnalyzing(row: Summary): boolean {
   return row.draftAnalysisStatus === "AI_ANALYZING";
 }
-
-const exportCityCode = computed(() => {
-  if (filters.cityCode) return filters.cityCode;
-
-  const cityCodes = new Set(
-    selectedRows.value.map((item) => item.city.code),
-  );
-
-  return cityCodes.size === 1
-    ? (Array.from(cityCodes)[0] ?? "")
-    : "";
-});
-
-const exportPeriod = computed(() => {
-  if (filters.period) return filters.period;
-
-  const periods = new Set(
-    selectedRows.value.map((item) => item.period),
-  );
-
-  return periods.size === 1
-    ? (Array.from(periods)[0] ?? "")
-    : "";
-});
 
 const isCityLocked = computed(
   () => session.currentUser?.city !== null,
@@ -112,15 +83,7 @@ const visibleCities = computed(() =>
     : cities.value,
 );
 
-const districtOptions = computed(() =>
-  Array.from(
-    new Set(
-      (pageData.value?.items ?? [])
-        .map((item) => item.district)
-        .filter((value): value is string => Boolean(value)),
-    ),
-  ),
-);
+const districtOptions = computed(() => filterOptions.value.districts);
 
 const rangeLabel = computed(() => {
   const total = pageData.value?.totalElements ?? 0;
@@ -291,39 +254,52 @@ function billingPointStatusText(
     : "启用";
 }
 
+function paymentEligibleFilter(): boolean | undefined {
+  return filters.reviewStatus === "APPROVED"
+    ? true
+    : filters.reviewStatus === "PENDING"
+      ? false
+      : undefined;
+}
+
+function billingPointQuery() {
+  return {
+    code: filters.code.trim(),
+    name: filters.name.trim(),
+    cityCode: filters.cityCode,
+    district: filters.district,
+    period: filters.period,
+
+    paymentEligible: paymentEligibleFilter(),
+    billingPointStatus:
+      filters.pointStatus,
+    auditStatus: filters.auditStatus,
+    reportStatus: filters.reportStatus,
+
+    focusPeriod: filters.focusPeriod,
+    focusCityCode:
+      filters.focusCityCode,
+
+    page: filters.page,
+    size: filters.size,
+  };
+}
+
+async function loadFilterOptions(): Promise<void> {
+  const { district, page, size, ...query } = billingPointQuery();
+  void district;
+  void page;
+  void size;
+  filterOptions.value = await businessApi.billingPoints.filterOptions(query);
+}
+
 async function load(): Promise<void> {
   loading.value = true;
   errorMessage.value = "";
 
   try {
-    const paymentEligible =
-      filters.reviewStatus === "APPROVED"
-        ? true
-        : filters.reviewStatus === "PENDING"
-          ? false
-          : undefined;
-
     const result =
-      await businessApi.billingPoints.list({
-        code: filters.code.trim(),
-        name: filters.name.trim(),
-        cityCode: filters.cityCode,
-        district: filters.district,
-        period: filters.period,
-
-        paymentEligible,
-        billingPointStatus:
-          filters.pointStatus,
-        auditStatus: filters.auditStatus,
-        reportStatus: filters.reportStatus,
-
-        focusPeriod: filters.focusPeriod,
-        focusCityCode:
-          filters.focusCityCode,
-
-        page: filters.page,
-        size: filters.size,
-      });
+      await businessApi.billingPoints.list(billingPointQuery());
 
     pageData.value = result;
 
@@ -355,6 +331,7 @@ async function search(): Promise<void> {
     query: routeQuery(),
   });
 
+  await loadFilterOptions();
   await load();
 }
 
@@ -548,6 +525,7 @@ async function handleImported(
     query: routeQuery(),
   });
 
+  await loadFilterOptions();
   await load();
 }
 
@@ -557,6 +535,7 @@ onMounted(async () => {
   cities.value =
     await businessApi.cities.list();
 
+  await loadFilterOptions();
   await load();
 });
 
@@ -691,11 +670,11 @@ watch(
             clearable
           >
             <ElOption
-              label="审核通过"
+              label="通过"
               value="APPROVED"
             />
             <ElOption
-              label="待审核"
+              label="不通过"
               value="PENDING"
             />
           </ElSelect>
@@ -737,11 +716,7 @@ watch(
               value="OVER_LIMIT"
             />
             <ElOption
-              label="待稽核"
-              value="PENDING_REVIEW"
-            />
-            <ElOption
-              label="不适用"
+              label="无"
               value="NOT_APPLICABLE"
             />
           </ElSelect>
@@ -764,7 +739,7 @@ watch(
               value="FINAL"
             />
             <ElOption
-              label="未生成"
+              label="无需生成"
               value="NONE"
             />
           </ElSelect>
@@ -1185,8 +1160,8 @@ watch(
   <ExportDataDialog
     v-model="exportVisible"
     :scope-label="`当前已选择 ${selectedCount} 条记录`"
-    :period="exportPeriod"
-    :city-code="exportCityCode"
+    period=""
+    city-code=""
     :billing-point-ids="
       selectedIdList
     "

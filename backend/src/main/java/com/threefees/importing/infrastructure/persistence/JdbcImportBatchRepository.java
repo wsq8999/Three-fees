@@ -82,6 +82,11 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
   }
 
   @Override
+  public List<ImportBatch> findByTaskPublicId(String taskPublicId) {
+    return query("WHERE task_public_id = ? ORDER BY data_period ASC, id ASC", taskPublicId);
+  }
+
+  @Override
   public List<ImportBatch> findPage(
       DatasetType datasetType, String period, String cityCode, int offset, int limit) {
     var sql = new StringBuilder("WHERE 1 = 1");
@@ -262,10 +267,24 @@ public class JdbcImportBatchRepository implements ImportBatchRepository {
     jdbcTemplate.update(
         """
         UPDATE import_job
-           SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP(3),
+           SET status = 'PROCESSING', row_count = 0, error_count = 0, errors_json = '[]',
+               completed_at = NULL, updated_at = CURRENT_TIMESTAMP(3),
                updated_by = 'WORKER', version = version + 1
          WHERE id = ? AND status IN ('QUEUED', 'FAILED')
         """,
+        id);
+  }
+
+  @Override
+  public void markPreflightCompleted(long id, int rowCount) {
+    jdbcTemplate.update(
+        """
+        UPDATE import_job
+           SET row_count = ?, updated_at = CURRENT_TIMESTAMP(3),
+               updated_by = 'WORKER', version = version + 1
+         WHERE id = ? AND status = 'PROCESSING'
+        """,
+        rowCount,
         id);
   }
 

@@ -46,7 +46,7 @@ function getRuleHint(key: BenchmarkRule["key"]): string {
       return "用于与去年同月历史用电情况进行比较";
 
     case "MONTH_ON_MONTH":
-      return "用于与上一个自然月历史用电情况进行比较";
+      return "用于与上一笔审核通过缴费单历史用电情况进行比较";
 
     case "RATED_BENCHMARK":
       return "用于与当前账期适用的额定标杆值进行比较";

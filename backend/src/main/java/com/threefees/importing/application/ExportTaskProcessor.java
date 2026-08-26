@@ -8,7 +8,6 @@ import com.threefees.task.domain.BusinessTask;
 import com.threefees.task.domain.TaskType;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +26,7 @@ public class ExportTaskProcessor implements TaskProcessor {
 
   private static final TypeReference<LinkedHashMap<String, String>> STRING_MAP =
       new TypeReference<>() {};
+  private static final String MULTI_PERIOD_LABEL = "多账期";
 
   private final ExportJobRepository jobRepository;
   private final FieldCatalogService fieldCatalogService;
@@ -58,11 +58,12 @@ public class ExportTaskProcessor implements TaskProcessor {
     var job = jobRepository.findByPublicId(jobId).orElseThrow();
     jobRepository.markProcessing(job.id());
     try {
-      List<String> billingPointCodes = billingPointCodes(job.billingPointIds());
+      List<SelectedBillingPoint> selectedPoints = selectedBillingPoints(job.billingPointIds());
+      String periodLabel = exportPeriodLabel(selectedPoints, job.period());
       var files = new LinkedHashMap<String, byte[]>();
       for (DatasetType datasetType : job.datasetTypes()) {
-        String filename = exportFileName(job.period(), datasetType, billingPointCodes.size(), "xlsx");
-        files.put(filename, workbook(datasetType, job.period(), job.cityCode(), billingPointCodes));
+        String filename = exportFileName(periodLabel, datasetType, selectedPoints.size(), "xlsx");
+        files.put(filename, workbook(datasetType, selectedPoints));
       }
       byte[] resultBytes;
       String resultName;
@@ -74,7 +75,7 @@ public class ExportTaskProcessor implements TaskProcessor {
         mediaType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
       } else {
         resultName =
-            exportBundleName(job.period(), job.datasetTypes().size(), billingPointCodes.size());
+            exportBundleName(periodLabel, job.datasetTypes().size(), selectedPoints.size());
         resultBytes = zip(files);
         mediaType = "application/zip";
       }
@@ -143,8 +144,7 @@ public class ExportTaskProcessor implements TaskProcessor {
     return value.replaceAll("[\\\\/:*?\"<>|]", "_");
   }
 
-  private byte[] workbook(
-      DatasetType datasetType, String period, String cityCode, List<String> billingPointCodes) {
+  private byte[] workbook(DatasetType datasetType, List<SelectedBillingPoint> selectedPoints) {
     try (var workbook = new SXSSFWorkbook(100);
         var output = new ByteArrayOutputStream()) {
       workbook.setCompressTempFiles(true);
@@ -156,7 +156,7 @@ public class ExportTaskProcessor implements TaskProcessor {
       for (int index = 0; index < fields.size(); index++) {
         header.createCell(index).setCellValue(fields.get(index).sourceName());
       }
-      List<Map<String, String>> rows = rows(datasetType, period, cityCode, billingPointCodes);
+      List<Map<String, String>> rows = rows(datasetType, selectedPoints);
       for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
         var excelRow = sheet.createRow(rowIndex + 1);
         Map<String, String> values = rows.get(rowIndex);
@@ -176,29 +176,36 @@ public class ExportTaskProcessor implements TaskProcessor {
   }
 
   private List<Map<String, String>> rows(
-      DatasetType datasetType, String period, String cityCode, List<String> billingPointCodes) {
-    if (billingPointCodes.isEmpty()) {
+      DatasetType datasetType, List<SelectedBillingPoint> selectedPoints) {
+    if (selectedPoints.isEmpty()) {
       return List.of();
     }
     String placeholders =
-        String.join(",", java.util.Collections.nCopies(billingPointCodes.size(), "?"));
-    var arguments = new ArrayList<Object>();
-    arguments.add(period);
-    arguments.add(cityCode);
-    arguments.addAll(billingPointCodes);
+        String.join(",", java.util.Collections.nCopies(selectedPoints.size(), "?"));
+    Object[] publicIds = selectedPoints.stream().map(SelectedBillingPoint::publicId).toArray();
     List<String> jsonRows;
     if (datasetType == DatasetType.BILLING_POINT) {
       jsonRows =
           jdbcTemplate.queryForList(
               """
-              SELECT s.data_json
-                FROM billing_point_snapshot s
-               WHERE s.data_period = ? AND s.city_code = ? AND s.billing_point_code IN (
+              SELECT COALESCE(m.resource_summary_json, selected.fallback_json)
+                FROM (
+                      SELECT city_code, billing_point_code, MIN(data_json) AS fallback_json
+                        FROM billing_point_snapshot
+                       WHERE public_id IN (
               """
                   + placeholders
-                  + ") ORDER BY s.billing_point_code",
+                  + """
+                       )
+                       GROUP BY city_code, billing_point_code
+                     ) selected
+                LEFT JOIN billing_point_master m
+                  ON m.city_code = selected.city_code
+                 AND m.billing_point_code = selected.billing_point_code
+               ORDER BY selected.city_code, selected.billing_point_code
+              """,
               String.class,
-              arguments.toArray());
+              publicIds);
     } else {
       String tableName =
           switch (datasetType) {
@@ -210,29 +217,53 @@ public class ExportTaskProcessor implements TaskProcessor {
       jsonRows =
           jdbcTemplate.queryForList(
               """
-              SELECT values_json
+              SELECT d.values_json
                 FROM
               """
                   + tableName
                   + """
-               WHERE data_period = ? AND city_code = ? AND billing_point_code IN (
+                   d
+               WHERE EXISTS (
+                     SELECT 1
+                       FROM billing_point_snapshot s
+                      WHERE s.public_id IN (
               """
                   + placeholders
-                  + ") ORDER BY billing_point_code, id",
+                  + """
+                      )
+                        AND s.data_period = d.data_period
+                        AND s.city_code = d.city_code
+                        AND s.billing_point_code = d.billing_point_code
+                   )
+               ORDER BY d.data_period, d.city_code, d.billing_point_code, d.id
+              """,
               String.class,
-              arguments.toArray());
+              publicIds);
     }
     return jsonRows.stream().map(this::readMap).map(value -> (Map<String, String>) value).toList();
   }
 
-  private List<String> billingPointCodes(List<String> publicIds) {
+  private List<SelectedBillingPoint> selectedBillingPoints(List<String> publicIds) {
     String placeholders = String.join(",", java.util.Collections.nCopies(publicIds.size(), "?"));
-    return jdbcTemplate.queryForList(
-        "SELECT billing_point_code FROM billing_point_snapshot WHERE public_id IN ("
+    return jdbcTemplate.query(
+        "SELECT public_id, data_period, city_code, billing_point_code FROM billing_point_snapshot WHERE public_id IN ("
             + placeholders
-            + ") ORDER BY billing_point_code",
-        String.class,
+            + ") ORDER BY data_period, city_code, billing_point_code",
+        (resultSet, rowNumber) ->
+            new SelectedBillingPoint(
+                resultSet.getString("public_id"),
+                resultSet.getString("data_period"),
+                resultSet.getString("city_code"),
+                resultSet.getString("billing_point_code")),
         publicIds.toArray());
+  }
+
+  private String exportPeriodLabel(List<SelectedBillingPoint> selectedPoints, String fallback) {
+    long periodCount = selectedPoints.stream().map(SelectedBillingPoint::period).distinct().count();
+    if (periodCount > 1) {
+      return MULTI_PERIOD_LABEL;
+    }
+    return selectedPoints.isEmpty() ? fallback : selectedPoints.get(0).period();
   }
 
   private byte[] zip(Map<String, byte[]> files) {
@@ -273,4 +304,7 @@ public class ExportTaskProcessor implements TaskProcessor {
       throw new IllegalStateException("Export result could not be serialized", exception);
     }
   }
+
+  private record SelectedBillingPoint(
+      String publicId, String period, String cityCode, String billingPointCode) {}
 }

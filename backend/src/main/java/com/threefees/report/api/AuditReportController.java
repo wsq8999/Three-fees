@@ -70,6 +70,25 @@ public class AuditReportController {
             actor);
     }
 
+  @GetMapping("/api/v1/reports/filter-options")
+  public AuditReportService.ReportFilterOptions reportFilterOptions(
+      @RequestParam(required = false) String reportNumber,
+      @RequestParam(required = false) String billingPointCode,
+      @RequestParam(required = false) String billingPointName,
+      @RequestParam(required = false) @Pattern(regexp = "[0-9]{4}-(0[1-9]|1[0-2])") String period,
+      @RequestParam(required = false) String cityCode,
+      @RequestParam(required = false) String source,
+      @AuthenticationPrincipal CurrentUser actor) {
+    return reportService.filterOptions(
+        reportNumber,
+        billingPointCode,
+        billingPointName,
+        period,
+        cityCode,
+        source,
+        actor);
+  }
+
   @GetMapping("/api/v1/reports/{publicId}")
   public ResponseEntity<ReportDetail> report(
       @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {

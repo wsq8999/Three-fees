@@ -8,6 +8,7 @@ import com.threefees.importing.domain.ImportBatch;
 import com.threefees.importing.domain.ImportBatchStatus;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +16,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(
     classes = ThreeFeesApplication.class,
@@ -24,8 +29,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
     })
 class FormalImportTableWriterIntegrationTest {
 
+  private static final TypeReference<LinkedHashMap<String, String>> STRING_MAP =
+      new TypeReference<>() {};
+
   @Autowired private FormalImportTableWriter writer;
   @Autowired private JdbcTemplate jdbcTemplate;
+  @Autowired private ObjectMapper objectMapper;
 
   @BeforeEach
   void cleanTestData() {
@@ -109,7 +118,16 @@ class FormalImportTableWriterIntegrationTest {
                 null,
                 null,
                 billingPointJsonWithResource(
-                    "BP-MULTI", "多资源报账点", "南京市", "玄武区", "RES-1", "资源一", "M-1")),
+                    "BP-MULTI",
+                    "多资源报账点",
+                    "南京市",
+                    "玄武区",
+                    "RES-1",
+                    "资源一",
+                    "M-1",
+                    "ACC-1",
+                    "1",
+                    "在用")),
             row(
                 3,
                 "320100",
@@ -118,7 +136,16 @@ class FormalImportTableWriterIntegrationTest {
                 null,
                 null,
                 billingPointJsonWithResource(
-                    "BP-MULTI", "多资源报账点", "南京市", "玄武区", "RES-2", "资源二", "M-2"))));
+                    "BP-MULTI",
+                    "多资源报账点",
+                    "南京市",
+                    "玄武区",
+                    "RES-2",
+                    "资源二",
+                    "M-2",
+                    "ACC-2",
+                    "1",
+                    "在用"))));
 
     assertThat(countByPoint("billing_point_snapshot", "2026-09", "320100", "BP-MULTI")).isZero();
     String dataJson =
@@ -127,9 +154,13 @@ class FormalImportTableWriterIntegrationTest {
             String.class,
             "320100",
             "BP-MULTI");
-    assertThat(dataJson).contains("RES-1、RES-2");
-    assertThat(dataJson).contains("资源一、资源二");
-    assertThat(dataJson).contains("M-1、M-2");
+    Map<String, String> values = readJsonMap(dataJson);
+    assertThat(values.get("关联资源编码")).isEqualTo("RES-1、RES-2");
+    assertThat(values.get("关联资源名称")).isEqualTo("资源一、资源二");
+    assertThat(values.get("关联电表编码")).isEqualTo("M-1、M-2");
+    assertThat(values.get("电表户号")).isEqualTo("ACC-1、ACC-2");
+    assertThat(values.get("电表倍率")).isEqualTo("1");
+    assertThat(values.get("电表状态")).isEqualTo("在用");
   }
 
   @Test
@@ -547,6 +578,21 @@ class FormalImportTableWriterIntegrationTest {
       String resourceCode,
       String resourceName,
       String meterCode) {
+    return billingPointJsonWithResource(
+        code, name, cityName, districtName, resourceCode, resourceName, meterCode, "", "", "");
+  }
+
+  private String billingPointJsonWithResource(
+      String code,
+      String name,
+      String cityName,
+      String districtName,
+      String resourceCode,
+      String resourceName,
+      String meterCode,
+      String meterAccountNo,
+      String meterMultiplier,
+      String meterStatus) {
     return billingPointJson(code, name, cityName, districtName)
         .replace(
             "}",
@@ -556,6 +602,12 @@ class FormalImportTableWriterIntegrationTest {
                 + jsonPair("关联资源名称", resourceName)
                 + ","
                 + jsonPair("关联电表编码", meterCode)
+                + ","
+                + jsonPair("电表户号", meterAccountNo)
+                + ","
+                + jsonPair("电表倍率", meterMultiplier)
+                + ","
+                + jsonPair("电表状态", meterStatus)
                 + "}");
   }
 
@@ -636,5 +688,17 @@ class FormalImportTableWriterIntegrationTest {
 
   private String jsonPair(String key, String value) {
     return "\"" + key + "\":\"" + value + "\"";
+  }
+
+  private Map<String, String> readJsonMap(String json) {
+    try {
+      JsonNode node = objectMapper.readTree(json == null || json.isBlank() ? "{}" : json);
+      if (node.isTextual()) {
+        node = objectMapper.readTree(node.asText());
+      }
+      return objectMapper.convertValue(node, STRING_MAP);
+    } catch (JacksonException exception) {
+      throw new IllegalStateException(exception);
+    }
   }
 }

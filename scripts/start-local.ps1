@@ -55,6 +55,7 @@ if ([string]::IsNullOrWhiteSpace($apiKey)) {
 
 $baseUrl = Get-EnvValue -Name 'KIMI_BASE_URL' -Default 'https://api.moonshot.cn/v1'
 $model = Get-EnvValue -Name 'KIMI_MODEL' -Default 'kimi-k3'
+$kimiRequestTimeout = Get-EnvValue -Name 'KIMI_REQUEST_TIMEOUT' -Default '10m'
 $dbUrl = Get-EnvValue -Name 'DB_URL' -Default 'jdbc:mysql://127.0.0.1:3306/three_fees?characterEncoding=utf8&connectionTimeZone=%2B08:00&forceConnectionTimeZoneToSession=true&sslMode=DISABLED&allowPublicKeyRetrieval=true'
 $dbUsername = Get-EnvValue -Name 'DB_USERNAME' -Default 'root'
 $dbPassword = Get-EnvValue -Name 'DB_PASSWORD' -Default '547547'
@@ -75,6 +76,7 @@ if (-not $SkipPortCheck) {
 [Environment]::SetEnvironmentVariable('KIMI_API_KEY', $apiKey, 'Process')
 [Environment]::SetEnvironmentVariable('KIMI_BASE_URL', $baseUrl, 'Process')
 [Environment]::SetEnvironmentVariable('KIMI_MODEL', $model, 'Process')
+[Environment]::SetEnvironmentVariable('KIMI_REQUEST_TIMEOUT', $kimiRequestTimeout, 'Process')
 [Environment]::SetEnvironmentVariable('DB_URL', $dbUrl, 'Process')
 [Environment]::SetEnvironmentVariable('DB_USERNAME', $dbUsername, 'Process')
 [Environment]::SetEnvironmentVariable('DB_PASSWORD', $dbPassword, 'Process')
@@ -87,6 +89,7 @@ if (-not $SkipPortCheck) {
 Write-Host '已检测到 Kimi 密钥，已为后端启动进程注入 AI_ENABLED=true。'
 Write-Host ('Kimi 接口：' + $baseUrl)
 Write-Host ('Kimi 模型：' + $model)
+Write-Host ('Kimi 请求超时：' + $kimiRequestTimeout)
 Write-Host ('后台任务并发数：' + $workerConcurrency)
 Write-Host '正在启动后端和前端，请在新打开的两个窗口查看运行日志。'
 

@@ -3,11 +3,13 @@ package com.threefees.report.application;
 import com.threefees.ai.application.AiServiceClient;
 import com.threefees.ai.application.AiServiceException;
 import com.threefees.file.application.StoredFileService;
+import com.threefees.file.domain.StoredFile;
 import com.threefees.identity.application.BusinessRuleException;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.application.ResourceConflictException;
 import com.threefees.identity.application.ResourceNotFoundException;
 import com.threefees.identity.domain.Role;
+import com.threefees.report.application.ReportDocumentGenerator.ReportImage;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -32,11 +34,11 @@ import tools.jackson.databind.ObjectMapper;
 public class ReportGenerationService {
 
   private static final DateTimeFormatter NUMBER_MONTH = DateTimeFormatter.ofPattern("yyyyMM");
-  private static final int MAX_IMAGE_COUNT = 10;
   private static final int MAX_SINGLE_IMAGE_BYTES = 10 * 1024 * 1024;
-  private static final int MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
   private static final Pattern HTML_SECTION_ANALYSIS =
       Pattern.compile("(?is)(<h2[^>]*>\\s*二、排查分析\\s*</h2>)(.*?)(<h2[^>]*>\\s*三、整改小结\\s*</h2>)");
+  private static final Pattern INLINE_FILE_ID =
+      Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
 
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
@@ -74,12 +76,18 @@ public class ReportGenerationService {
     return jdbcTemplate.query(
         """
         SELECT s.public_id AS billing_point_period_id,
-               s.billing_point_code, s.billing_point_name, s.city_code, c.name AS city_name,
-               s.district_name, s.data_period, a.over_limit_type, a.max_ratio,
+               s.billing_point_code,
+               COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+               s.city_code, c.name AS city_name, s.district_name,
+               m.resource_summary_json AS master_json,
+               s.data_period, a.over_limit_type, a.max_ratio,
                a.yoy_result, a.mom_result, a.rated_result,
                a.yoy_ratio, a.mom_ratio, a.rated_ratio
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
+          LEFT JOIN billing_point_master m
+            ON m.city_code = s.city_code
+           AND m.billing_point_code = s.billing_point_code
           JOIN audit_result a
             ON a.billing_point_code = s.billing_point_code
            AND a.data_period = s.data_period
@@ -95,7 +103,9 @@ public class ReportGenerationService {
                 rs.getString("billing_point_name"),
                 rs.getString("city_code"),
                 rs.getString("city_name"),
-                rs.getString("district_name"),
+                firstNonBlank(
+                    jsonValue(rs.getString("master_json"), "所属区县"),
+                    rs.getString("district_name")),
                 rs.getString("data_period"),
                 overLimitDisplayType(
                     rs.getString("over_limit_type"),
@@ -179,7 +189,8 @@ public class ReportGenerationService {
     if (contentHtml.isBlank()) {
       throw new BusinessRuleException("REPORT_CONTENT_EMPTY", "报告正文不能为空");
     }
-    byte[] wordBytes = documentGenerator.generateWordFromHtml(contentHtml);
+    byte[] wordBytes =
+        documentGenerator.generateWordFromHtml(contentHtml, reportImagesFromHtml(contentHtml));
     var word =
         storedFileService.storeGenerated(
             wordBytes,
@@ -230,7 +241,8 @@ public class ReportGenerationService {
       throw new BusinessRuleException("REPORT_CONTENT_EMPTY", "报告正文不能为空");
     }
     String title = titleFromHtml(contentHtml, source);
-    byte[] wordBytes = documentGenerator.generateWordFromHtml(contentHtml);
+    byte[] wordBytes =
+        documentGenerator.generateWordFromHtml(contentHtml, reportImagesFromHtml(contentHtml));
     var word =
         storedFileService.storeGenerated(
             wordBytes,
@@ -275,6 +287,25 @@ public class ReportGenerationService {
       throw exception;
     }
     return new GeneratedReport(publicId, reportNumber);
+  }
+
+  private List<ReportImage> reportImagesFromHtml(String contentHtml) {
+    var matcher = INLINE_FILE_ID.matcher(contentHtml == null ? "" : contentHtml);
+    var imageIds = new java.util.LinkedHashSet<String>();
+    while (matcher.find()) {
+      imageIds.add(matcher.group(1));
+    }
+    var images = new ArrayList<ReportImage>();
+    for (String fileId : imageIds) {
+      StoredFile file = storedFileService.find(fileId);
+      if (!("image/png".equals(file.mediaType()) || "image/jpeg".equals(file.mediaType()))) {
+        throw new BusinessRuleException("REPORT_IMAGE_INVALID", "报告图片格式不正确");
+      }
+      images.add(
+          new ReportImage(
+              fileId, file.originalName(), file.mediaType(), storedFileService.readBytes(file)));
+    }
+    return images;
   }
 
   private String initialHtml(GenerationSource source) {
@@ -345,9 +376,12 @@ public class ReportGenerationService {
 
   private String sourceSql(String where) {
     return """
-        SELECT s.id, s.public_id, s.billing_point_code, s.billing_point_name,
-               s.city_code, c.name AS city_name, s.district_name, s.data_period,
-               s.period_start, s.period_end, s.data_json,
+        SELECT s.id, s.public_id, s.billing_point_code,
+               COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+               s.city_code, c.name AS city_name, s.district_name,
+               s.data_period, s.period_start, s.period_end,
+               m.resource_summary_json AS master_json,
+               COALESCE(m.resource_summary_json, s.data_json) AS data_json,
                a.audit_status, a.over_limit_type, a.max_ratio,
                a.yoy_result, a.mom_result, a.rated_result,
                a.yoy_ratio, a.mom_ratio, a.rated_ratio,
@@ -378,6 +412,9 @@ public class ReportGenerationService {
                a.detail_json, r.public_id AS report_id, r.report_number
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
+          LEFT JOIN billing_point_master m
+            ON m.city_code = s.city_code
+           AND m.billing_point_code = s.billing_point_code
           JOIN audit_result a
             ON a.billing_point_code = s.billing_point_code
            AND a.data_period = s.data_period
@@ -395,7 +432,9 @@ public class ReportGenerationService {
         rs.getString("billing_point_name"),
         rs.getString("city_code"),
         rs.getString("city_name"),
-        rs.getString("district_name"),
+        firstNonBlank(
+            jsonValue(rs.getString("master_json"), "所属区县"),
+            rs.getString("district_name")),
         rs.getString("data_period"),
         rs.getObject("period_start", LocalDate.class),
         rs.getObject("period_end", LocalDate.class),
@@ -421,10 +460,6 @@ public class ReportGenerationService {
     if (inputs == null || inputs.isEmpty()) {
       throw new BusinessRuleException("AI_IMAGES_REQUIRED", "请至少选择一张需要分析的图片。");
     }
-    if (inputs.size() > MAX_IMAGE_COUNT) {
-      throw new BusinessRuleException("AI_IMAGES_TOO_MANY", "一次最多分析 10 张图片。");
-    }
-    int totalBytes = 0;
     List<AiServiceClient.AiImage> images = new ArrayList<>();
     for (AnalyzeImageCommand.ImageInput input : inputs) {
       if (!"image/png".equals(input.mediaType()) && !"image/jpeg".equals(input.mediaType())) {
@@ -438,10 +473,6 @@ public class ReportGenerationService {
       }
       if (bytes.length == 0 || bytes.length > MAX_SINGLE_IMAGE_BYTES) {
         throw new BusinessRuleException("AI_IMAGE_TOO_LARGE", "单张分析图片不能超过 10 MiB。");
-      }
-      totalBytes += bytes.length;
-      if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
-        throw new BusinessRuleException("AI_IMAGES_TOO_LARGE", "分析图片总大小不能超过 20 MiB。");
       }
       images.add(
           new AiServiceClient.AiImage(
@@ -581,10 +612,23 @@ public class ReportGenerationService {
       return objectMapper.createObjectNode();
     }
     try {
-      return objectMapper.readTree(value);
+      JsonNode node = objectMapper.readTree(value);
+      return node.isTextual() ? objectMapper.readTree(node.asText()) : node;
     } catch (JacksonException exception) {
       throw new IllegalStateException("Persisted report source contains invalid JSON", exception);
     }
+  }
+
+  private String jsonValue(String json, String field) {
+    if (json == null || json.isBlank()) {
+      return "";
+    }
+    JsonNode value = parseJson(json).path(field);
+    return value.isMissingNode() || value.isNull() ? "" : value.asText().trim();
+  }
+
+  private String firstNonBlank(String value, String fallback) {
+    return value == null || value.isBlank() ? fallback : value;
   }
 
   private String writeJson(Object value) {

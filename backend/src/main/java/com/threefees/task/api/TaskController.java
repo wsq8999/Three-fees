@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.access.AccessDeniedException;
@@ -138,6 +139,7 @@ public class TaskController {
     Map<String, TaskListItem> deduped = new LinkedHashMap<>();
     jdbcTemplate.query(sql.toString(), this::mapTask, args.toArray()).stream()
         .map(this::listItem)
+        .filter(Objects::nonNull)
         .forEach(item -> deduped.putIfAbsent(dedupeKey(item), item));
     return deduped.values().stream()
         .filter(item -> status == null || item.status() == status)
@@ -177,6 +179,11 @@ public class TaskController {
     JsonNode payload = parse(task.payloadJson());
     JsonNode result = parse(task.resultJson());
     RelatedTaskTarget related = relatedTarget(task.type(), payload, result);
+    if (task.type() == TaskType.AI_IMAGE_ANALYSIS
+        && related.relatedDraftId() != null
+        && !related.analysisSubmitted()) {
+      return null;
+    }
     boolean canRetry = task.status() == TaskStatus.FAILED && !isInputFailure(task.errorCode());
     TaskDraftStatus draftStatus = taskDraftStatus(task.status(), related);
     return new TaskListItem(
@@ -204,7 +211,9 @@ public class TaskController {
     String draftId = text(payload, "draftId");
     if (draftId == null) draftId = text(result, "draftId");
     RelatedTaskTarget draftTarget = draftTarget(draftId);
-    return draftTarget == null ? new RelatedTaskTarget(null, null, null, null, null, null) : draftTarget;
+    return draftTarget == null
+        ? new RelatedTaskTarget(null, null, null, null, null, null, true)
+        : draftTarget;
   }
 
   private RelatedTaskTarget draftTarget(String draftId) {
@@ -214,6 +223,7 @@ public class TaskController {
             """
             SELECT d.public_id AS draft_id, d.formal_report_public_id AS report_id,
                    d.status AS draft_record_status, d.analysis_status,
+                   d.analysis_submitted_at,
                    s.billing_point_name, c.name AS city_name, s.data_period
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
@@ -228,7 +238,8 @@ public class TaskController {
                     rs.getString("city_name"),
                     rs.getString("data_period"),
                     resolveDraftStatus(
-                        rs.getString("draft_record_status"), rs.getString("analysis_status"))),
+                        rs.getString("draft_record_status"), rs.getString("analysis_status")),
+                    rs.getObject("analysis_submitted_at", LocalDateTime.class) != null),
             draftId)
         .stream()
         .findFirst()
@@ -409,5 +420,6 @@ public class TaskController {
       String billingPointName,
       String cityName,
       String period,
-      TaskDraftStatus draftStatus) {}
+      TaskDraftStatus draftStatus,
+      boolean analysisSubmitted) {}
 }

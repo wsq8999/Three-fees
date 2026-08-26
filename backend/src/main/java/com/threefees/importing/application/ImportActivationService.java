@@ -2,6 +2,7 @@ package com.threefees.importing.application;
 
 import com.threefees.audit.application.AuditRecalculationService;
 import com.threefees.importing.domain.ImportBatch;
+import com.threefees.importing.domain.DatasetType;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -29,11 +30,26 @@ public class ImportActivationService {
 
   @Transactional
   public void replaceActivateAndRecalculate(ImportBatch batch, List<ImportRow> rows) {
+    replaceActivateAndRecalculateAll(List.of(new ActivationItem(batch, rows)));
+  }
+
+  public void preflightValidate(ImportBatch batch, List<ImportRow> rows) {
     crossDatasetValidator.validate(batch, rows);
-    formalImportTableWriter.replace(batch, rows);
-    batchRepository.markSucceeded(batch, rows.size());
-    if (batch.datasetType() != com.threefees.importing.domain.DatasetType.BILLING_POINT) {
-      auditRecalculationService.recalculate(batch.period(), batch.cityCode(), affectedCodes(rows));
+  }
+
+  @Transactional
+  public void replaceActivateAndRecalculateAll(List<ActivationItem> items) {
+    for (ActivationItem item : items) {
+      crossDatasetValidator.validate(item.batch(), item.rows());
+      formalImportTableWriter.replace(item.batch(), item.rows());
+      batchRepository.markSucceeded(item.batch(), item.rows().size());
+    }
+    for (ActivationItem item : items) {
+      ImportBatch batch = item.batch();
+      if (batch.datasetType() != DatasetType.BILLING_POINT) {
+        auditRecalculationService.recalculate(
+            batch.period(), batch.cityCode(), affectedCodes(item.rows()));
+      }
     }
   }
 
@@ -46,4 +62,6 @@ public class ImportActivationService {
     }
     return codes;
   }
+
+  public record ActivationItem(ImportBatch batch, List<ImportRow> rows) {}
 }

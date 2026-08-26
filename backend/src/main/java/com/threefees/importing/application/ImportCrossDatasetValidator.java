@@ -69,13 +69,8 @@ public class ImportCrossDatasetValidator {
             SELECT billing_point_code
               FROM billing_point_master
              WHERE city_code = ?
-            UNION
-            SELECT billing_point_code
-              FROM billing_point_snapshot
-             WHERE city_code = ?
             """,
             String.class,
-            batch.cityCode(),
             batch.cityCode()));
   }
 

@@ -240,12 +240,7 @@ function selectAnalysisFiles(event: Event): void {
   if (accepted.length !== files.length) {
     ElMessage.warning("分析图片只支持 PNG 或 JPEG。");
   }
-  const merged = [...analysisFiles.value, ...accepted].slice(0, 10);
-  const totalBytes = merged.reduce((sum, file) => sum + file.size, 0);
-  if (totalBytes > 20 * 1024 * 1024) {
-    ElMessage.warning("分析图片总大小不能超过 20 MiB。");
-    return;
-  }
+  const merged = [...analysisFiles.value, ...accepted];
   if (merged.some((file) => file.size > 10 * 1024 * 1024)) {
     ElMessage.warning("单张分析图片不能超过 10 MiB。");
     return;
@@ -379,10 +374,12 @@ onMounted(load);
           v-model="selectedKey"
           filterable
           class="candidate-select"
+          popper-class="candidate-select-popper"
           :style="{ '--candidate-select-width': selectedOptionWidth }"
           :loading="initializing"
           :disabled="isCorrection"
           placeholder="暂无待生成报告"
+          :title="selectedOptionLabel || '请选择报账点'"
           @change="selectChanged"
         >
           <ElOption
@@ -390,7 +387,9 @@ onMounted(load);
             :key="option.key"
             :label="option.label"
             :value="option.key"
-          />
+          >
+            <span class="candidate-option" :title="option.label">{{ option.label }}</span>
+          </ElOption>
         </ElSelect>
       </label>
       <div>
@@ -593,7 +592,17 @@ onMounted(load);
 
 .candidate-select :deep(.el-select__wrapper) {
   width: 100%;
+  height: 40px;
   min-width: 0;
+  overflow: hidden;
+  border-color: #d8e0ea !important;
+  box-shadow: 0 0 0 1px #d8e0ea inset !important;
+}
+
+.candidate-select :deep(.el-select__wrapper.is-focused),
+.candidate-select :deep(.el-select__wrapper.is-hovering) {
+  border-color: #9db6cf !important;
+  box-shadow: 0 0 0 1px #9db6cf inset !important;
 }
 
 /*
@@ -602,12 +611,46 @@ onMounted(load);
  * 不再把整个顶部卡片撑宽。
  */
 .candidate-select :deep(.el-select__selection) {
+  display: block;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .candidate-select :deep(.el-select__selected-item) {
   display: block;
+  width: 100%;
 
+  min-width: 0;
+  max-width: 100%;
+
+  overflow: hidden;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-select :deep(.el-select__selected-item span),
+.candidate-select :deep(.el-select__selected-item div),
+.candidate-select :deep(.el-select__input) {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-overflow: ellipsis;
+  white-space: nowrap !important;
+}
+
+.candidate-select :deep(.el-select__placeholder) {
+  display: block;
   min-width: 0;
   max-width: 100%;
 
@@ -617,13 +660,22 @@ onMounted(load);
   white-space: nowrap;
 }
 
-.candidate-select :deep(.el-select__placeholder) {
+.candidate-option {
+  display: block;
   min-width: 0;
+  overflow: visible;
+  white-space: normal;
+  word-break: keep-all;
+}
 
-  overflow: hidden;
+:global(.candidate-select-popper) {
+  max-width: min(860px, calc(100vw - 32px));
+}
 
-  text-overflow: ellipsis;
-  white-space: nowrap;
+:global(.candidate-select-popper .el-select-dropdown__item) {
+  height: auto;
+  min-height: 34px;
+  line-height: 1.45;
 }
 
 .danger-text {
@@ -648,16 +700,32 @@ onMounted(load);
   margin: 0 0 28px;
   text-align: center;
   font-size: 24px;
+  font-weight: 800;
 }
 
 .report-editor :deep(h2) {
-  margin: 24px 0 10px;
+  margin: 26px 0 12px;
   font-size: 18px;
+  font-weight: 800;
+}
+
+.report-editor :deep(p) {
+  margin: 10px 0;
+  text-indent: 2em;
+  white-space: pre-wrap;
+}
+
+.report-editor :deep(strong),
+.report-editor :deep(b) {
+  font-weight: 800;
 }
 
 .report-editor :deep(img) {
+  display: block;
   max-width: 100%;
   height: auto;
+  margin: 12px auto;
+  object-fit: contain;
 }
 
 .ai-card {

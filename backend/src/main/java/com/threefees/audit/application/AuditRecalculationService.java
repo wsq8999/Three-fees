@@ -6,6 +6,7 @@ import com.threefees.audit.domain.AuditCalculator;
 import com.threefees.audit.domain.MetricResult;
 import java.math.BigDecimal;
 import java.math.MathContext;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.time.temporal.ChronoUnit;
@@ -164,6 +165,7 @@ public class AuditRecalculationService {
         period,
         actual.paymentEligible(),
         actual.actualEnergy(),
+        actual.dailyAverage(),
         actual.paymentDaysOr(period.lengthOfMonth()),
         loadBenchmarkTotal(period, cityCode, billingPointCode));
   }
@@ -190,6 +192,7 @@ public class AuditRecalculationService {
             period,
             true,
             actual.actualEnergy(),
+            actual.dailyAverage(),
             actual.paymentDaysOr(period.lengthOfMonth()),
             loadBenchmarkTotal(period, cityCode, billingPointCode));
       }
@@ -288,9 +291,7 @@ public class AuditRecalculationService {
     BigDecimal dailyAverage =
         paymentDailyDays > 0
             ? paymentDailyEnergy.divide(BigDecimal.valueOf(paymentDailyDays), MathContext.DECIMAL128)
-            : hasPaymentEnergy && paymentDays != null && paymentDays > 0
-                ? paymentEnergy.divide(BigDecimal.valueOf(paymentDays), MathContext.DECIMAL128)
-                : null;
+            : null;
     return new EnergyAndPayment(
         hasPaymentEnergy ? paymentEnergy : meterCount == null || meterCount == 0 ? null : meterEnergy,
         dailyAverage,
@@ -555,19 +556,17 @@ public class AuditRecalculationService {
   }
 
   private BigDecimal referenceDaily(AuditCalculationInput.ReferencePeriod reference) {
-    return reference == null
-        ? null
-        : divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()));
+    return reference == null ? null : reference.dailyEnergy();
   }
 
   private BigDecimal benchmarkAverage(BigDecimal benchmarkTotal, int paymentDays) {
-    return divide(benchmarkTotal, BigDecimal.valueOf(paymentDays));
+    return divideFormula(benchmarkTotal, BigDecimal.valueOf(paymentDays));
   }
 
   private BigDecimal referenceBenchmarkAverage(AuditCalculationInput.ReferencePeriod reference) {
     return reference == null
         ? null
-        : divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
+        : divideFormula(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
   }
 
   private BigDecimal factorK(
@@ -579,7 +578,8 @@ public class AuditRecalculationService {
     if (currentAverage == null || referenceAverage == null || referenceAverage.signum() <= 0) {
       return null;
     }
-    return currentAverage.divide(referenceAverage, MathContext.DECIMAL128).max(BigDecimal.ONE);
+    BigDecimal quotient = currentAverage.divide(referenceAverage, 6, RoundingMode.HALF_UP);
+    return quotient.compareTo(BigDecimal.ONE) > 0 ? quotient : BigDecimal.ONE.setScale(6);
   }
 
   private Integer paymentDays(LocalDate start, LocalDate end) {
@@ -593,6 +593,12 @@ public class AuditRecalculationService {
     return numerator == null || denominator == null
         ? null
         : numerator.divide(denominator, MathContext.DECIMAL128);
+  }
+
+  private BigDecimal divideFormula(BigDecimal numerator, BigDecimal denominator) {
+    return numerator == null || denominator == null
+        ? null
+        : numerator.divide(denominator, 6, RoundingMode.HALF_UP);
   }
 
   private String metricStatus(MetricResult metric) {

@@ -40,9 +40,9 @@ class BillingPointQueryServiceIntegrationTest {
   }
 
   private void cleanTestData() {
-    jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code LIKE 'TEST-MULTI-%'");
+    jdbcTemplate.update("DELETE FROM audit_result WHERE billing_point_code LIKE 'TEST-%'");
     jdbcTemplate.update(
-        "DELETE FROM billing_point_snapshot WHERE billing_point_code LIKE 'TEST-MULTI-%'");
+        "DELETE FROM billing_point_snapshot WHERE billing_point_code LIKE 'TEST-%'");
   }
 
   @Test
@@ -130,21 +130,61 @@ class BillingPointQueryServiceIntegrationTest {
     assertComparisonValues(comparisons.get(2), "RATED_BENCHMARK", "900", "900", "1200");
   }
 
+  @Test
+  void filterOptionsDistrictsComeFromFullFilteredResultSet() {
+    insertSnapshotWithDistrict("TEST-OPT-11", TEST_PERIOD, "第十一页外区");
+    insertAudit("TEST-OPT-11", "NORMAL", "NORMAL", "NORMAL");
+    for (int index = 1; index <= 10; index++) {
+      insertSnapshotWithDistrict(
+          "TEST-OPT-" + String.format("%02d", index),
+          TEST_PERIOD,
+          "当前页区");
+      insertAudit("TEST-OPT-" + String.format("%02d", index), "NORMAL", "NORMAL", "NORMAL");
+    }
+
+    var page =
+        queryService.findPage(
+            new BillingPointFilter(
+                "TEST-OPT-", null, "320100", null, TEST_PERIOD, null, null, null, null,
+                null, null, null, null),
+            0,
+            10,
+            administrator());
+    var options =
+        queryService.filterOptions(
+            new BillingPointFilter(
+                "TEST-OPT-", null, "320100", null, TEST_PERIOD, null, null, null, null,
+                null, null, null, null),
+            administrator());
+
+    assertThat(page.items()).hasSize(10);
+    assertThat(page.items()).extracting(BillingPointQueryService.BillingPointSummary::district)
+        .doesNotContain("第十一页外区");
+    assertThat(options.districts()).contains("当前页区", "第十一页外区");
+  }
+
   private void insertSnapshot(String code, String period) {
+    insertSnapshotWithDistrict(code, period, "");
+  }
+
+  private void insertSnapshotWithDistrict(String code, String period, String district) {
     jdbcTemplate.update(
         """
         INSERT INTO billing_point_snapshot (
             public_id, data_period, period_start, period_end, city_code, district_code,
+            district_name,
             source_import_job_id, source_row_no, raw_row_json, billing_point_code,
             billing_point_name, city_name, data_json
-        ) VALUES (?, ?, ?, ?, '320100', '320101', 1, 1, '{}', ?, ?, '南京市', '{}')
+        ) VALUES (?, ?, ?, ?, '320100', '320101', ?, 1, 1, '{}', ?, ?, '南京市', ?)
         """,
         UUID.randomUUID().toString(),
         period,
         period + "-01",
         period + "-28",
+        district,
         code,
-        code + "名称");
+        code + "名称",
+        "{\"所属区县\":\"" + district + "\"}");
   }
 
   private void insertAudit(String code, String yoyResult, String momResult, String ratedResult) {

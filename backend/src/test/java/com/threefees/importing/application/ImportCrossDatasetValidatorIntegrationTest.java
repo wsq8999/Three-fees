@@ -41,6 +41,7 @@ class ImportCrossDatasetValidatorIntegrationTest {
 
   @Test
   void paymentImportDoesNotNeedToCoverExistingMeterPayments() {
+    insertMaster("320100", "BP-001");
     insertSnapshot("2026-11", "320100", "BP-001");
     insertMeter("2026-11", "320100", "BP-001", "PAY-OLD", "M-OLD");
 
@@ -64,6 +65,7 @@ class ImportCrossDatasetValidatorIntegrationTest {
 
   @Test
   void meterImportDoesNotRequireReferencedPaymentWhenBillingPointExists() {
+    insertMaster("320100", "BP-001");
     insertSnapshot("2027-01", "320100", "BP-001");
 
     assertThatCode(
@@ -82,6 +84,34 @@ class ImportCrossDatasetValidatorIntegrationTest {
                     batch(DatasetType.METER_READING, "2027-02", "320100"),
                     List.of(row("BP-MISSING", "PAY-001"))))
         .isInstanceOf(ImportValidationException.class);
+  }
+
+  @Test
+  void snapshotOnlyReferenceDoesNotSatisfyBillingPointMasterDependency() {
+    insertSnapshot("2027-03", "320100", "BP-SNAPSHOT-ONLY");
+
+    assertThatThrownBy(
+            () ->
+                validator.validate(
+                    batch(DatasetType.PAYMENT, "2027-03", "320100"),
+                    List.of(row("BP-SNAPSHOT-ONLY", "PAY-001"))))
+        .isInstanceOf(ImportValidationException.class);
+  }
+
+  private void insertMaster(String cityCode, String billingPointCode) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO billing_point_master
+          (billing_point_code, billing_point_name, city_code, resource_summary_json)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          billing_point_name = VALUES(billing_point_name),
+          resource_summary_json = VALUES(resource_summary_json)
+        """,
+        billingPointCode,
+        billingPointCode,
+        cityCode,
+        "{}");
   }
 
   private void insertSnapshot(String period, String cityCode, String billingPointCode) {

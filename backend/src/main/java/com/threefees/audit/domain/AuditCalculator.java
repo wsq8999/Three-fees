@@ -11,6 +11,7 @@ public class AuditCalculator {
 
   private static final BigDecimal HISTORICAL_MARGIN = new BigDecimal("1.20");
   private static final MathContext INTERNAL_CONTEXT = MathContext.DECIMAL128;
+  private static final int FORMULA_SCALE = 6;
 
   public AuditCalculationResult calculate(AuditCalculationInput input) {
     if (input.actualEnergy() == null) {
@@ -28,8 +29,8 @@ public class AuditCalculator {
 
     BigDecimal currentDaily =
         input.currentDailyEnergy() == null
-            ? divide(input.actualEnergy(), BigDecimal.valueOf(input.currentPaymentDays()))
-            : input.currentDailyEnergy();
+            ? null
+            : input.currentDailyEnergy().setScale(FORMULA_SCALE, RoundingMode.HALF_UP);
     MetricResult yoy =
         historicalMetric(
             currentDaily,
@@ -99,23 +100,22 @@ public class AuditCalculator {
     if (currentBenchmarkTotal == null
         || reference == null
         || !reference.paymentEligible()
-        || reference.actualEnergy() == null
+        || currentDaily == null
+        || reference.dailyEnergy() == null
         || reference.benchmarkTotal() == null) {
       return MetricResult.notApplicable(label + "所需 A、B、C 或审核资格缺失");
     }
     if (currentPaymentDays <= 0 || reference.paymentDays() <= 0) {
       return MetricResult.notApplicable(label + "缴费时间缺失");
     }
-    BigDecimal a = divide(currentBenchmarkTotal, BigDecimal.valueOf(currentPaymentDays));
-    BigDecimal b = divide(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
+    BigDecimal a = divideFormula(currentBenchmarkTotal, BigDecimal.valueOf(currentPaymentDays));
+    BigDecimal b = divideFormula(reference.benchmarkTotal(), BigDecimal.valueOf(reference.paymentDays()));
     if (b.signum() <= 0) {
       return MetricResult.notApplicable(label + "参考缴费额定日均 B 小于等于 0");
     }
-    BigDecimal c =
-        reference.dailyEnergy() == null
-            ? divide(reference.actualEnergy(), BigDecimal.valueOf(reference.paymentDays()))
-            : reference.dailyEnergy();
-    BigDecimal k = a.divide(b, INTERNAL_CONTEXT).max(BigDecimal.ONE);
+    BigDecimal c = reference.dailyEnergy().setScale(FORMULA_SCALE, RoundingMode.HALF_UP);
+    BigDecimal quotient = a.divide(b, FORMULA_SCALE, RoundingMode.HALF_UP);
+    BigDecimal k = quotient.compareTo(BigDecimal.ONE) > 0 ? quotient : BigDecimal.ONE.setScale(FORMULA_SCALE);
     BigDecimal threshold =
         c.multiply(k, INTERNAL_CONTEXT)
             .multiply(HISTORICAL_MARGIN, INTERNAL_CONTEXT)
@@ -132,7 +132,7 @@ public class AuditCalculator {
 
   private MetricResult ratedMetric(BigDecimal actualEnergy, BigDecimal benchmarkTotal) {
     if (benchmarkTotal == null) {
-      return MetricResult.notApplicable("当月日标杆值不完整");
+      return MetricResult.notApplicable("当月额定功率标杆月总值缺失");
     }
     boolean overLimit = actualEnergy.compareTo(benchmarkTotal) > 0;
     if (benchmarkTotal.signum() == 0) {
@@ -142,7 +142,7 @@ public class AuditCalculator {
           actualEnergy,
           benchmarkTotal,
           overLimit ? null : BigDecimal.ZERO,
-          overLimit ? "额定标杆正常上限为 0，实际用电大于 0" : "额定标杆与实际用电均为 0");
+          overLimit ? "额定标杆月总正常上限为 0，实际总电量大于 0" : "额定标杆月总值与实际总电量均为 0");
     }
     return new MetricResult(
         true,
@@ -150,7 +150,7 @@ public class AuditCalculator {
         actualEnergy,
         benchmarkTotal,
         overLimit ? ratio(actualEnergy, benchmarkTotal) : BigDecimal.ZERO,
-        "额定标杆正常上限优先取系统计算后的当月标杆总量，缺失时回退日列合计");
+        "额定正常上限 = 额定功率标杆月总值；本期实际总电量大于月总标杆则超标");
   }
 
   private BigDecimal ratio(BigDecimal actual, BigDecimal threshold) {
@@ -164,7 +164,7 @@ public class AuditCalculator {
         .setScale(6, RoundingMode.HALF_UP);
   }
 
-  private BigDecimal divide(BigDecimal numerator, BigDecimal denominator) {
-    return numerator.divide(denominator, INTERNAL_CONTEXT);
+  private BigDecimal divideFormula(BigDecimal numerator, BigDecimal denominator) {
+    return numerator.divide(denominator, FORMULA_SCALE, RoundingMode.HALF_UP);
   }
 }

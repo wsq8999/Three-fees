@@ -129,76 +129,54 @@ public class ImportCommandService {
 
     registerRollbackCleanup(storedFile);
 
+    String businessKey =
+        "IMPORT_FILE:"
+            + datasetType
+            + ":"
+            + (cityConstraint == null || cityConstraint.isBlank() ? "ALL" : cityConstraint)
+            + ":"
+            + digest(normalizedKey);
+
+    var existing = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
+    if (existing.isPresent()) {
+      List<ImportBatch> existingBatches =
+          batchRepository.findByTaskPublicId(existing.orElseThrow().publicId());
+      if (!existingBatches.isEmpty()) {
+        return existingBatches;
+      }
+      return readPayloadBatchIds(existing.orElseThrow().payloadJson()).stream()
+          .map(
+              batchId ->
+                  batchRepository
+                      .findByPublicId(batchId)
+                      .orElseThrow(() -> new ResourceNotFoundException("import batch")))
+          .toList();
+    }
+
+    List<ImportTaskItem> items =
+        groups.stream()
+            .map(group -> new ImportTaskItem(UUID.randomUUID().toString(), List.copyOf(group.rows())))
+            .toList();
+    String payload = writeJson(new ImportTaskPayload(null, null, items));
+
+    com.threefees.task.domain.BusinessTask task;
+    try {
+      task = taskRepository.create(TaskType.IMPORT, businessKey, payload, actor.username(), 3);
+    } catch (DuplicateKeyException exception) {
+      var concurrent = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
+      if (concurrent.isPresent()) {
+        return batchRepository.findByTaskPublicId(concurrent.orElseThrow().publicId());
+      }
+      throw exception;
+    }
+
     List<ImportBatch> created = new ArrayList<>();
-
-    for (ImportRowGroup group : groups) {
-
-      String businessKey =
-          "IMPORT:"
-              + datasetType
-              + ":"
-              + group.cityCode()
-              + ":"
-              + group.period()
-              + ":"
-              + digest(normalizedKey);
-
-      var existing = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
-
-      if (existing.isPresent()) {
-        String batchId = readPayloadBatchId(existing.orElseThrow().payloadJson());
-
-        created.add(
-            batchRepository
-                .findByPublicId(batchId)
-                .orElseThrow(() -> new ResourceNotFoundException("import batch")));
-
-        continue;
-      }
-
-      String batchPublicId = UUID.randomUUID().toString();
-
-      /*
-       * 关键优化：
-       *
-       * 以前任务 payload 只有 batchId。
-       * Worker 执行每个账期任务时，会重新读取并解析整个原文件。
-       *
-       * 现在把“当前城市 + 当前账期已经解析好的 rows”一起保存到任务 payload。
-       *
-       * 因此：
-       * 一个文件只在 submit() 阶段解析一次；
-       * 后台每个任务直接使用属于自己的 rows；
-       * 不再因为 68 个账期而把同一个 CSV 重复解析 68 次。
-       */
-      String payload = writeJson(new ImportTaskPayload(batchPublicId, List.copyOf(group.rows())));
-
-      com.threefees.task.domain.BusinessTask task;
-
-      try {
-        task = taskRepository.create(TaskType.IMPORT, businessKey, payload, actor.username(), 3);
-
-      } catch (DuplicateKeyException exception) {
-
-        var concurrent = taskRepository.findByTypeAndBusinessKey(TaskType.IMPORT, businessKey);
-
-        if (concurrent.isPresent()) {
-          String concurrentBatchId = readPayloadBatchId(concurrent.orElseThrow().payloadJson());
-
-          created.add(
-              batchRepository
-                  .findByPublicId(concurrentBatchId)
-                  .orElseThrow(() -> new ResourceNotFoundException("import batch")));
-
-          continue;
-        }
-
-        throw exception;
-      }
-
+    for (int index = 0; index < groups.size(); index++) {
+      ImportRowGroup group = groups.get(index);
+      ImportTaskItem item = items.get(index);
       created.add(
           batchRepository.create(
-              batchPublicId,
+              item.batchId(),
               datasetType,
               group.period(),
               scopeStart(datasetType, group),
@@ -419,16 +397,30 @@ public class ImportCommandService {
     }
   }
 
-  private String readPayloadBatchId(String json) {
+  private List<String> readPayloadBatchIds(String json) {
 
     try {
-      String batchId = objectMapper.readTree(json).path("batchId").asText();
+      var root = objectMapper.readTree(json);
+      var items = root.path("items");
+      if (items.isArray() && !items.isEmpty()) {
+        var batchIds = new ArrayList<String>();
+        for (var item : items) {
+          String batchId = item.path("batchId").asText();
+          if (batchId != null && !batchId.isBlank()) {
+            batchIds.add(batchId);
+          }
+        }
+        if (!batchIds.isEmpty()) {
+          return List.copyOf(batchIds);
+        }
+      }
+      String batchId = root.path("batchId").asText();
 
       if (batchId == null || batchId.isBlank()) {
         throw new IllegalStateException("Persisted import task payload does not contain batchId");
       }
 
-      return batchId;
+      return List.of(batchId);
 
     } catch (JacksonException exception) {
       throw new IllegalStateException("Persisted import task payload is invalid", exception);
@@ -436,9 +428,11 @@ public class ImportCommandService {
   }
 
   /**
-   * 新任务 payload。
+   * 导入任务 payload。
    *
-   * <p>rows 只包含当前城市、当前账期的数据。
+   * <p>batchId/rows 用于兼容旧任务；items 是新的文件级任务，一个上传文件只对应一个任务。
    */
-  private record ImportTaskPayload(String batchId, List<ImportRow> rows) {}
+  private record ImportTaskPayload(String batchId, List<ImportRow> rows, List<ImportTaskItem> items) {}
+
+  private record ImportTaskItem(String batchId, List<ImportRow> rows) {}
 }

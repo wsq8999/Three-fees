@@ -129,6 +129,90 @@ paths:
                 $ref: "#/components/schemas/DashboardSummary"
         "401":
           $ref: "#/components/responses/ProblemResponse"
+  /api/v1/billing-point-periods/filter-options:
+    get:
+      operationId: getBillingPointFilterOptions
+      summary: 查询报账点完整筛选选项
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: code
+          in: query
+          schema: { type: string }
+        - name: name
+          in: query
+          schema: { type: string }
+        - name: cityCode
+          in: query
+          schema: { type: string }
+        - name: period
+          in: query
+          schema:
+            type: string
+            pattern: "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        - name: siteKeyword
+          in: query
+          schema: { type: string }
+        - name: paymentKeyword
+          in: query
+          schema: { type: string }
+        - name: paymentEligible
+          in: query
+          schema: { type: boolean }
+        - name: billingPointStatus
+          in: query
+          schema: { type: string }
+        - name: auditStatus
+          in: query
+          schema: { type: string }
+        - name: reportStatus
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: 报账点筛选选项
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilterOptions"
+        "401":
+          $ref: "#/components/responses/ProblemResponse"
+  /api/v1/reports/filter-options:
+    get:
+      operationId: getReportFilterOptions
+      summary: 查询历史报告完整筛选选项
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: reportNumber
+          in: query
+          schema: { type: string }
+        - name: billingPointCode
+          in: query
+          schema: { type: string }
+        - name: billingPointName
+          in: query
+          schema: { type: string }
+        - name: period
+          in: query
+          schema:
+            type: string
+            pattern: "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        - name: cityCode
+          in: query
+          schema: { type: string }
+        - name: source
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: 历史报告筛选选项
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FilterOptions"
+        "401":
+          $ref: "#/components/responses/ProblemResponse"
   /actuator/health:
     get:
       operationId: health
@@ -245,14 +329,20 @@ components:
       additionalProperties: false
       required:
         - currentDataPeriod
+        - availablePeriods
         - cityCount
         - billingPointCount
         - overLimitBillingPointCount
         - draftReportCount
+        - pendingReportCount
       properties:
         currentDataPeriod:
           type: [string, "null"]
           pattern: "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        availablePeriods:
+          type: array
+          items:
+            type: string
         cityCount:
           type: integer
           minimum: 0
@@ -263,6 +353,58 @@ components:
           type: integer
           minimum: 0
         draftReportCount:
+          type: integer
+          minimum: 0
+        pendingReportCount:
+          type: integer
+          minimum: 0
+        siteCount:
+          type: integer
+          minimum: 0
+        lastUpdatedAt:
+          type: [string, "null"]
+        normalBillingPointCount:
+          type: integer
+          minimum: 0
+        pendingReviewCount:
+          type: integer
+          minimum: 0
+        finalReportCount:
+          type: integer
+          minimum: 0
+        districtOverLimitCounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/NameCount"
+        overLimitTypeCounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/NameCount"
+    FilterOptions:
+      type: object
+      additionalProperties: false
+      required: [periods, cities, districts]
+      properties:
+        periods:
+          type: array
+          items:
+            type: string
+        cities:
+          type: array
+          items:
+            $ref: "#/components/schemas/City"
+        districts:
+          type: array
+          items:
+            type: string
+    NameCount:
+      type: object
+      additionalProperties: false
+      required: [name, count]
+      properties:
+        name:
+          type: string
+        count:
           type: integer
           minimum: 0
     FieldError:

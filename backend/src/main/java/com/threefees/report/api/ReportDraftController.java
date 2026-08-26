@@ -69,6 +69,13 @@ public class ReportDraftController {
         .body(DraftResponse.from(draft));
   }
 
+  @DeleteMapping("/{publicId}/unused-correction")
+  public ResponseEntity<DiscardCorrectionResponse> discardUnusedCorrection(
+      @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
+    boolean discarded = service.discardUnusedCorrection(publicId, actor);
+    return ResponseEntity.ok(new DiscardCorrectionResponse(discarded));
+  }
+
   @GetMapping("/{publicId}")
   public ResponseEntity<DraftResponse> find(
       @PathVariable String publicId, @AuthenticationPrincipal CurrentUser actor) {
@@ -224,11 +231,13 @@ public class ReportDraftController {
   public record AssistanceRequest(
       @Size(max = 32) String intent,
       @NotBlank @Size(max = 4_000) String content,
-      @NotNull @Size(max = 10) List<String> imageFileIds) {}
+      @NotNull List<String> imageFileIds) {}
 
   public record ImageUploadResponse(String fileId, long entityVersion) {}
 
-  public record ImageOrderRequest(@NotNull @Size(max = 10) List<String> imageFileIds) {}
+  public record ImageOrderRequest(@NotNull List<String> imageFileIds) {}
+
+  public record DiscardCorrectionResponse(boolean discarded) {}
 
   public record TaskAcceptedResponse(String taskId, String type, String status) {}
 

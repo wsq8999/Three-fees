@@ -10,6 +10,7 @@ import com.threefees.ai.application.CityMemoryService;
 import com.threefees.ai.application.CityMemoryService.MemoryQuery;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.domain.Role;
+import com.threefees.task.api.TaskController;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -26,6 +27,7 @@ class ReportDraftCityMemoryIntegrationTest {
   @Autowired private JdbcTemplate jdbcTemplate;
   @Autowired private ReportDraftService service;
   @Autowired private CityMemoryService cityMemoryService;
+  @Autowired private TaskController taskController;
 
   @AfterEach
   void cleanUp() {
@@ -50,6 +52,11 @@ class ReportDraftCityMemoryIntegrationTest {
     jdbcTemplate.update(
         """
         DELETE FROM billing_point_snapshot
+         WHERE billing_point_code IN ('MEMORY-POINT-001', 'CITY-OTHER-001', 'SUZHOU-OTHER-001')
+        """);
+    jdbcTemplate.update(
+        """
+        DELETE FROM billing_point_master
          WHERE billing_point_code IN ('MEMORY-POINT-001', 'CITY-OTHER-001', 'SUZHOU-OTHER-001')
         """);
     jdbcTemplate.update("DELETE FROM import_job WHERE created_by='city-memory-test'");
@@ -117,7 +124,10 @@ class ReportDraftCityMemoryIntegrationTest {
     AgentContext context = agentContext(draft, "IMAGE_ANALYSIS");
 
     assertThat(context.samePointCases())
-        .anySatisfy(reference -> assertThat(reference.summary()).contains("南京同点历史"));
+        .anySatisfy(
+            reference ->
+                assertThat(reference.summary())
+                    .contains("南京同点历史", "历史明确原因", "历史原因类型"));
     assertThat(context.cityMemories())
         .anySatisfy(reference -> assertThat(reference.summary()).contains("南京本市其他案例"));
     assertThat(context.cityMemories())
@@ -353,6 +363,431 @@ class ReportDraftCityMemoryIntegrationTest {
     assertThat(storedError).isEqualTo("KIMI_TIMEOUT");
   }
 
+  @Test
+  void discardsUnusedCorrectionDraftWithoutChangingReport() {
+    String reportId =
+        seedAuditReport(
+            "320100",
+            "MEMORY-POINT-001",
+            "南京测试报账点",
+            "2026-07",
+            "历史明确原因。");
+    CurrentUser actor = cityUser();
+    var draft = service.createCorrection(reportId, "准备更正文案", actor);
+
+    boolean discarded = service.discardUnusedCorrection(draft.publicId(), actor);
+
+    assertThat(discarded).isTrue();
+    Integer draftCount =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM report_draft WHERE public_id=?", Integer.class, draft.publicId());
+    String reportStatus =
+        jdbcTemplate.queryForObject(
+            "SELECT status FROM audit_report WHERE public_id=?", String.class, reportId);
+    assertThat(draftCount).isZero();
+    assertThat(reportStatus).isEqualTo("FORMALIZED");
+  }
+
+  @Test
+  void keepsCorrectionDraftWhenContentChangedBeforeReturn() {
+    String reportId =
+        seedAuditReport(
+            "320100",
+            "MEMORY-POINT-001",
+            "南京测试报账点",
+            "2026-07",
+            "历史明确原因。");
+    CurrentUser actor = cityUser();
+    var draft = service.createCorrection(reportId, "准备更正文案", actor);
+
+    var edited =
+        service.edit(
+            draft.publicId(),
+            new ReportSections("更正标题", "情况已修改", "分析已修改", "整改已修改"),
+            draft.entityVersion(),
+            actor);
+
+    boolean discarded = service.discardUnusedCorrection(edited.publicId(), actor);
+
+    assertThat(discarded).isFalse();
+    String draftStatus =
+        jdbcTemplate.queryForObject(
+            "SELECT status FROM report_draft WHERE public_id=?", String.class, draft.publicId());
+    String reportStatus =
+        jdbcTemplate.queryForObject(
+            "SELECT status FROM audit_report WHERE public_id=?", String.class, reportId);
+    assertThat(draftStatus).isEqualTo("CORRECTING");
+    assertThat(reportStatus).isEqualTo("FORMALIZED");
+  }
+
+  @Test
+  void aiTaskListHidesResetCorrectionDraftUntilAnalysisIsSubmitted() {
+    String reportId =
+        seedAuditReport(
+            "320100",
+            "MEMORY-POINT-001",
+            "南京测试报账点",
+            "2026-07",
+            "历史明确原因。");
+    CurrentUser actor = cityUser();
+    var draft = service.createCorrection(reportId, "准备更正文案", actor);
+    String taskId = UUID.randomUUID().toString();
+    jdbcTemplate.update(
+        """
+        INSERT INTO business_task
+          (public_id, task_type, business_key, status, attempts, max_attempts,
+           payload_json, error_code, created_by, updated_by)
+        VALUES (?, 'AI_IMAGE_ANALYSIS', ?, 'FAILED', 1, 1, ?, 'KIMI_TIMEOUT',
+                'city-memory-test', 'city-memory-test')
+        """,
+        taskId,
+        "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId(),
+        "{\"draftId\":\"" + draft.publicId() + "\",\"instruction\":\"测试\",\"imageFileIds\":[]}");
+
+    var hidden = taskController.list(null, null, null, null, 0, 20, actor);
+
+    assertThat(hidden.items()).isEmpty();
+
+    jdbcTemplate.update(
+        """
+        UPDATE report_draft
+           SET analysis_status='AI_FAILED',
+               analysis_submitted_at=CURRENT_TIMESTAMP(3),
+               analysis_error_code='KIMI_TIMEOUT'
+         WHERE id=?
+        """,
+        draft.id());
+
+    var visible = taskController.list(null, null, null, null, 0, 20, actor);
+
+    assertThat(visible.items()).hasSize(1);
+    assertThat(visible.items().getFirst().relatedDraftId()).isEqualTo(draft.publicId());
+  }
+
+  @Test
+  void removesNonEquipmentImageLabelsButKeepsFigures() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("removeNonEquipmentImageLabels", String.class);
+    method.setAccessible(true);
+    String figure = "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>";
+
+    String cleaned =
+        (String)
+            method.invoke(
+                target,
+                "<p>缴费信息界面图：</p>"
+                    + figure
+                    + "<p>设备情况：移动4G BBU*1、RRU*3。</p>"
+                    + "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>");
+
+    assertThat(cleaned)
+        .doesNotContain("缴费信息界面图")
+        .contains(figure)
+        .contains("设备情况：移动4G BBU*1、RRU*3。")
+        .contains("file-2");
+  }
+
+  @Test
+  void movesEquipmentImageLabelsAboveTheirFigures() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method =
+        ReportDraftService.class.getDeclaredMethod("normalizeImageCaptionPositions", String.class);
+    method.setAccessible(true);
+    String firstFigure = "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>";
+    String secondFigure = "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>";
+
+    String cleaned =
+        (String)
+            method.invoke(
+                target,
+                firstFigure
+                    + "<p>机房全景图：</p>"
+                    + secondFigure
+                    + "<p>设备情况：移动4G BBU*1、RRU*3。</p>");
+
+    assertThat(cleaned)
+        .containsSubsequence("<p>机房全景图：</p>", firstFigure)
+        .containsSubsequence("<p>设备情况：移动4G BBU*1、RRU*3。</p>", secondFigure);
+  }
+
+  @Test
+  void normalizesCommonKimiCopulaTypoWithoutChangingSystemWords() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("normalizeAiReportText", String.class);
+    method.setAccessible(true);
+
+    String cleaned =
+        (String)
+            method.invoke(
+                target,
+                "本期超标主要系分摊比例变化，原因系电信下电，系由于系统台账未更新，修正系数保持不变。");
+
+    assertThat(cleaned)
+        .contains("本期超标主要是分摊比例变化")
+        .contains("原因是电信下电")
+        .contains("是由于系统台账未更新")
+        .contains("修正系数保持不变")
+        .doesNotContain("主要系", "原因系", "系由于");
+  }
+
+  @Test
+  void movesAnalysisReasonToEndAfterAllFigures() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("moveAnalysisReasonToEnd", String.class);
+    method.setAccessible(true);
+    String firstFigure = "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>";
+    String secondFigure = "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>";
+
+    String cleaned =
+        (String)
+            method.invoke(
+                target,
+                "<p>本期电量同比超标原因：分摊比例变化。</p>"
+                    + "<p>机房全景图：</p>"
+                    + firstFigure
+                    + "<p>设备情况：移动4G BBU*1。</p>"
+                    + secondFigure);
+
+    assertThat(cleaned)
+        .containsSubsequence("机房全景图", firstFigure, "设备情况", secondFigure, "本期电量同比超标原因");
+  }
+
+  @Test
+  void ratedOverLimitFactsTellKimiToCheckAssetSystemLag() throws Exception {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result
+           SET rated_result='OVER_LIMIT',
+               over_limit_type='ONLY_RATED',
+               rated_ratio=27.26,
+               rated_benchmark_energy=1033.54
+         WHERE billing_point_code='MEMORY-POINT-001'
+           AND data_period='2026-07'
+           AND city_code='320100'
+        """);
+    draft = service.find(draft.publicId(), actor);
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("facts", draft.getClass());
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    List<com.threefees.ai.application.AiServiceClient.Fact> facts =
+        (List<com.threefees.ai.application.AiServiceClient.Fact>) method.invoke(target, draft);
+
+    assertThat(facts)
+        .anySatisfy(
+            fact -> {
+              assertThat(fact.fieldName()).isEqualTo("额定超标重点排查方向");
+              assertThat(fact.value()).contains("资管系统", "额定功率台账未及时更新", "不要默认写待核实");
+            });
+  }
+
+  @Test
+  void nonSummerPositionPointFactsTellKimiToUseMainPowerOnly() throws Exception {
+    String snapshotId = seedOverLimitSnapshot();
+    jdbcTemplate.update(
+        """
+        UPDATE billing_point_snapshot
+           SET data_period='2026-01',
+               period_start='2026-01-01',
+               period_end='2026-01-31',
+               data_json='{"siteType":"位置点"}'
+         WHERE public_id=?
+        """,
+        snapshotId);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result
+           SET rated_result='OVER_LIMIT',
+               over_limit_type='ONLY_RATED',
+               rated_ratio=27.26,
+               rated_benchmark_energy=1896.46,
+               aggregated_payment_days=31
+         WHERE billing_point_code='MEMORY-POINT-001'
+           AND data_period='2026-07'
+           AND city_code='320100'
+        """);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result
+           SET data_period='2026-01',
+               period_start='2026-01-01',
+               period_end='2026-01-31'
+         WHERE billing_point_code='MEMORY-POINT-001'
+           AND data_period='2026-07'
+           AND city_code='320100'
+        """);
+    seedPositionPointMaster("MEMORY-POINT-001", "南京测试报账点");
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("facts", draft.getClass());
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    List<com.threefees.ai.application.AiServiceClient.Fact> facts =
+        (List<com.threefees.ai.application.AiServiceClient.Fact>) method.invoke(target, draft);
+
+    assertThat(facts)
+        .anySatisfy(
+            fact -> {
+              assertThat(fact.fieldName()).isEqualTo("位置点额定功率标杆公式");
+              assertThat(fact.value())
+                  .contains(
+                      "非夏季1月-4月、11月-12月",
+                      "主设备功率=2.549KW",
+                      "空调总功率=2.12KW",
+                      "本账期天数=31天",
+                      "（2.549KW）*24小时*31天=1896.46度",
+                      "公式仍不得自动加入空调功率",
+                      "1896.46度");
+            });
+  }
+
+  @Test
+  void summerPositionPointFactsTellKimiToAddAirConditionerPower() throws Exception {
+    String snapshotId = seedOverLimitSnapshot();
+    jdbcTemplate.update(
+        """
+        UPDATE billing_point_snapshot
+           SET data_json='{"siteType":"位置点"}'
+         WHERE public_id=?
+        """,
+        snapshotId);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result
+           SET rated_result='OVER_LIMIT',
+               over_limit_type='ONLY_RATED',
+               rated_ratio=27.26,
+               rated_benchmark_energy=3473.04,
+               aggregated_payment_days=31
+         WHERE billing_point_code='MEMORY-POINT-001'
+           AND data_period='2026-07'
+           AND city_code='320100'
+        """);
+    seedPositionPointMaster("MEMORY-POINT-001", "南京测试报账点");
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method = ReportDraftService.class.getDeclaredMethod("facts", draft.getClass());
+    method.setAccessible(true);
+
+    @SuppressWarnings("unchecked")
+    List<com.threefees.ai.application.AiServiceClient.Fact> facts =
+        (List<com.threefees.ai.application.AiServiceClient.Fact>) method.invoke(target, draft);
+
+    assertThat(facts)
+        .anySatisfy(
+            fact -> {
+              assertThat(fact.fieldName()).isEqualTo("位置点额定功率标杆公式");
+              assertThat(fact.value())
+                  .contains(
+                      "夏季5月-10月",
+                      "主设备功率=2.549KW",
+                      "空调总功率=2.12KW",
+                      "（2.549KW+2.12KW）*24小时*31天=3473.04度");
+            });
+  }
+
+  @Test
+  void nonSummerPositionPointFormulaRemovesAirConditionerPowerBeforeSave() throws Exception {
+    String snapshotId = seedOverLimitSnapshot();
+    jdbcTemplate.update(
+        """
+        UPDATE billing_point_snapshot
+           SET data_period='2026-01',
+               period_start='2026-01-01',
+               period_end='2026-01-31',
+               data_json='{"siteType":"位置点"}'
+         WHERE public_id=?
+        """,
+        snapshotId);
+    jdbcTemplate.update(
+        """
+        UPDATE audit_result
+           SET data_period='2026-01',
+               period_start='2026-01-01',
+               period_end='2026-01-31',
+               rated_result='OVER_LIMIT',
+               over_limit_type='ONLY_RATED',
+               rated_ratio=27.26,
+               rated_benchmark_energy=1896.46,
+               aggregated_payment_days=31
+         WHERE billing_point_code='MEMORY-POINT-001'
+           AND data_period='2026-07'
+           AND city_code='320100'
+        """);
+    seedPositionPointMaster("MEMORY-POINT-001", "南京测试报账点");
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method =
+        ReportDraftService.class.getDeclaredMethod(
+            "normalizePositionRatedPowerFormula", draft.getClass(), ReportSections.class);
+    method.setAccessible(true);
+
+    ReportSections cleaned =
+        (ReportSections)
+            method.invoke(
+                target,
+                draft,
+                new ReportSections(
+                    "标题",
+                    "情况说明",
+                    "三费系统中对应额定功率标杆应为（0.363+2.12）KW*24小时*31天=1896.46度。",
+                    "整改小结"));
+
+    assertThat(cleaned.analysis())
+        .contains("（2.549KW）*24小时*31天")
+        .doesNotContain("0.363+2.12");
+  }
+
+  @Test
+  void imageAnalysisRunCanBeAuditedWithoutVisibleChatMessage() throws Exception {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method =
+        ReportDraftService.class.getDeclaredMethod(
+            "saveAnalysisRun", draft.getClass(), Long.class, int.class, AgentContext.class);
+    method.setAccessible(true);
+
+    method.invoke(target, draft, null, 2, AgentContext.empty());
+
+    Integer messageCount =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM report_draft_message WHERE draft_id=?",
+            Integer.class,
+            draft.id());
+    Integer runCount =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM ai_analysis_run WHERE draft_id=? AND message_id IS NULL",
+            Integer.class,
+            draft.id());
+    assertThat(messageCount).isZero();
+    assertThat(runCount).isEqualTo(1);
+  }
+
   private void insertMemory(String cityCode, String reason) {
     jdbcTemplate.update(
         """
@@ -363,6 +798,14 @@ class ReportDraftCityMemoryIntegrationTest {
         UUID.randomUUID().toString(),
         cityCode,
         reason);
+  }
+
+  private CurrentUser cityUser() {
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    return actor;
   }
 
   private long insertCorrectionMessage(long draftId, String correction) {
@@ -447,7 +890,7 @@ class ReportDraftCityMemoryIntegrationTest {
     return (AgentContext) method.invoke(target, draft, intent);
   }
 
-  private void seedAuditReport(
+  private String seedAuditReport(
       String cityCode,
       String billingPointCode,
       String billingPointName,
@@ -494,6 +937,7 @@ class ReportDraftCityMemoryIntegrationTest {
         analysis,
         analysis,
         "历史图片显示设备和空调状态。");
+    return reportPublicId;
   }
 
   private long seedSnapshot(
@@ -561,6 +1005,18 @@ class ReportDraftCityMemoryIntegrationTest {
         jdbcTemplate.queryForObject("SELECT id FROM import_job WHERE public_id=?", Long.class, importId);
     if (id == null) throw new IllegalStateException("Import job was not inserted");
     return id;
+  }
+
+  private void seedPositionPointMaster(String billingPointCode, String billingPointName) {
+    jdbcTemplate.update(
+        """
+        INSERT INTO billing_point_master
+          (billing_point_code, billing_point_name, city_code, resource_summary_json)
+        VALUES (?, ?, '320100',
+                '{"资源类型":"位置点","主设备功率":"2.549","空调总功率":"2.12","铁塔空调总额定功率":"-"}')
+        """,
+        billingPointCode,
+        billingPointName);
   }
 
   private long seedStoredFile(String originalName, String mediaType) {
