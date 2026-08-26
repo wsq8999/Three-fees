@@ -670,11 +670,11 @@ watch(
             clearable
           >
             <ElOption
-              label="通过"
+              label="审核通过"
               value="APPROVED"
             />
             <ElOption
-              label="不通过"
+              label="审核不通过"
               value="PENDING"
             />
           </ElSelect>
@@ -716,7 +716,7 @@ watch(
               value="OVER_LIMIT"
             />
             <ElOption
-              label="无"
+              label="数据不足"
               value="NOT_APPLICABLE"
             />
           </ElSelect>

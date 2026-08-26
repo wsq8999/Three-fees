@@ -52,7 +52,7 @@ const statusChartData = computed(() => {
   return [
     { name: "正常", count: data.normalBillingPointCount, color: "#19a873" },
     { name: "超标", count: data.overLimitBillingPointCount, color: "#f02f44" },
-    { name: "待稽核", count: data.pendingReviewCount, color: "#d98b00" },
+    { name: "数据不足", count: data.pendingReviewCount, color: "#d98b00" },
   ];
 });
 
