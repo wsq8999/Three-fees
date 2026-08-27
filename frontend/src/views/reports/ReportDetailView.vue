@@ -547,7 +547,7 @@ onBeforeUnmount(() => {
         </div>
         <div>
           <small>超标比例：</small>
-          <OverLimitRatioTags :ratios="report.overLimitRatios" />
+          <OverLimitRatioTags :ratios="report.overLimitRatios" quiet />
         </div>
         <div>
           <small>报告来源：</small>

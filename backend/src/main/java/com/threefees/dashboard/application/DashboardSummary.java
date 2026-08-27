@@ -33,6 +33,7 @@ public record DashboardSummary(
       String severity,
       String billingPointCode,
       String billingPointName,
+      String cityName,
       String county,
       String period,
       String actualAmount,

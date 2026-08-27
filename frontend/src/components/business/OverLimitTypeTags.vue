@@ -5,6 +5,7 @@ const props = defineProps<{
   ratios?: OverLimitRatio[] | null;
   fallback?: string | null;
   emptyText?: string;
+  quiet?: boolean;
 }>();
 
 type TypeTag = {
@@ -55,7 +56,7 @@ function tags(): TypeTag[] {
       v-for="item in tags()"
       :key="`${item.type}-${item.label}`"
       class="type-tag"
-      :class="tagClass(item.type)"
+      :class="[tagClass(item.type), { 'is-quiet': quiet }]"
     >
       {{ item.label }}
     </span>
@@ -78,27 +79,41 @@ function tags(): TypeTag[] {
   white-space: nowrap;
   border-radius: 999px;
   padding: 3px 8px;
-  border: 1px solid currentColor;
-  background: color-mix(in srgb, currentColor 10%, #ffffff);
+  border: 1px solid var(--type-tag-border, #cbd5e1);
+  color: var(--type-tag-color, #64748b);
+  background: var(--type-tag-bg, #f8fafc);
   font-size: 12px;
   line-height: 1.3;
   font-weight: 600;
 }
 
+.type-tag.is-quiet {
+  padding: 2px 7px;
+  font-weight: 500;
+}
+
 .type-yoy {
-  color: #d93044;
+  --type-tag-color: #c14453;
+  --type-tag-bg: #fff1f3;
+  --type-tag-border: #f6b6be;
 }
 
 .type-mom {
-  color: #c76f00;
+  --type-tag-color: #c27a2c;
+  --type-tag-bg: #fff7ed;
+  --type-tag-border: #f4c38e;
 }
 
 .type-rated {
-  color: #7c3aed;
+  --type-tag-color: #3b73c4;
+  --type-tag-bg: #eff8ff;
+  --type-tag-border: #a9c7f2;
 }
 
 .type-default {
-  color: #64748b;
+  --type-tag-color: #64748b;
+  --type-tag-bg: #f8fafc;
+  --type-tag-border: #cbd5e1;
 }
 
 .type-empty {

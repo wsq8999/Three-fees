@@ -1109,11 +1109,12 @@ onUnmounted(() => {
         <OverLimitTypeTags
           :ratios="draft.overLimitRatios"
           :fallback="draft.overLimitType"
+          quiet
         />
       </div>
       <div>
         <small>超标比例</small>
-        <OverLimitRatioTags :ratios="draft.overLimitRatios" />
+        <OverLimitRatioTags :ratios="draft.overLimitRatios" quiet />
       </div>
     </section>
 

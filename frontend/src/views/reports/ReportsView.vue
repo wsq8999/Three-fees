@@ -7,7 +7,6 @@ import { ElMessage } from "element-plus";
 
 import { businessApi, formatPercent, saveBlob, triggerBrowserDownload } from "@/api/business-api";
 import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
-import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type {
@@ -706,17 +705,9 @@ onMounted(async () => {
           {{ formatAmount(asReport(scope.row).actualAmount) }}
         </template>
       </ElTableColumn>
-      <ElTableColumn label="超标类型" width="150">
-        <template #default="scope">
-          <OverLimitTypeTags
-            :ratios="asReport(scope.row).overLimitRatios"
-            :fallback="asReport(scope.row).overLimitType"
-          />
-        </template>
-      </ElTableColumn>
       <ElTableColumn label="超标比例" min-width="230">
         <template #default="scope">
-          <OverLimitRatioTags :ratios="asReport(scope.row).overLimitRatios" />
+          <OverLimitRatioTags :ratios="asReport(scope.row).overLimitRatios" quiet />
         </template>
       </ElTableColumn>
       <ElTableColumn label="操作" width="140" fixed="right" align="center">

@@ -9,7 +9,6 @@ import { businessApi } from "@/api/business-api";
 import ExportDataDialog from "@/components/business/ExportDataDialog.vue";
 import ImportDataDialog from "@/components/business/ImportDataDialog.vue";
 import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
-import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import StatusTag from "@/components/business/StatusTag.vue";
 import PageState from "@/components/PageState.vue";
 import { parseBillingPointQuery } from "@/router/billing-query-state";
@@ -220,22 +219,6 @@ function dailyEnergy(row: Summary): string {
   return (
     Number(row.actualEnergy) / days
   ).toFixed(2);
-}
-
-function joinedValues(
-  values: string[] | undefined,
-): string {
-  const normalized = Array.from(
-    new Set(
-      (values ?? [])
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  );
-
-  return normalized.length === 0
-    ? "—"
-    : normalized.join("、");
 }
 
 function paymentEligibilityText(
@@ -871,24 +854,8 @@ watch(
       </ElTableColumn>
 
       <ElTableColumn
-        label="缴费单编码"
-        min-width="220"
-      >
-        <template #default="scope">
-          <span class="multi-value-cell">
-            {{
-              joinedValues(
-                asSummary(scope.row)
-                  .paymentCodes,
-              )
-            }}
-          </span>
-        </template>
-      </ElTableColumn>
-
-      <ElTableColumn
         label="账期"
-        width="190"
+        width="210"
       >
         <template #default="scope">
           {{
@@ -1001,31 +968,6 @@ watch(
       </ElTableColumn>
 
       <ElTableColumn
-        label="超标类型"
-        min-width="190"
-      >
-        <template #default="scope">
-          <OverLimitTypeTags
-            v-if="
-              asSummary(scope.row)
-                .auditStatus ===
-              'OVER_LIMIT'
-            "
-            :ratios="asSummary(scope.row).overLimitRatios"
-            :fallback="
-              asSummary(scope.row)
-                .overLimitDisplayType ??
-              asSummary(scope.row)
-                .overLimitType ??
-              '超标'
-            "
-          />
-
-          <span v-else>—</span>
-        </template>
-      </ElTableColumn>
-
-      <ElTableColumn
         label="超标比例"
         min-width="230"
       >
@@ -1033,6 +975,7 @@ watch(
           <OverLimitRatioTags
             v-if="asSummary(scope.row).auditStatus === 'OVER_LIMIT'"
             :ratios="asSummary(scope.row).overLimitRatios"
+            quiet
           />
           <span v-else>—</span>
         </template>

@@ -343,6 +343,7 @@ public class DashboardQueryService {
             """
             SELECT s.public_id, s.billing_point_code,
                    COALESCE(m.billing_point_name, s.billing_point_name) AS billing_point_name,
+                   COALESCE(NULLIF(s.city_name, ''), c.name) AS city_name,
                    s.data_period,
                    COALESCE(
                      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(COALESCE(m.resource_summary_json, s.data_json), '$."所属区县"')), ''),
@@ -358,6 +359,8 @@ public class DashboardQueryService {
               LEFT JOIN billing_point_master m
                 ON m.city_code = s.city_code
                AND m.billing_point_code = s.billing_point_code
+              JOIN city c
+                ON c.code = s.city_code
               JOIN audit_result a
                 ON a.billing_point_code = s.billing_point_code
                AND a.data_period = s.data_period
@@ -399,6 +402,7 @@ public class DashboardQueryService {
         ratio != null && ratio.compareTo(BigDecimal.valueOf(30)) >= 0 ? "DANGER" : "WARNING",
         code,
         name,
+        valueOr(rs.getString("city_name"), "—"),
         valueOr(rs.getString("county"), "—"),
         rs.getString("data_period"),
         decimalString(rs.getBigDecimal("actual_amount")),

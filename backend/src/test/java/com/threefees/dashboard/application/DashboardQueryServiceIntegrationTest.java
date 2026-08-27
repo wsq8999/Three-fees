@@ -69,6 +69,9 @@ public class DashboardQueryServiceIntegrationTest {
     assertThat(citySummary.pendingTasks())
         .extracting(DashboardSummary.PendingReportTask::billingPointCode)
         .containsExactlyInAnyOrder("BP-PENDING-1", "BP-PENDING-2");
+    assertThat(citySummary.pendingTasks())
+        .extracting(DashboardSummary.PendingReportTask::cityName)
+        .containsOnly("南京市");
     assertThat(adminSummary.pendingReportCount()).isEqualTo(3);
     assertThat(adminSummary.finalReportCount()).isEqualTo(1);
   }

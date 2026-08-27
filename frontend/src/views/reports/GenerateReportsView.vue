@@ -396,11 +396,12 @@ onMounted(load);
         <OverLimitTypeTags
           :ratios="selected?.overLimitRatios"
           :fallback="selected?.overLimitType"
+          quiet
         />
       </div>
       <div>
         <small>超标比例</small>
-        <OverLimitRatioTags :ratios="selected?.overLimitRatios" />
+        <OverLimitRatioTags :ratios="selected?.overLimitRatios" quiet />
       </div>
     </section>
 

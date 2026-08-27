@@ -257,6 +257,7 @@ export interface DashboardData {
     severity: "INFO" | "WARNING" | "DANGER";
     billingPointCode: string;
     billingPointName: string;
+    cityName: string;
     county: string;
     period: string;
     actualAmount: string;

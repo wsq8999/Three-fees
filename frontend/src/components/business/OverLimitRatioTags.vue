@@ -4,6 +4,7 @@ import type { OverLimitRatio } from "@/types/business";
 defineProps<{
   ratios?: OverLimitRatio[] | null;
   emptyText?: string;
+  quiet?: boolean;
 }>();
 
 function ratioClass(type: string): string {
@@ -30,7 +31,7 @@ function formatRatio(value: string | number | null | undefined): string {
       v-for="item in ratios"
       :key="`${item.type}-${item.label}`"
       class="ratio-tag"
-      :class="ratioClass(item.type)"
+      :class="[ratioClass(item.type), { 'is-quiet': quiet }]"
     >
       <span class="ratio-label">{{ item.label }}</span>
       <strong>{{ formatRatio(item.ratio) }}</strong>
@@ -55,14 +56,23 @@ function formatRatio(value: string | number | null | undefined): string {
   white-space: nowrap;
   border-radius: 999px;
   padding: 3px 8px;
-  border: 1px solid currentColor;
-  background: color-mix(in srgb, currentColor 10%, #ffffff);
+  border: 1px solid var(--ratio-tag-border, #cbd5e1);
+  color: var(--ratio-tag-color, #64748b);
+  background: var(--ratio-tag-bg, #f8fafc);
   font-size: 12px;
   line-height: 1.3;
 }
 
+.ratio-tag.is-quiet {
+  padding: 2px 7px;
+}
+
 .ratio-tag strong {
   font-weight: 700;
+}
+
+.ratio-tag.is-quiet strong {
+  font-weight: 600;
 }
 
 .ratio-label {
@@ -70,19 +80,27 @@ function formatRatio(value: string | number | null | undefined): string {
 }
 
 .ratio-yoy {
-  color: #d93044;
+  --ratio-tag-color: #c14453;
+  --ratio-tag-bg: #fff1f3;
+  --ratio-tag-border: #f6b6be;
 }
 
 .ratio-mom {
-  color: #c76f00;
+  --ratio-tag-color: #c27a2c;
+  --ratio-tag-bg: #fff7ed;
+  --ratio-tag-border: #f4c38e;
 }
 
 .ratio-rated {
-  color: #7c3aed;
+  --ratio-tag-color: #3b73c4;
+  --ratio-tag-bg: #eff8ff;
+  --ratio-tag-border: #a9c7f2;
 }
 
 .ratio-default {
-  color: #64748b;
+  --ratio-tag-color: #64748b;
+  --ratio-tag-bg: #f8fafc;
+  --ratio-tag-border: #cbd5e1;
 }
 
 .ratio-empty {

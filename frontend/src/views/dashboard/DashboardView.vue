@@ -6,7 +6,6 @@ import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
-import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
 import { useSessionStore } from "@/stores/session";
 import type { DashboardData } from "@/types/business";
@@ -69,6 +68,12 @@ function asPendingTask(row: unknown): DashboardData["pendingTasks"][number] {
 
 function isTaskAiAnalyzing(task: DashboardData["pendingTasks"][number]): boolean {
   return task.draftAnalysisStatus === "AI_ANALYZING";
+}
+
+function taskRegion(task: DashboardData["pendingTasks"][number]): string {
+  const city = task.cityName ?? "";
+  const county = task.county ?? "";
+  return [city, county].filter(Boolean).join("-");
 }
 
 async function load(period = selectedPeriod.value): Promise<void> {
@@ -146,7 +151,7 @@ onMounted(load);
     @retry="load"
   />
 
-  <template v-else-if="dashboard">
+  <div v-else-if="dashboard" class="dashboard-page">
     <section class="stat-grid">
       <article class="stat-card">
         <span class="stat-icon red"><Files /></span>
@@ -186,7 +191,6 @@ onMounted(load);
       <header>
         <div>
           <h2>待生成报告任务</h2>
-          <p>数据来源：当前权限范围 + 当前账期 + 稽核超标 + 报告状态待生成</p>
         </div>
         <ElSelect
           v-model="selectedPeriod"
@@ -206,7 +210,7 @@ onMounted(load);
         <ElTable
           class="task-table"
           :data="dashboard.pendingTasks"
-          height="310"
+          height="100%"
           table-layout="auto"
         >
           <ElTableColumn
@@ -222,10 +226,13 @@ onMounted(load);
           />
 
           <ElTableColumn
-            prop="county"
-            label="所属区县"
-            width="100"
-          />
+            label="所属区域"
+            width="150"
+          >
+            <template #default="scope">
+              {{ taskRegion(asPendingTask(scope.row)) || "—" }}
+            </template>
+          </ElTableColumn>
 
           <ElTableColumn
             prop="period"
@@ -234,34 +241,11 @@ onMounted(load);
           />
 
           <ElTableColumn
-            label="实际报账金额"
-            width="124"
-            align="right"
-          >
-            <template #default="scope">
-              ¥{{ scope.row.actualAmount }}
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn
-            label="超标类型"
-            min-width="150"
-            align="center"
-          >
-            <template #default="scope">
-              <OverLimitTypeTags
-                :ratios="scope.row.overLimitRatios"
-                :fallback="scope.row.overLimitType"
-              />
-            </template>
-          </ElTableColumn>
-
-          <ElTableColumn
             label="超标比例"
             min-width="230"
           >
             <template #default="scope">
-              <OverLimitRatioTags :ratios="scope.row.overLimitRatios" />
+              <OverLimitRatioTags :ratios="scope.row.overLimitRatios" quiet />
             </template>
           </ElTableColumn>
 
@@ -389,15 +373,24 @@ onMounted(load);
         <ElButton type="primary" @click="openImportGuideTarget">去导入数据</ElButton>
       </template>
     </ElDialog>
-  </template>
+  </div>
 </template>
 
 <style scoped>
+.dashboard-page {
+  display: grid;
+  height: calc(100dvh - var(--topbar-height) - clamp(24px, 2.7vw, 48px));
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  overflow: hidden;
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 0;
 }
 
 .stat-card,
@@ -509,23 +502,27 @@ onMounted(load);
 }
 
 .task-card {
-  overflow: visible;
-  min-height: 388px;
-  margin-bottom: 14px;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  margin-bottom: 0;
 }
 
 .task-card > header {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid #e4eaf2;
 }
 
 .task-card h2 {
+  margin: 0;
   color: #111d31;
-  font-size: 17px;
+  font-size: 16px;
+  line-height: 22px;
 }
 
 .task-card p {
@@ -539,6 +536,10 @@ onMounted(load);
   flex: 0 0 210px;
 }
 
+.task-card :deep(.el-select__wrapper) {
+  min-height: 34px;
+}
+
 .number-emphasis {
   color: #f02f44;
   white-space: nowrap;
@@ -546,6 +547,8 @@ onMounted(load);
 
 .task-table-scroll {
   width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -568,6 +571,7 @@ onMounted(load);
 }
 
 .task-table {
+  height: 100%;
   min-width: 980px;
 }
 
@@ -929,6 +933,58 @@ onMounted(load);
     min-height: 150px !important;
     max-height: 150px;
     padding: 8px;
+  }
+}
+
+@media (height <= 760px) {
+  .dashboard-page {
+    gap: 8px;
+  }
+
+  .stat-card {
+    height: 78px;
+    min-height: 78px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .task-card > header {
+    padding-top: 6px;
+    padding-bottom: 6px;
+  }
+
+  .chart-card {
+    height: 142px !important;
+    min-height: 142px !important;
+    max-height: 142px;
+    padding: 8px 10px;
+  }
+
+  .chart-card h3 {
+    margin-bottom: 4px;
+    font-size: 14px;
+  }
+}
+
+@media (height <= 680px) {
+  .stat-card {
+    height: 72px;
+    min-height: 72px;
+  }
+
+  .stat-icon {
+    width: 28px;
+    height: 28px;
+  }
+
+  .stat-card strong {
+    font-size: 20px;
+  }
+
+  .chart-card {
+    height: 126px !important;
+    min-height: 126px !important;
+    max-height: 126px;
   }
 }
 </style>
