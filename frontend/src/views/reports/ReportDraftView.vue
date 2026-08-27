@@ -1,16 +1,45 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { EditorContent, useEditor, type Editor } from "@tiptap/vue-3";
+import StarterKit from "@tiptap/starter-kit";
+import TextAlign from "@tiptap/extension-text-align";
 import { Promotion } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import { useRoute, useRouter } from "vue-router";
 
 import { businessApi } from "@/api/business-api";
 import { ApiProblem } from "@/api/problem-details";
 import OverLimitRatioTags from "@/components/business/OverLimitRatioTags.vue";
 import OverLimitTypeTags from "@/components/business/OverLimitTypeTags.vue";
 import PageState from "@/components/PageState.vue";
-import type { DraftBlock, ReportDraft } from "@/types/business";
+import type { ReportDraft } from "@/types/business";
 import { standardConfirm } from "@/utils/message-box";
+
+import {
+  ReportImageFigure,
+  draftToEditorSections,
+  imageFileIdsFromHtml,
+  imageUrl,
+  sanitizeReportHtml,
+  type InlineImageSize,
+  type RichEditorSectionKey,
+  type RichEditorSections,
+  sectionEditorHtmlToBlocks,
+} from "./report-rich-editor";
+
+type ExistingReportNode = {
+  attrs: Record<string, unknown>;
+  childCount?: number;
+  nodeSize: number;
+  type: { name: string };
+  child?: (index: number) => ExistingReportNode;
+};
+
+type ReportEditorDoc = {
+  descendants: (
+    callback: (node: ExistingReportNode, pos: number) => boolean | void,
+  ) => void;
+};
 
 const route = useRoute();
 const router = useRouter();
@@ -21,6 +50,7 @@ const saving = ref(false);
 const sending = ref(false);
 const chatSending = ref(false);
 const analyzingImages = ref(false);
+const uploadingImages = ref(false);
 const imageUpdating = ref(false);
 const generating = ref(false);
 const errorMessage = ref("");
@@ -28,114 +58,40 @@ const prompt = ref("");
 const assistantIntent = ref<"AUTO" | "ASK" | "EDIT" | "CORRECTION">("AUTO");
 const assistantError = ref("");
 const assistantVisible = ref(true);
-const reportPaperRef = ref<HTMLElement>();
-const htmlReportRef = ref<HTMLElement>();
-const editorRenderKey = ref(0);
-const pendingImageIds = ref<string[]>([]);
-const uploadingImages = ref(false);
+const selectedFigure = ref<HTMLElement | null>(null);
+
 let saveInFlight: Promise<boolean> | null = null;
+let autoSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
+let draftDirty = false;
+let saveQueued = false;
+let applyingRemoteDraft = false;
 let analysisPollTimer: ReturnType<typeof window.setTimeout> | null = null;
 let analysisPolling = false;
-let selectedInlineFigure: HTMLElement | null = null;
-let lastEditorRange: Range | null = null;
-let inlineImageInteraction:
-  | {
-      mode: "pending";
-      figure: HTMLElement;
-      editor: HTMLElement;
-      pointerId: number;
-      startX: number;
-      startY: number;
-    }
-  | {
-      mode: "dragging";
-      figure: HTMLElement;
-      editor: HTMLElement;
-      pointerId: number;
-      marker: HTMLElement;
-    }
-  | {
-      mode: "resizing";
-      figure: HTMLElement;
-      pointerId: number;
-      startX: number;
-      startWidth: number;
-      aspectRatio: number;
-      direction: -1 | 1;
-    }
-  | null = null;
+let resizeState: {
+  figure: HTMLElement;
+  pointerId: number;
+  startX: number;
+  startWidth: number;
+  aspectRatio: number;
+  direction: -1 | 1;
+} | null = null;
 
-const allImageIds = computed(() =>
-  Array.from(
-    new Set([...(draft.value?.imageFileIds ?? []), ...pendingImageIds.value]),
-  ),
-);
+const DEFAULT_PASTED_IMAGE_WIDTH = 320;
+const DEFAULT_PASTED_IMAGE_HEIGHT = 180;
+const A4_CONTENT_WIDTH = 682;
+const INLINE_IMAGE_GAP = 8;
+const AUTO_SAVE_DELAY_MS = 800;
 
 const draftEditable = computed(
   () =>
     draft.value !== null &&
     ["EDITING", "AI_COMPLETED", "AI_FAILED"].includes(draft.value.status),
 );
-
 const aiAnalyzing = computed(() => draft.value?.status === "AI_ANALYZING");
-
-const AI_ANALYSIS_ERROR_MESSAGES: Record<string, string> = {
-  AI_IMAGE_ANALYSIS_FAILED:
-    "AI图片分析失败，请检查密钥配置或稍后重新分析。",
-  KIMI_AUTH_FAILED: "Kimi 密钥无效或无权限，请检查 KIMI_API_KEY。",
-  KIMI_MODEL_UNAVAILABLE: "Kimi 模型不可用，请检查 KIMI_MODEL 配置。",
-  KIMI_RATE_LIMIT: "Kimi 当前繁忙或限流，请稍后重新分析。",
-  KIMI_TIMEOUT: "Kimi 调用超时，请稍后重新分析。",
-  KIMI_IMAGE_INVALID: "图片过大或格式不支持，请减少图片数量或重新粘贴。",
-  AI_RESPONSE_INVALID: "Kimi 返回内容格式不符合要求，请重新分析。",
-};
-
-function analysisErrorMessage(errorCode: string | null | undefined): string {
-  if (!errorCode) return "正文和图片已保留，可重新分析。";
-  return (
-    AI_ANALYSIS_ERROR_MESSAGES[errorCode] ??
-    "AI图片分析失败，正文和图片已保留，可重新分析。"
-  );
-}
-
-const analysisFailedTitle = computed(() => {
-  if (draft.value?.status !== "AI_FAILED") return "";
-  const message = analysisErrorMessage(draft.value.analysisErrorCode);
-  if (message.includes("正文和图片已保留")) {
-    return `AI分析失败，${message}`;
-  }
-  return `AI分析失败，${message}正文和图片已保留。`;
-});
-
-const chineseNumbers = ["一", "二", "三", "四", "五", "六", "七", "八"];
-
-type InlineImageDisplaySize = {
-  width: number;
-  height: number;
-};
-
-const INLINE_IMAGE_ROW_GAP = 8;
-const MIN_INLINE_ROW_IMAGE_WIDTH = 110;
-
-const headingBlock = computed(
-  () => draft.value?.blocks.find((block) => block.type === "HEADING") ?? null,
-);
-
-const bodyBlocks = computed(
-  () => draft.value?.blocks.filter((block) => block.type !== "HEADING") ?? [],
-);
-
-const htmlReportBlock = computed(() => {
-  const situation =
-    draft.value?.blocks.find((block) => block.type === "SITUATION") ?? null;
-  if (draft.value?.formalReportId === null || situation === null) return null;
-  return looksLikeHtml(situation.content) ? situation : null;
-});
-const isCorrectionDraft = computed(() => draft.value?.formalReportId !== null);
 const hasSubmittedAiAnalysis = computed(
   () => draft.value?.analysisSubmittedAt != null,
 );
-
+const allImageIds = computed(() => draft.value?.imageFileIds ?? []);
 const billingPointLabel = computed(() => {
   if (draft.value === null) return "";
   return [
@@ -148,10 +104,148 @@ const billingPointLabel = computed(() => {
     .join(" ｜ ");
 });
 
-function looksLikeHtml(value: string): boolean {
-  return /<\/?(div|p|table|tr|td|th|figure|img|section|article|h[1-6]|ul|ol|li)\b/i.test(
-    value,
+const AI_ANALYSIS_ERROR_MESSAGES: Record<string, string> = {
+  AI_IMAGE_ANALYSIS_FAILED: "AI图片分析失败，请检查密钥配置或稍后重新分析。",
+  KIMI_AUTH_FAILED: "Kimi 密钥无效或无权限，请检查 KIMI_API_KEY。",
+  KIMI_MODEL_UNAVAILABLE: "Kimi 模型不可用，请检查 KIMI_MODEL 配置。",
+  KIMI_RATE_LIMIT: "Kimi 当前繁忙或限流，请稍后重新分析。",
+  KIMI_TIMEOUT: "Kimi 调用超时，请稍后重新分析。",
+  KIMI_IMAGE_INVALID: "图片过大或格式不支持，请减少图片数量或重新粘贴。",
+  AI_RESPONSE_INVALID: "Kimi 返回内容格式不符合要求，请重新分析。",
+};
+
+const SECTION_CONFIG = [
+  { key: "situation", title: "一、情况说明" },
+  { key: "analysis", title: "二、排查分析" },
+  { key: "rectification", title: "三、整改小结" },
+] as const satisfies ReadonlyArray<{
+  key: RichEditorSectionKey;
+  title: string;
+}>;
+
+function createSectionEditor() {
+  return useEditor({
+    extensions: [
+      StarterKit.configure({ heading: false }),
+      TextAlign.configure({ types: ["paragraph"] }),
+      ReportImageFigure,
+    ],
+    content: "",
+    editable: false,
+    editorProps: {
+      attributes: {
+        class: "report-editor-content",
+        spellcheck: "false",
+      },
+    },
+    onUpdate: () => {
+      if (!applyingRemoteDraft) markDraftDirty();
+    },
+  });
+}
+
+const situationEditor = createSectionEditor();
+const analysisEditor = createSectionEditor();
+const rectificationEditor = createSectionEditor();
+const sectionEditors = {
+  situation: situationEditor,
+  analysis: analysisEditor,
+  rectification: rectificationEditor,
+};
+
+const reportTitle = computed(() => {
+  if (draft.value === null) return "电费稽核报告";
+  return stripTitleMarks(draftToEditorSections(draft.value).title);
+});
+
+const analysisFailedTitle = computed(() => {
+  if (draft.value?.status !== "AI_FAILED") return "";
+  const message = analysisErrorMessage(draft.value.analysisErrorCode);
+  if (message.includes("正文和图片已保留")) {
+    return `AI分析失败，${message}`;
+  }
+  return `AI分析失败，${message}正文和图片已保留。`;
+});
+
+watch(draftEditable, (editable) => {
+  for (const instance of editableEditors()) instance.setEditable(editable);
+});
+
+function analysisErrorMessage(errorCode: string | null | undefined): string {
+  if (!errorCode) return "正文和图片已保留，可重新分析。";
+  return (
+    AI_ANALYSIS_ERROR_MESSAGES[errorCode] ??
+    "AI图片分析失败，正文和图片已保留，可重新分析。"
   );
+}
+
+function currentEditorHtml(): string {
+  const sections = currentEditorSections();
+  return sanitizeReportHtml(
+    `<article class="confirmed-report-content"><h1>${escapeHtml(sections.title)}</h1>` +
+      `<h2>一、情况说明</h2>${sections.situation}` +
+      `<h2>二、排查分析</h2>${sections.analysis}` +
+      `<h2>三、整改小结</h2>${sections.rectification}</article>`,
+  );
+}
+
+function currentEditorSections(): RichEditorSections {
+  if (draft.value === null) {
+    return {
+      title: "电费稽核报告",
+      situation: "",
+      analysis: "",
+      rectification: "",
+    };
+  }
+  return {
+    title: reportTitle.value,
+    situation: sectionHtml("situation"),
+    analysis: sectionHtml("analysis"),
+    rectification: sectionHtml("rectification"),
+  };
+}
+
+function syncDraftFromEditor(): void {
+  if (draft.value === null) return;
+  const sections = currentEditorSections();
+  const html = currentEditorHtml();
+  draft.value.blocks = sectionEditorHtmlToBlocks(sections, draft.value.blocks);
+  const visibleIds = imageFileIdsFromHtml(html);
+  draft.value.imageFileIds = draft.value.imageFileIds.filter((id) =>
+    visibleIds.includes(id),
+  );
+}
+
+function setEditorContentFromDraft(loaded: ReportDraft): void {
+  const sections = draftToEditorSections(loaded);
+  for (const section of SECTION_CONFIG) {
+    sectionEditors[section.key].value?.commands.setContent(
+      sections[section.key],
+      {
+        emitUpdate: false,
+      },
+    );
+    sectionEditors[section.key].value?.setEditable(draftEditable.value);
+  }
+  void nextTick(markImagesReady);
+}
+
+function sectionHtml(key: RichEditorSectionKey): string {
+  return sanitizeReportHtml(sectionEditors[key].value?.getHTML() ?? "");
+}
+
+function editableEditors(): Editor[] {
+  return SECTION_CONFIG.map(
+    (section) => sectionEditors[section.key].value,
+  ).filter((instance): instance is Editor => instance != null);
+}
+
+function editorForElement(element: Element): Editor | null {
+  for (const instance of editableEditors()) {
+    if (instance.view.dom.contains(element)) return instance;
+  }
+  return null;
 }
 
 function escapeHtml(value: string): string {
@@ -163,244 +257,11 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function editableBlockHtml(block: DraftBlock): string {
-  const content = stripBlockSectionHeading(block);
-  const html = looksLikeHtml(content)
-    ? content
-    : escapeHtml(content).replace(/\r?\n/g, "<br>");
-  const sanitized = sanitizeEditableHtml(html);
-  return isCorrectionDraft.value ? sanitized : emphasizeReportCauses(sanitized);
-}
-
-function stripBlockSectionHeading(block: DraftBlock): string {
-  if (block.type === "SITUATION") {
-    return stripLeadingSectionHeading(block.content, "一、情况说明");
-  }
-  if (block.type === "ANALYSIS") {
-    return stripLeadingSectionHeading(block.content, "二、排查分析");
-  }
-  if (block.type === "RECTIFICATION") {
-    return stripLeadingSectionHeading(block.content, "三、整改小结");
-  }
-  return block.content;
-}
-
-function stripLeadingSectionHeading(content: string, heading: string): string {
-  if (content.trim().length === 0) return content;
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return content
-    .replace(
-      new RegExp(
-        `^\\s*<(?:h[1-6]|p|div)\\b[^>]*>\\s*${escaped}\\s*[：:]?\\s*</(?:h[1-6]|p|div)>\\s*`,
-        "i",
-      ),
-      "",
-    )
-    .replace(new RegExp(`^\\s*${escaped}\\s*[：:]?\\s*(?:<br\\s*/?>|\\r?\\n)?\\s*`, "i"), "");
-}
-
-function emphasizeReportCauses(html: string): string {
-  const template = document.createElement("template");
-  template.innerHTML = normalizeReportHtmlWhitespace(html);
-  normalizeReportEmphasis(template.content);
-  emphasizeTextNodes(template.content);
-  return template.innerHTML;
-}
-
-function emphasizeTextNodes(root: DocumentFragment): void {
-  const reasonPattern = reportReasonPattern();
-  const causeLabelPattern = causeLabelPatternForText();
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const textNodes: Text[] = [];
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-    if (!(node instanceof Text)) continue;
-    const parent = node.parentElement;
-    if (
-      parent?.closest("strong,b,figure,table,script,style") !== null ||
-      (!reasonPattern.test(node.data) && !causeLabelPattern.test(node.data))
-    ) {
-      reasonPattern.lastIndex = 0;
-      causeLabelPattern.lastIndex = 0;
-      continue;
-    }
-    reasonPattern.lastIndex = 0;
-    causeLabelPattern.lastIndex = 0;
-    textNodes.push(node);
-  }
-  textNodes.forEach((node) => {
-    node.replaceWith(emphasizedTextFragment(node.data));
-  });
-}
-
-function reportReasonPattern(): RegExp {
-  return new RegExp(
-    [
-      "资管系统未及时更新[^。；;\\n]*(?:[。；;]|$)",
-      "额定功率台账未及时更新[^。；;\\n]*(?:[。；;]|$)",
-      "实际用电情况正常",
-      "极简站改造新增机柜及空调长时间运行所致",
-      "不存在用电量跑冒滴漏现象，不存在偷搭电问题",
-      "不存在用电量跑冒滴漏",
-      "不存在跑冒滴漏",
-      "不存在偷搭电",
-      "分摊比例变化[^。；;\\n]*(?:[。；;]|$)",
-      "电信下电退出分摊[^。；;\\n]*(?:[。；;]|$)",
-      "电信设备已下电退出电费分摊[^。；;\\n]*(?:[。；;]|$)",
-      "设备新增[^。；;\\n]*(?:[。；;]|$)",
-      "站址搬迁[^。；;\\n]*(?:[。；;]|$)",
-      "合并电表[^。；;\\n]*(?:[。；;]|$)",
-      "空调长时间运行[^。；;\\n]*(?:[。；;]|$)",
-    ].join("|"),
-    "g",
-  );
-}
-
-function causeLabelPatternForText(): RegExp {
-  return /(?:本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因|超标原因(?:是|为)?)[：:，,]*/g;
-}
-
-function emphasizedTextFragment(text: string): DocumentFragment {
-  const fragment = document.createDocumentFragment();
-  const reasonPattern = reportReasonPattern();
-  const causeLabelPattern = causeLabelPatternForText();
-  let index = 0;
-  while (index < text.length) {
-    reasonPattern.lastIndex = index;
-    causeLabelPattern.lastIndex = index;
-    const reasonMatch = reasonPattern.exec(text);
-    const labelMatch = causeLabelPattern.exec(text);
-    const next =
-      labelMatch !== null &&
-      (reasonMatch === null || labelMatch.index <= reasonMatch.index)
-        ? { type: "label" as const, index: labelMatch.index, text: labelMatch[0] }
-        : reasonMatch !== null
-          ? { type: "reason" as const, index: reasonMatch.index, text: reasonMatch[0] }
-          : null;
-    if (next === null) {
-      fragment.append(document.createTextNode(text.slice(index)));
-      break;
-    }
-    if (next.index > index) {
-      fragment.append(document.createTextNode(text.slice(index, next.index)));
-    }
-    if (next.type === "label") {
-      fragment.append(document.createTextNode(next.text));
-      const start = next.index + next.text.length;
-      const end = sentenceEnd(text, start);
-      const leading = text.slice(start, end).match(/^\s*/)?.[0] ?? "";
-      const cause = text.slice(start, end).trimStart();
-      if (cause.length > 0 && !isMetricOnlyText(cause)) {
-        if (leading) fragment.append(document.createTextNode(leading));
-        appendStrong(fragment, cause);
-      } else {
-        fragment.append(document.createTextNode(text.slice(start, end)));
-      }
-      index = end;
-    } else {
-      appendStrong(fragment, next.text);
-      index = next.index + next.text.length;
-    }
-  }
-  return fragment;
-}
-
-function sentenceEnd(text: string, start: number): number {
-  for (let index = start; index < text.length; index += 1) {
-    if ("。；;\n".includes(text[index] ?? "")) return index + 1;
-  }
-  return text.length;
-}
-
-function appendStrong(fragment: DocumentFragment, text: string): void {
-  const strong = document.createElement("strong");
-  strong.className = "report-cause-emphasis";
-  strong.textContent = text;
-  fragment.append(strong);
-}
-
-function isMetricOnlyText(text: string): boolean {
-  return /(?:本期日均|正常上限|超标\d+(?:\.\d+)?%|超标比例)/.test(text) && !reportReasonPattern().test(text);
-}
-
-function normalizeReportEmphasis(root: DocumentFragment): void {
-  root.querySelectorAll<HTMLElement>("strong,b").forEach((element) => {
-    const text = normalizeReportText(element.textContent ?? "");
-    const hasReason = reportReasonPattern().test(text);
-    const isMetricOnly = isMetricOnlyText(text) && !hasReason;
-    const wrapsCauseLabel = /本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因[：:]/.test(text);
-    if (!isMetricOnly && !wrapsCauseLabel) return;
-    element.replaceWith(document.createTextNode(text));
-  });
-}
-
-function normalizeReportText(value: string): string {
-  return value.replace(/[\u00a0\u3000]/g, " ").replace(/[ \t\v\f]+/g, " ").trim();
-}
-
-function normalizeReportHtmlWhitespace(value: string): string {
+function stripTitleMarks(value: string): string {
   return value
-    .replace(/&nbsp;/gi, " ")
-    .replace(/[\u00a0\u3000]/g, " ")
-    .replace(/[ \t\v\f]{2,}/g, " ")
-    .replace(/(?:<br\s*\/?>\s*){2,}/gi, "<br>");
-}
-
-function sanitizeEditableHtml(html: string): string {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  template.content
-    .querySelectorAll("script,style,iframe,object,embed,link,meta")
-    .forEach((element) => element.remove());
-  template.content.querySelectorAll<HTMLElement>("*").forEach((element) => {
-    Array.from(element.attributes).forEach((attribute) => {
-      if (attribute.name.toLowerCase().startsWith("on")) {
-        element.removeAttribute(attribute.name);
-      }
-    });
-    for (const attributeName of ["src", "href"]) {
-      const value = element.getAttribute(attributeName);
-      if (value?.trim().toLowerCase().startsWith("javascript:")) {
-        element.removeAttribute(attributeName);
-      }
-    }
-  });
-  return template.innerHTML;
-}
-
-function updateBlock(block: DraftBlock, content: string): void {
-  if (draft.value === null) return;
-  const target = draft.value.blocks.find((item) => item.id === block.id);
-  if (target !== undefined) target.content = content;
-}
-
-function editableContentForBlock(block: DraftBlock, element: HTMLElement): string {
-  if (block.type === "HEADING") {
-    return element.querySelector("[data-file-id]") === null
-      ? element.innerText.trim()
-      : element.innerHTML.trim();
-  }
-  return element.innerHTML.trim();
-}
-
-function syncReportContentFromDom(): void {
-  if (draft.value === null) return;
-  const root = reportEditorRoot();
-  if (root !== null) prepareInlineImagesForPersistence(root);
-  if (htmlReportBlock.value !== null && htmlReportRef.value !== undefined) {
-    updateBlock(htmlReportBlock.value, htmlReportRef.value.innerHTML.trim());
-    return;
-  }
-  if (reportPaperRef.value === undefined) return;
-  reportPaperRef.value
-    .querySelectorAll<HTMLElement>("[data-block-id]")
-    .forEach((element) => {
-      const id = element.dataset.blockId;
-      const block = draft.value?.blocks.find((item) => item.id === id);
-      if (block !== undefined) {
-        updateBlock(block, editableContentForBlock(block, element));
-      }
-    });
+    .trim()
+    .replace(/^《+\s*/, "")
+    .replace(/\s*》+$/, "");
 }
 
 function applySavedDraftMetadata(saved: ReportDraft): void {
@@ -419,32 +280,81 @@ function applySavedDraftMetadata(saved: ReportDraft): void {
   draft.value.entityVersion = saved.entityVersion;
 }
 
-async function saveDraft(
-  showSuccess = false,
-  preserveEditorDom = false,
-): Promise<boolean> {
-  if (draft.value === null || !draftEditable.value) return false;
-  if (saveInFlight !== null) return saveInFlight;
-  syncReportContentFromDom();
+function applyRemoteDraftMetadata(loaded: ReportDraft): void {
+  if (draft.value === null || draft.value.id !== loaded.id) return;
+  draft.value.status = loaded.status;
+  draft.value.analysisStatus = loaded.analysisStatus;
+  draft.value.analysisTaskId = loaded.analysisTaskId;
+  draft.value.analysisErrorCode = loaded.analysisErrorCode;
+  draft.value.analysisSubmittedAt = loaded.analysisSubmittedAt;
+  draft.value.analysisCompletedAt = loaded.analysisCompletedAt;
+  draft.value.messages = loaded.messages;
+  draft.value.currentVersion = loaded.currentVersion;
+  draft.value.updatedAt = loaded.updatedAt;
+  draft.value.formalReportId = loaded.formalReportId;
+  draft.value.entityVersion = loaded.entityVersion;
+}
+
+function clearAutoSaveTimer(): void {
+  if (autoSaveTimer !== null) {
+    window.clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+  }
+}
+
+function markDraftDirty(scheduleSave = true): void {
+  if (draft.value === null || !draftEditable.value) return;
+  draftDirty = true;
+  syncDraftFromEditor();
+  if (saveInFlight !== null) saveQueued = true;
+  if (!scheduleSave) return;
+  clearAutoSaveTimer();
+  autoSaveTimer = window.setTimeout(() => {
+    autoSaveTimer = null;
+    void flushDraftSave(false);
+  }, AUTO_SAVE_DELAY_MS);
+}
+
+async function saveDraftLoop(showSuccess: boolean): Promise<boolean> {
   saving.value = true;
-  const operation = (async (): Promise<boolean> => {
-    try {
+  let shouldShowSuccess = showSuccess;
+  try {
+    do {
+      saveQueued = false;
       if (draft.value === null) return false;
+      syncDraftFromEditor();
+      draftDirty = false;
       const saved = await businessApi.drafts.save(draft.value.id, draft.value);
-      if (preserveEditorDom) applySavedDraftMetadata(saved);
-      else draft.value = saved;
-      if (showSuccess) ElMessage.success("报告内容已保存。");
-      return true;
-    } catch (error) {
-      await renderMissingInlineImages();
-      ElMessage.error(
-        error instanceof Error ? error.message : "报告内容保存失败",
-      );
-      return false;
-    } finally {
-      saving.value = false;
-    }
-  })();
+      applySavedDraftMetadata(saved);
+      if (shouldShowSuccess) ElMessage.success("报告内容已保存。");
+      shouldShowSuccess = false;
+    } while (saveQueued || draftDirty);
+    return true;
+  } catch (error) {
+    ElMessage.error(
+      error instanceof Error ? error.message : "报告内容保存失败",
+    );
+    return false;
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function flushDraftSave(showSuccess = false): Promise<boolean> {
+  if (draft.value === null || !draftEditable.value) {
+    draftDirty = false;
+    saveQueued = false;
+    clearAutoSaveTimer();
+    return true;
+  }
+  clearAutoSaveTimer();
+  syncDraftFromEditor();
+  if (saveInFlight !== null) {
+    if (draftDirty) saveQueued = true;
+    return saveInFlight;
+  }
+  if (!draftDirty) return true;
+  const operation = saveDraftLoop(showSuccess);
   saveInFlight = operation;
   try {
     return await operation;
@@ -453,13 +363,47 @@ async function saveDraft(
   }
 }
 
-async function handleEditorBlur(): Promise<void> {
-  await saveDraft(false, selectedInlineFigure !== null);
-}
-
 async function waitForPendingSave(): Promise<boolean> {
+  if (draftDirty || autoSaveTimer !== null) return flushDraftSave(false);
   return saveInFlight === null ? true : saveInFlight;
 }
+
+function handleBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!draftDirty && saveInFlight === null && autoSaveTimer === null) return;
+  syncDraftFromEditor();
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+async function withRemoteDraftApplication(
+  work: () => Promise<void> | void,
+): Promise<void> {
+  applyingRemoteDraft = true;
+  try {
+    await work();
+  } finally {
+    applyingRemoteDraft = false;
+  }
+}
+
+async function loadEditorContentFromDraft(loaded: ReportDraft): Promise<void> {
+  await withRemoteDraftApplication(async () => {
+    setEditorContentFromDraft(loaded);
+    await nextTick();
+  });
+}
+
+/*
+ * Expose a tiny test surface so unit tests can drive the Tiptap editors without
+ * depending on DOM selection details.
+ */
+defineExpose({
+  __testing: {
+    sectionEditors,
+    applyRemoteDraft,
+    flushDraftSave,
+  },
+});
 
 function stopAnalysisPolling(): void {
   if (analysisPollTimer !== null) {
@@ -496,10 +440,11 @@ async function pollAnalysisDraft(): Promise<void> {
   try {
     const loaded = await businessApi.drafts.get(draftId);
     if (loaded === undefined || draft.value?.id !== draftId) return;
-    const shouldRefreshEditor =
-      previousStatus === "AI_ANALYZING" &&
-      ["AI_COMPLETED", "AI_FAILED"].includes(loaded.status);
-    await applyRemoteDraft(loaded, shouldRefreshEditor);
+    await applyRemoteDraft(
+      loaded,
+      !draftDirty && saveInFlight === null,
+      draftId,
+    );
     if (previousStatus === "AI_ANALYZING" && loaded.status === "AI_COMPLETED") {
       ElMessage.success("AI分析完成，待人工确认。");
     } else if (
@@ -509,7 +454,7 @@ async function pollAnalysisDraft(): Promise<void> {
       ElMessage.error(analysisErrorMessage(loaded.analysisErrorCode));
     }
   } catch {
-    // Keep polling quietly; the next successful request will reconcile state.
+    // Keep polling quietly; the next successful request reconciles state.
   } finally {
     analysisPolling = false;
     syncAnalysisPolling();
@@ -517,12 +462,14 @@ async function pollAnalysisDraft(): Promise<void> {
 }
 
 async function load(): Promise<void> {
+  resetTransientState();
   loading.value = true;
   errorMessage.value = "";
   try {
-    const loaded = await businessApi.drafts.get(String(route.params.draftId));
+    const draftId = String(route.params.draftId);
+    const loaded = await businessApi.drafts.get(draftId);
     if (loaded === undefined) throw new Error("草稿不存在或无权访问");
-    await applyRemoteDraft(loaded, true);
+    await applyRemoteDraft(loaded, true, draftId);
     assistantVisible.value = true;
     if (route.query.action === "image") {
       ElMessage.info("可直接在左侧报告正文任意位置粘贴图片，再点击“AI分析”。");
@@ -536,16 +483,46 @@ async function load(): Promise<void> {
   syncAnalysisPolling();
 }
 
+function resetTransientState(): void {
+  stopAnalysisPolling();
+  clearAutoSaveTimer();
+  analysisPolling = false;
+  draftDirty = false;
+  saveQueued = false;
+  selectedFigure.value = null;
+  resizeState = null;
+  assistantError.value = "";
+  sending.value = false;
+  chatSending.value = false;
+  analyzingImages.value = false;
+  uploadingImages.value = false;
+  imageUpdating.value = false;
+}
+
 async function applyRemoteDraft(
   loaded: ReportDraft,
   refreshEditor: boolean,
+  expectedDraftId = loaded.id,
 ): Promise<void> {
-  draft.value = loaded;
-  if (refreshEditor) {
-    editorRenderKey.value += 1;
-    await nextTick();
+  if (
+    loaded.id !== expectedDraftId ||
+    String(route.params.draftId ?? "") !== expectedDraftId
+  ) {
+    return;
   }
-  await renderMissingInlineImages();
+  const keepLocalEditor =
+    refreshEditor &&
+    (draftDirty || saveInFlight !== null || autoSaveTimer !== null);
+  if (keepLocalEditor && draft.value !== null) {
+    applyRemoteDraftMetadata(loaded);
+    return;
+  }
+  draft.value = loaded;
+  draftDirty = false;
+  saveQueued = false;
+  if (refreshEditor) {
+    await loadEditorContentFromDraft(loaded);
+  }
 }
 
 async function send(
@@ -561,15 +538,14 @@ async function send(
   assistantVisible.value = true;
   assistantError.value = "";
   sending.value = true;
-  if (intent === "IMAGE_ANALYSIS") {
-    analyzingImages.value = true;
-  } else {
-    chatSending.value = true;
-  }
+  if (intent === "IMAGE_ANALYSIS") analyzingImages.value = true;
+  else chatSending.value = true;
+
   try {
-    if (!(await waitForPendingSave())) return false;
+    if (!(await flushDraftSave(false))) return false;
+    const draftId = draft.value.id;
     const loaded = await businessApi.drafts.sendMessage(
-      draft.value.id,
+      draftId,
       {
         intent,
         content: content || "分析现场图片，补充问题原因、整改建议和报告结论。",
@@ -578,13 +554,10 @@ async function send(
       },
       draft.value.entityVersion,
     );
-    await applyRemoteDraft(loaded, intent !== "IMAGE_ANALYSIS");
+    await applyRemoteDraft(loaded, intent !== "IMAGE_ANALYSIS", draftId);
     syncAnalysisPolling();
     prompt.value = "";
     if (intent !== "IMAGE_ANALYSIS") assistantIntent.value = "AUTO";
-    pendingImageIds.value = pendingImageIds.value.filter(
-      (id) => !imageFileIds.includes(id),
-    );
     return true;
   } catch (error) {
     const message =
@@ -603,457 +576,126 @@ async function send(
   }
 }
 
-async function pasteImages(event: ClipboardEvent): Promise<void> {
+async function handleEditorPaste(
+  event: ClipboardEvent,
+  sectionKey: RichEditorSectionKey,
+): Promise<void> {
+  if (!draftEditable.value || draft.value === null) return;
   const files = Array.from(event.clipboardData?.items ?? [])
     .filter((item) => item.type.startsWith("image/"))
     .map((item) => item.getAsFile())
     .filter((file): file is File => file !== null);
   if (files.length === 0) return;
   event.preventDefault();
-  const editor = event.currentTarget as HTMLElement;
-  rememberEditorRange();
-  const pastedSizes = clipboardImageDisplaySizes(event.clipboardData);
-  const markers = insertUploadMarkers(editor, files.length);
-  let uploadedCount = 0;
-  let lastInserted: Node | null = markers.at(-1) ?? null;
-  const insertedFigures: HTMLElement[] = [];
-  try {
-    for (let index = 0; index < files.length; index++) {
-      const marker = markers[index];
-      const file = files[index];
-      if (marker === undefined || file === undefined) continue;
-      try {
-        const [fileId] = await addImages([file]);
-        if (fileId === undefined) {
-          marker.remove();
-          continue;
-        }
-        const inlineImage = createInlineImage(fileId, pastedSizes[index]);
-        if (files.length > 1) {
-          marker.replaceWith(inlineImage);
-          lastInserted = inlineImage.closest(".inline-image-row") ?? inlineImage;
-        } else {
-          const targetRow = singlePasteTargetRow(marker);
-          if (targetRow !== null) {
-            marker.remove();
-            targetRow.append(inlineImage);
-            fitInlineImageRow(targetRow, editor);
-            lastInserted = targetRow;
-          } else {
-            const spacer = createInlineImageCaretText();
-            marker.replaceWith(inlineImage, spacer);
-            lastInserted = spacer;
-          }
-        }
-        await waitForInlineImageDisplaySize(inlineImage);
-        insertedFigures.push(inlineImage);
-        uploadedCount++;
-      } catch (error) {
-        marker.remove();
-        ElMessage.error(
-          error instanceof Error ? error.message : "粘贴图片失败",
-        );
-      }
-    }
-    if (uploadedCount > 0) {
-      const row = insertedFigures[0]?.closest<HTMLElement>(".inline-image-row");
-      if (row !== null && row !== undefined) fitInlineImageRow(row, editor);
-      const caretTarget = connectedCaretTarget(lastInserted, insertedFigures);
-      const spacer =
-        caretTarget === null ? null : placePersistentCaretAfter(caretTarget);
-      syncReportContentFromDom();
-      if (await saveDraft(false, true)) await syncInlineImageOrder(true);
-      restoreCaretAfterPaste(spacer, caretTarget, insertedFigures);
-      ElMessage.success(
-        `已在光标位置粘贴 ${uploadedCount} 张图片，可继续编辑文字。`,
-      );
-    }
-  } finally {
-    markers.forEach((marker) => marker.remove());
+  const editorInstance = sectionEditors[sectionKey].value;
+  if (editorInstance == null) return;
+  const sizes = await pastedImageDisplaySizes(files, editorInstance);
+  const uploaded = await addImages(files);
+  if (uploaded.length === 0) return;
+  insertImageNodes(editorInstance, uploaded, sizes);
+  markImagesReady();
+  markDraftDirty(false);
+  if (await flushDraftSave(false)) {
+    ElMessage.success(`已在光标位置粘贴 ${uploaded.length} 张图片。`);
   }
 }
 
-function insertUploadMarkers(
-  editor: HTMLElement,
-  count: number,
-): HTMLElement[] {
-  const range = editorRange(editor);
-  range.deleteContents();
-  placeCaretAtRange(range);
-  lastEditorRange = range.cloneRange();
-  const markers: HTMLElement[] = [];
-  const row = count > 1 ? createInlineImageRow() : null;
-  for (let index = 0; index < count; index++) {
-    const marker = document.createElement("span");
-    marker.className = "inline-image-uploading";
-    marker.contentEditable = "false";
-    marker.textContent = "图片上传中...";
-    if (row !== null) {
-      row.append(marker);
-      if (index === 0) {
-        range.insertNode(row);
-        range.setStartAfter(row);
-      }
-    } else {
-      range.insertNode(marker);
-      range.setStartAfter(marker);
-    }
-    range.collapse(true);
-    markers.push(marker);
-  }
-  placeCaretAtRange(range);
-  lastEditorRange = range.cloneRange();
-  return markers;
-}
-
-function singlePasteTargetRow(marker: HTMLElement): HTMLElement | null {
-  const parentRow = marker.closest<HTMLElement>(".inline-image-row");
-  if (parentRow !== null) return parentRow;
-  const previous = previousMeaningfulSibling(marker);
-  if (previous instanceof HTMLElement && previous.classList.contains("inline-image-row")) {
-    return previous;
-  }
-  const range = lastEditorRange;
-  if (range !== null) {
-    const container =
-      range.startContainer instanceof HTMLElement
-        ? range.startContainer
-        : range.startContainer.parentElement;
-    const row = container?.closest<HTMLElement>(".inline-image-row");
-    if (row !== null && row !== undefined) return row;
-  }
-  return null;
-}
-
-function previousMeaningfulSibling(node: Node): Node | null {
-  let previous = node.previousSibling;
-  while (
-    previous !== null &&
-    previous.nodeType === Node.TEXT_NODE &&
-    (previous.textContent ?? "").trim() === ""
-  ) {
-    previous = previous.previousSibling;
-  }
-  return previous;
-}
-
-function editorRange(editor: HTMLElement): Range {
-  const selection = window.getSelection();
-  if (
-    selection !== null &&
-    selection.rangeCount > 0 &&
-    editor.contains(selection.getRangeAt(0).commonAncestorContainer)
-  ) {
-    return selection.getRangeAt(0).cloneRange();
-  }
-  if (
-    lastEditorRange !== null &&
-    editor.contains(lastEditorRange.commonAncestorContainer)
-  ) {
-    return lastEditorRange.cloneRange();
-  }
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.collapse(false);
-  return range;
-}
-
-function rememberEditorRange(): void {
-  const root = reportEditorRoot();
-  const selection = window.getSelection();
-  if (root === null || selection === null || selection.rangeCount === 0) {
-    return;
-  }
-  const range = selection.getRangeAt(0);
-  if (root.contains(range.commonAncestorContainer)) {
-    lastEditorRange = range.cloneRange();
-  }
-}
-
-function placeCaretAtRange(range: Range): void {
-  const selection = window.getSelection();
-  if (selection === null) return;
-  selection.removeAllRanges();
-  selection.addRange(range);
-  lastEditorRange = range.cloneRange();
-}
-
-function createInlineImage(
-  fileId: string,
-  displaySize?: InlineImageDisplaySize,
-): HTMLElement {
-  const figure = document.createElement("figure");
-  figure.className = "inline-report-image";
-  figure.dataset.fileId = fileId;
-  figure.contentEditable = "false";
-  figure.draggable = false;
-  const image = document.createElement("img");
-  image.src = imageUrl(fileId);
-  image.alt = "稽核证据图片";
-  image.dataset.fileId = fileId;
-  image.draggable = false;
-  attachImageFallback(image);
-  figure.append(image);
-  if (displaySize !== undefined) {
-    applyInlineImageDisplaySize(figure, image, displaySize);
-  }
-  image.addEventListener(
-    "load",
-    () => {
-      captureInlineImageDisplaySize(figure, image);
-    },
-    { once: true },
-  );
-  return figure;
-}
-
-function createInlineImageRow(): HTMLElement {
-  const row = document.createElement("div");
-  row.className = "inline-image-row";
-  row.dataset.imageGroupId =
-    globalThis.crypto?.randomUUID?.() ??
-    `image-group-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return row;
-}
-
-function clipboardImageDisplaySizes(
-  data: DataTransfer | null,
-): Array<InlineImageDisplaySize | undefined> {
-  const html = data?.getData("text/html") ?? "";
-  if (!html) return [];
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  return Array.from(template.content.querySelectorAll<HTMLImageElement>("img"))
-    .map(imageDisplaySizeFromElement);
-}
-
-function imageDisplaySizeFromElement(
-  image: HTMLImageElement,
-): InlineImageDisplaySize | undefined {
-  const attrWidth = parseCssPixelValue(image.getAttribute("width"));
-  const attrHeight = parseCssPixelValue(image.getAttribute("height"));
-  const styleWidth = parseCssPixelValue(image.style.width);
-  const styleHeight = parseCssPixelValue(image.style.height);
-  const width = styleWidth ?? attrWidth;
-  const height = styleHeight ?? attrHeight;
-  if (width !== undefined && height !== undefined) {
-    return { width, height };
-  }
-  if (width !== undefined || height !== undefined) {
-    return undefined;
-  }
-  return undefined;
-}
-
-function parseCssPixelValue(value: string | null): number | undefined {
-  if (value === null || value.trim().length === 0) return undefined;
-  const trimmed = value.trim().toLowerCase();
-  const match = trimmed.match(/^([0-9]+(?:\.[0-9]+)?)(px|pt|in|cm|mm)?$/);
-  if (match === null) return undefined;
-  const numeric = Number(match[1]);
-  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
-  const unit = match[2] ?? "px";
-  if (unit === "pt") return numeric / 0.75;
-  if (unit === "in") return numeric * 96;
-  if (unit === "cm") return (numeric / 2.54) * 96;
-  if (unit === "mm") return (numeric / 25.4) * 96;
-  return numeric;
-}
-
-function applyInlineImageDisplaySize(
-  figure: HTMLElement,
-  image: HTMLImageElement,
-  size: InlineImageDisplaySize,
-): void {
-  const width = Math.round(size.width * 100) / 100;
-  const height = Math.round(imageDisplayHeightForWidth(image, width, size.height) * 100) / 100;
-  if (width <= 0 || height <= 0) return;
-  figure.dataset.displayWidth = String(width);
-  figure.dataset.displayHeight = String(height);
-  image.dataset.displayWidth = String(width);
-  image.dataset.displayHeight = String(height);
-  image.setAttribute("width", String(Math.round(width)));
-  image.setAttribute("height", String(Math.round(height)));
-  image.style.width = `${width}px`;
-  image.style.height = `${height}px`;
-}
-
-function imageDisplayHeightForWidth(
-  image: HTMLImageElement,
-  width: number,
-  fallbackHeight: number,
-): number {
-  if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-    return (width * image.naturalHeight) / image.naturalWidth;
-  }
-  return fallbackHeight;
-}
-
-function captureInlineImageDisplaySize(
-  figure: HTMLElement,
-  image: HTMLImageElement,
-): void {
-  const rect = image.getBoundingClientRect();
-  if (rect.width > 0 && (rect.height > 0 || image.naturalHeight > 0)) {
-    applyInlineImageDisplaySize(figure, image, {
-      width: rect.width,
-      height: rect.height > 0 ? rect.height : image.naturalHeight,
-    });
-  }
-}
-
-function waitForInlineImageDisplaySize(figure: HTMLElement): Promise<void> {
-  const image = figure.querySelector<HTMLImageElement>("img");
-  if (image === null) return Promise.resolve();
-  if (image.complete && image.naturalWidth > 0) {
-    captureInlineImageDisplaySize(figure, image);
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    const finish = (): void => {
-      window.clearTimeout(timer);
-      image.removeEventListener("load", onLoad);
-      image.removeEventListener("error", onError);
-      if (image.naturalWidth > 0) captureInlineImageDisplaySize(figure, image);
-      resolve();
-    };
-    const onLoad = (): void => finish();
-    const onError = (): void => finish();
-    const timer = window.setTimeout(finish, 2000);
-    image.addEventListener("load", onLoad, { once: true });
-    image.addEventListener("error", onError, { once: true });
-  });
-}
-
-function fitInlineImageRow(row: HTMLElement, editor: HTMLElement): void {
-  const figures = Array.from(
-    row.querySelectorAll<HTMLElement>("figure[data-file-id]"),
-  );
-  if (figures.length < 2) return;
-  const availableWidth = inlineImageRowAvailableWidth(row, editor);
-  if (availableWidth <= MIN_INLINE_ROW_IMAGE_WIDTH) return;
-  const sizes = figures
-    .map((figure) => {
-      const image = figure.querySelector<HTMLImageElement>("img");
-      if (image === null) return null;
-      return { figure, image, size: currentInlineImageSize(figure, image) };
-    })
-    .filter(
-      (
-        value,
-      ): value is {
-        figure: HTMLElement;
-        image: HTMLImageElement;
-        size: InlineImageDisplaySize;
-      } => value !== null,
-    );
-  if (sizes.length < 2) return;
-  const totalGap = INLINE_IMAGE_ROW_GAP * (sizes.length - 1);
-  const imageWidthBudget = Math.max(MIN_INLINE_ROW_IMAGE_WIDTH, availableWidth - totalGap);
-  const currentTotalWidth = sizes.reduce((sum, item) => sum + item.size.width, 0);
-  if (currentTotalWidth <= imageWidthBudget) return;
-  const scale = imageWidthBudget / currentTotalWidth;
-  sizes.forEach(({ figure, image, size }) => {
-    const targetWidth = Math.max(
-      MIN_INLINE_ROW_IMAGE_WIDTH,
-      Math.floor(size.width * scale),
-    );
-    applyInlineImageDisplaySize(figure, image, {
-      width: targetWidth,
-      height: size.height,
-    });
-  });
-}
-
-function inlineImageRowAvailableWidth(row: HTMLElement, editor: HTMLElement): number {
-  const rowWidth = row.getBoundingClientRect().width;
-  if (rowWidth > 0) return rowWidth;
-  return Math.max(0, editor.clientWidth - 32);
-}
-
-function currentInlineImageSize(
-  figure: HTMLElement,
-  image: HTMLImageElement,
-): InlineImageDisplaySize {
-  const rect = image.getBoundingClientRect();
-  const width =
-    firstPositiveNumber(
-      parseCssPixelValue(figure.dataset.displayWidth ?? null),
-      parseCssPixelValue(image.dataset.displayWidth ?? null),
-      parseCssPixelValue(image.getAttribute("width")),
-      parseCssPixelValue(image.style.width),
-      rect.width,
-      image.naturalWidth,
-    ) ??
-    MIN_INLINE_ROW_IMAGE_WIDTH;
-  const height =
-    firstPositiveNumber(
-      parseCssPixelValue(figure.dataset.displayHeight ?? null),
-      parseCssPixelValue(image.dataset.displayHeight ?? null),
-      parseCssPixelValue(image.getAttribute("height")),
-      parseCssPixelValue(image.style.height),
-      rect.height,
-      image.naturalHeight,
-    ) ??
-    width;
+function imageFigureNode(fileId: string, size: InlineImageSize | undefined) {
   return {
-    width: Math.max(1, width),
-    height: Math.max(1, height),
+    type: "reportImageFigure",
+    attrs: {
+      fileId,
+      displayWidth: size === undefined ? null : String(Math.round(size.width)),
+      displayHeight:
+        size === undefined ? null : String(Math.round(size.height)),
+    },
   };
 }
 
-function firstPositiveNumber(...values: Array<number | undefined>): number | undefined {
-  return values.find((value) => value !== undefined && Number.isFinite(value) && value > 0);
+function insertImageNodes(
+  editorInstance: Editor,
+  fileIds: string[],
+  sizes: InlineImageSize[],
+): void {
+  const figures = fileIds.map((fileId, index) =>
+    imageFigureNode(fileId, sizes[index]),
+  );
+  if (figures.length === 0) return;
+  const maxWidth = editorContentMaxWidth(editorInstance);
+  let lineWidth = currentImageLineWidth(editorInstance);
+  const content = figures.flatMap((figure, index) => {
+    const width = numericAttr(figure.attrs.displayWidth) ?? maxWidth;
+    const shouldWrap =
+      (lineWidth > 0 && lineWidth + INLINE_IMAGE_GAP + width > maxWidth) ||
+      (index > 0 && lineWidth === 0);
+    lineWidth =
+      (shouldWrap ? 0 : lineWidth) +
+      (shouldWrap || lineWidth === 0 ? 0 : INLINE_IMAGE_GAP) +
+      width;
+    return shouldWrap ? [{ type: "hardBreak" }, figure] : [figure];
+  });
+
+  editorInstance
+    .chain()
+    .focus()
+    .insertContent(content.length === 1 ? content[0]! : content)
+    .run();
+  setSelectionAfterImage(editorInstance, fileIds.at(-1) ?? "");
 }
 
-function createInlineImageCaretText(): Text {
-  return document.createTextNode(" ");
-}
-
-function placeCaretAfter(node: Node): void {
-  const selection = window.getSelection();
-  if (selection === null) return;
-  const range = document.createRange();
-  range.setStartAfter(node);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  lastEditorRange = range.cloneRange();
-}
-
-function placePersistentCaretAfter(node: Node): Text {
-  const spacer = createInlineImageCaretText();
-  node.parentNode?.insertBefore(spacer, node.nextSibling);
-  placeCaretAfter(spacer);
-  return spacer;
-}
-
-function connectedCaretTarget(
-  preferred: Node | null,
-  insertedFigures: HTMLElement[],
-): Node | null {
-  if (preferred !== null && preferred.isConnected) return preferred;
-  for (let index = insertedFigures.length - 1; index >= 0; index--) {
-    const figure = insertedFigures[index];
-    if (figure?.isConnected) {
-      return figure.closest(".inline-image-row") ?? figure;
+function currentImageLineWidth(editorInstance: Editor): number {
+  const { $from } = editorInstance.state.selection;
+  const parent = $from.parent as ExistingReportNode;
+  if (
+    parent.type.name !== "paragraph" ||
+    parent.childCount === undefined ||
+    parent.child === undefined
+  ) {
+    return 0;
+  }
+  const widths: number[] = [];
+  for (let index = $from.index() - 1; index >= 0; index -= 1) {
+    const child = parent.child(index);
+    if (child.type.name === "hardBreak") break;
+    if (child.type.name === "reportImageFigure") {
+      widths.unshift(numericAttr(child.attrs.displayWidth) ?? A4_CONTENT_WIDTH);
     }
   }
-  return null;
+  return widths.reduce(
+    (total, width, index) =>
+      total + width + (index === 0 ? 0 : INLINE_IMAGE_GAP),
+    0,
+  );
 }
 
-function restoreCaretAfterPaste(
-  spacer: Text | null,
-  target: Node | null,
-  insertedFigures: HTMLElement[],
-): void {
-  if (spacer !== null && spacer.isConnected) {
-    placeCaretAfter(spacer);
-    return;
-  }
-  const fallback = connectedCaretTarget(target, insertedFigures);
-  if (fallback !== null) {
-    placePersistentCaretAfter(fallback);
+function findNodeByFileId(
+  editorInstance: Editor,
+  fileId: string,
+): { node: ExistingReportNode; pos: number } | null {
+  if (!fileId) return null;
+  let matched: { node: ExistingReportNode; pos: number } | null = null;
+  (editorInstance.state.doc as unknown as ReportEditorDoc).descendants(
+    (node, pos) => {
+      if (matched !== null) return false;
+      if (
+        node.type.name === "reportImageFigure" &&
+        node.attrs.fileId === fileId
+      ) {
+        matched = { node, pos };
+        return false;
+      }
+      return true;
+    },
+  );
+  return matched;
+}
+
+function setSelectionAfterImage(editorInstance: Editor, fileId: string): void {
+  if (!fileId) return;
+  const match = findNodeByFileId(editorInstance, fileId);
+  if (match !== null) {
+    editorInstance.commands.setTextSelection(match.pos + match.node.nodeSize);
+    editorInstance.view.focus();
   }
 }
 
@@ -1079,9 +721,6 @@ async function addImages(files: File[]): Promise<string[]> {
       if (!draft.value.imageFileIds.includes(result.fileId)) {
         draft.value.imageFileIds.push(result.fileId);
       }
-      if (!pendingImageIds.value.includes(result.fileId)) {
-        pendingImageIds.value.push(result.fileId);
-      }
       uploadedIds.push(result.fileId);
     }
     return uploadedIds;
@@ -1090,16 +729,252 @@ async function addImages(files: File[]): Promise<string[]> {
   }
 }
 
+async function pastedImageDisplaySizes(
+  files: File[],
+  editorInstance: Editor,
+): Promise<InlineImageSize[]> {
+  const maxWidth = editorContentMaxWidth(editorInstance);
+  const sizes = await Promise.all(files.map(imageFileDisplaySize));
+  return sizes.map((size) => {
+    const source = size ?? {
+      width: DEFAULT_PASTED_IMAGE_WIDTH,
+      height: DEFAULT_PASTED_IMAGE_HEIGHT,
+    };
+    const width = Math.min(source.width, maxWidth);
+    return {
+      width,
+      height: (width * source.height) / Math.max(1, source.width),
+    };
+  });
+}
+
+function imageFileDisplaySize(
+  file: File,
+): Promise<InlineImageSize | undefined> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    const finish = (size: InlineImageSize | undefined): void => {
+      URL.revokeObjectURL(url);
+      resolve(size);
+    };
+    image.onload = () => {
+      finish(
+        image.naturalWidth > 0 && image.naturalHeight > 0
+          ? { width: image.naturalWidth, height: image.naturalHeight }
+          : undefined,
+      );
+    };
+    image.onerror = () => finish(undefined);
+    image.src = url;
+  });
+}
+
+function editorContentMaxWidth(editorInstance: Editor): number {
+  const editorElement = editorInstance.view.dom as HTMLElement;
+  return Math.min(
+    A4_CONTENT_WIDTH,
+    Math.max(1, (editorElement.clientWidth || A4_CONTENT_WIDTH) - 32),
+  );
+}
+
+function numericAttr(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number.parseFloat(String(value));
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function handleEditorClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    clearSelectedFigure();
+    return;
+  }
+  const figure = target.closest<HTMLElement>(".inline-report-image");
+  if (figure === null) {
+    clearSelectedFigure();
+    return;
+  }
+  selectFigure(figure);
+}
+
+function selectFigure(figure: HTMLElement): void {
+  clearSelectedFigure();
+  selectedFigure.value = figure;
+  figure.classList.add("is-selected");
+  for (const name of ["nw", "ne", "se", "sw"]) {
+    const handle = document.createElement("span");
+    handle.className = `inline-image-resize-handle ${name}`;
+    handle.dataset.resizeHandle = name;
+    const position = resizeHandlePosition(figure, name);
+    handle.style.left = `${position.left}px`;
+    handle.style.top = `${position.top}px`;
+    document.body.append(handle);
+  }
+}
+
+function clearSelectedFigure(): void {
+  selectedFigure.value?.classList.remove("is-selected");
+  document
+    .querySelectorAll(".inline-image-resize-handle")
+    .forEach((handle) => handle.remove());
+  selectedFigure.value = null;
+}
+
+function resizeHandlePosition(
+  figure: HTMLElement,
+  name: string,
+): { left: number; top: number } {
+  const rect = figure.getBoundingClientRect();
+  const horizontal = name.includes("w") ? rect.left : rect.right;
+  const vertical = name.includes("n") ? rect.top : rect.bottom;
+  return {
+    left: horizontal + window.scrollX - 4,
+    top: vertical + window.scrollY - 4,
+  };
+}
+
+function startResize(event: PointerEvent): void {
+  if (!draftEditable.value) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const handle = target.closest<HTMLElement>(".inline-image-resize-handle");
+  const figure = handle === null ? null : selectedFigure.value;
+  if (handle === null || figure === null) return;
+  const image = imageElementForFigure(figure);
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = image.getBoundingClientRect();
+  resizeState = {
+    figure,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startWidth: Math.max(1, rect.width),
+    aspectRatio: Math.max(0.01, rect.width / Math.max(1, rect.height)),
+    direction: handle.dataset.resizeHandle?.includes("w") ? -1 : 1,
+  };
+  window.addEventListener("pointermove", moveResize);
+  window.addEventListener("pointerup", finishResize);
+  window.addEventListener("pointercancel", cancelResize);
+  figure.classList.add("is-resizing");
+}
+
+function moveResize(event: PointerEvent): void {
+  const state = resizeState;
+  if (state === null || state.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  const delta = (event.clientX - state.startX) * state.direction;
+  const width = Math.min(
+    A4_CONTENT_WIDTH,
+    Math.max(80, state.startWidth + delta),
+  );
+  const height = width / state.aspectRatio;
+  applyFigureDisplaySize(state.figure, { width, height });
+}
+
+async function finishResize(event: PointerEvent): Promise<void> {
+  const state = resizeState;
+  if (state === null || state.pointerId !== event.pointerId) return;
+  resizeState = null;
+  window.removeEventListener("pointermove", moveResize);
+  window.removeEventListener("pointerup", finishResize);
+  window.removeEventListener("pointercancel", cancelResize);
+  state.figure.classList.remove("is-resizing");
+  updateFigureNodeAttrs(state.figure);
+  markDraftDirty(false);
+  await flushDraftSave(false);
+}
+
+function cancelResize(event: PointerEvent): void {
+  const state = resizeState;
+  if (state === null || state.pointerId !== event.pointerId) return;
+  resizeState = null;
+  window.removeEventListener("pointermove", moveResize);
+  window.removeEventListener("pointerup", finishResize);
+  window.removeEventListener("pointercancel", cancelResize);
+  state.figure.classList.remove("is-resizing");
+}
+
+function applyFigureDisplaySize(
+  figure: HTMLElement,
+  size: InlineImageSize,
+): void {
+  const image = imageElementForFigure(figure);
+  const width = Math.round(size.width * 100) / 100;
+  const height = Math.round(size.height * 100) / 100;
+  figure.dataset.displayWidth = String(width);
+  figure.dataset.displayHeight = String(height);
+  figure.style.width = `${width}px`;
+  figure.style.minHeight = `${height}px`;
+  image.dataset.displayWidth = String(width);
+  image.dataset.displayHeight = String(height);
+  image.setAttribute("width", String(Math.round(width)));
+  image.setAttribute("height", String(Math.round(height)));
+  image.style.width = `${width}px`;
+  image.style.height = `${height}px`;
+  moveResizeHandles(figure);
+}
+
+function imageElementForFigure(figure: HTMLElement): HTMLImageElement {
+  if (figure instanceof HTMLImageElement) return figure;
+  const image = figure.querySelector<HTMLImageElement>("img");
+  if (image === null) throw new Error("图片节点缺少 img 元素");
+  return image;
+}
+
+function moveResizeHandles(figure: HTMLElement): void {
+  document
+    .querySelectorAll<HTMLElement>(".inline-image-resize-handle")
+    .forEach((handle) => {
+      const name = handle.dataset.resizeHandle ?? "";
+      const position = resizeHandlePosition(figure, name);
+      handle.style.left = `${position.left}px`;
+      handle.style.top = `${position.top}px`;
+    });
+}
+
+function updateFigureNodeAttrs(figure: HTMLElement): void {
+  const instance = editorForElement(figure);
+  if (instance == null) return;
+  try {
+    const pos = instance.view.posAtDOM(figure, 0);
+    const node = instance.state.doc.nodeAt(pos);
+    if (node?.type.name !== "reportImageFigure") return;
+    instance.view.dispatch(
+      instance.state.tr.setNodeMarkup(pos, undefined, {
+        ...node.attrs,
+        displayWidth: figure.dataset.displayWidth ?? null,
+        displayHeight: figure.dataset.displayHeight ?? null,
+      }),
+    );
+  } catch {
+    // A stale DOM node can exist briefly after ProseMirror rerenders.
+  }
+}
+
+function markImagesReady(): void {
+  document
+    .querySelectorAll<HTMLImageElement>(
+      ".report-editor-content img[data-file-id]",
+    )
+    .forEach((image) => {
+      image.onerror = () => {
+        const fileId = image.dataset.fileId;
+        if (!fileId || image.dataset.usedGenericFallback === "true") return;
+        image.dataset.usedGenericFallback = "true";
+        image.src = imageUrl(fileId);
+      };
+    });
+}
+
 async function analyzeAllImages(): Promise<void> {
   if (uploadingImages.value || imageUpdating.value) {
     ElMessage.info("图片正在添加或调整，请稍后再分析。");
     return;
   }
-  if (sending.value) return;
-  if (draft.value === null) return;
-  groupVisualInlineImageRowsForAnalysis();
-  syncReportContentFromDom();
-  let imageIds = inlineImageIdsFromDom();
+  if (sending.value || draft.value === null) return;
+  syncDraftFromEditor();
+  let imageIds = imageFileIdsFromHtml(currentEditorHtml());
   if (imageIds.length === 0) {
     ElMessage.warning("请先在左侧报告正文中粘贴图片。");
     return;
@@ -1108,20 +983,14 @@ async function analyzeAllImages(): Promise<void> {
     ElMessage.info("AI正在后台分析，请稍后再提交。");
     return;
   }
-  const saved = await saveDraft(false);
-  if (!saved) {
+  if (!(await flushDraftSave(false))) {
     assistantError.value = "当前报告尚未保存，已停止图片分析。";
     return;
   }
-  await syncInlineImageOrder();
-  imageIds = inlineImageIdsFromDom();
-  if (imageIds.length === 0) {
-    ElMessage.warning("请先在左侧报告正文中粘贴图片。");
-    return;
-  }
+  imageIds = imageFileIdsFromHtml(currentEditorHtml());
   const previousPrompt = prompt.value;
   prompt.value =
-    "按真实电费稽核说明短格式生成。排查分析必须先按我粘贴图片的原始顺序保留全部图片；仅设备图、机房图在图片正上方补充一行简短说明，设备情况要尽量写清运营商、制式、厂家/型号、设备类型和数量，不能识别的内容直接不写，不要写待核实；其他系统截图、缴费截图、标杆截图、位置点截图不加说明；本期超标原因分析必须放在排查分析最后一段、全部图片之后、整改小结之前；优先结合同报账点历史报告里的明确原因判断，不要默认写待核实；整改小结跟随本期原因变化，不固定套话；正文只写业务判断，不写同点历史、本市经验、外市参考、证据来源等内部话术；文字简洁正式，输出前检查错别字。";
+    "请结合当前图片和业务数据生成电费稽核说明。先仿写同报账点历史稽核报告；同点历史不适用时，再仿写本城市历史正式报告；仿写仍不适用时，再按通用稽核说明规则兜底。保留我粘贴图片的原始位置、单行/并排布局和顺序。";
   const succeeded = await send("IMAGE_ANALYSIS", imageIds);
   if (succeeded) {
     ElMessage.success(
@@ -1129,741 +998,6 @@ async function analyzeAllImages(): Promise<void> {
     );
   } else {
     prompt.value = previousPrompt;
-  }
-}
-
-function imageUrl(id: string): string {
-  const draftId = draft.value?.id;
-  if (draftId === undefined) return `/api/v1/files/${encodeURIComponent(id)}?inline=true`;
-  return `/api/v1/report-drafts/${encodeURIComponent(draftId)}/images/${encodeURIComponent(id)}/content?inline=true`;
-}
-
-function attachImageFallback(image: HTMLImageElement): void {
-  image.onerror = () => {
-    const fileId = image.dataset.fileId;
-    if (fileId === undefined || image.dataset.usedGenericFallback === "true") return;
-    image.dataset.usedGenericFallback = "true";
-    image.src = `/api/v1/files/${encodeURIComponent(fileId)}?inline=true`;
-  };
-}
-
-function prepareInlineImagesForPersistence(root: HTMLElement): void {
-  removeInlineImageEditorChrome(root);
-  normalizeInlineImageRows(root);
-  root
-    .querySelectorAll<HTMLImageElement>("figure[data-file-id] img[data-used-generic-fallback]")
-    .forEach((image) => delete image.dataset.usedGenericFallback);
-  root
-    .querySelectorAll<HTMLElement>("figure[data-file-id]")
-    .forEach(clearInlineImageFloatingStyles);
-  normalizeInlineImageRows(root);
-  syncInlineImageDisplaySizes(root);
-}
-
-function removeInlineImageEditorChrome(root: HTMLElement): void {
-  root
-    .querySelectorAll<HTMLElement>(
-      ".inline-image-resize-handle, .inline-image-drop-marker",
-    )
-    .forEach((element) => element.remove());
-  root
-    .querySelectorAll<HTMLElement>(".inline-report-image.is-selected")
-    .forEach((figure) => figure.classList.remove("is-selected"));
-}
-
-function syncInlineImageDisplaySizes(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>("figure[data-file-id]").forEach((figure) => {
-    const image = figure.querySelector<HTMLImageElement>("img");
-    if (image === null) return;
-    const explicitWidth =
-      parseCssPixelValue(figure.dataset.displayWidth ?? null) ??
-      parseCssPixelValue(image.dataset.displayWidth ?? null) ??
-      parseCssPixelValue(image.getAttribute("width")) ??
-      parseCssPixelValue(image.style.width);
-    const explicitHeight =
-      parseCssPixelValue(figure.dataset.displayHeight ?? null) ??
-      parseCssPixelValue(image.dataset.displayHeight ?? null) ??
-      parseCssPixelValue(image.getAttribute("height")) ??
-      parseCssPixelValue(image.style.height);
-    if (explicitWidth !== undefined && explicitHeight !== undefined) {
-      applyInlineImageDisplaySize(figure, image, {
-        width: explicitWidth,
-        height: explicitHeight,
-      });
-      return;
-    }
-    captureInlineImageDisplaySize(figure, image);
-  });
-}
-
-function normalizeInlineImageElements(root: HTMLElement): void {
-  normalizeInlineImageRows(root);
-  root.querySelectorAll<HTMLImageElement>("img[data-file-id]").forEach((image) => {
-    const fileId = image.dataset.fileId;
-    if (fileId === undefined || fileId.length === 0) return;
-    image.src = imageUrl(fileId);
-    image.alt ||= "稽核证据图片";
-    image.draggable = false;
-    attachImageFallback(image);
-    let figure = image.closest("figure");
-    if (!(figure instanceof HTMLElement)) {
-      figure = document.createElement("figure");
-      image.replaceWith(figure);
-      figure.append(image);
-    }
-    figure.dataset.fileId = fileId;
-    figure.classList.add("inline-report-image");
-    clearInlineImageFloatingStyles(figure);
-    figure.classList.remove("is-selected");
-    figure.contentEditable = "false";
-    figure.draggable = false;
-    applyExistingInlineImageDisplaySize(figure, image);
-  });
-
-  root.querySelectorAll<HTMLElement>("figure[data-file-id]").forEach((figure) => {
-    const fileId = figure.dataset.fileId;
-    if (fileId === undefined || fileId.length === 0) return;
-    figure.classList.add("inline-report-image");
-    clearInlineImageFloatingStyles(figure);
-    figure.classList.remove("is-selected");
-    figure.contentEditable = "false";
-    figure.draggable = false;
-    let image = figure.querySelector<HTMLImageElement>("img");
-    if (image === null) {
-      image = document.createElement("img");
-      figure.append(image);
-    }
-    image.src = imageUrl(fileId);
-    image.alt ||= "稽核证据图片";
-    image.dataset.fileId = fileId;
-    image.draggable = false;
-    delete image.dataset.usedGenericFallback;
-    attachImageFallback(image);
-    applyExistingInlineImageDisplaySize(figure, image);
-  });
-  normalizeInlineImageRows(root);
-  removeLegacyInlineImageSpacers(root);
-}
-
-function normalizeInlineImageRows(root: HTMLElement): void {
-  if (root.classList.contains("inline-image-row")) {
-    normalizeInlineImageRow(root);
-    return;
-  }
-  root
-    .querySelectorAll<HTMLElement>(".inline-image-row")
-    .forEach(normalizeInlineImageRow);
-}
-
-function normalizeInlineImageRow(row: HTMLElement): void {
-  if (row.dataset.imageGroupId === undefined || row.dataset.imageGroupId === "") {
-    row.dataset.imageGroupId =
-      globalThis.crypto?.randomUUID?.() ??
-      `image-group-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  }
-  row.style.removeProperty("position");
-  row.style.removeProperty("left");
-  row.style.removeProperty("top");
-  row.style.removeProperty("right");
-  row.style.removeProperty("bottom");
-  row.style.removeProperty("z-index");
-  row.style.removeProperty("transform");
-  row.querySelectorAll<HTMLElement>("figure[data-file-id]").forEach((figure) => {
-    figure.classList.add("inline-report-image");
-    clearInlineImageFloatingStyles(figure);
-  });
-  const figures = Array.from(row.querySelectorAll<HTMLElement>("figure[data-file-id]"));
-  if (figures.length === 0) {
-    row.remove();
-    return;
-  }
-  if (figures.length === 1) {
-    const [figure] = figures;
-    if (figure !== undefined) row.replaceWith(figure);
-  }
-}
-
-function groupVisualInlineImageRowsForAnalysis(): void {
-  const root = reportEditorRoot();
-  if (root === null) return;
-  unwrapInlineImageWrappers(root);
-  const containers = [
-    root,
-    ...Array.from(root.querySelectorAll<HTMLElement>("p, div, section, article")),
-  ].filter((element) => !element.classList.contains("inline-image-row"));
-  containers.forEach((container) => {
-    let run: HTMLElement[] = [];
-    const flush = (): void => {
-      wrapVisualFigureRuns(run);
-      run = [];
-    };
-    Array.from(container.childNodes).forEach((node) => {
-      if (
-        node instanceof HTMLElement &&
-        node.matches("figure[data-file-id]") &&
-        node.closest(".inline-image-row") === null
-      ) {
-        run.push(node);
-        return;
-      }
-      if (node.nodeType === Node.TEXT_NODE && (node.textContent ?? "").trim() === "") {
-        return;
-      }
-      flush();
-    });
-    flush();
-  });
-  normalizeInlineImageRows(root);
-}
-
-function unwrapInlineImageWrappers(root: HTMLElement): void {
-  root.querySelectorAll<HTMLElement>(".word-inline-image").forEach((wrapper) => {
-    const figure = wrapper.querySelector<HTMLElement>("figure[data-file-id]");
-    if (figure === null) return;
-    wrapper.replaceWith(figure);
-  });
-}
-
-function wrapVisualFigureRuns(figures: HTMLElement[]): void {
-  if (figures.length < 2) return;
-  let group: HTMLElement[] = [];
-  const flush = (): void => {
-    if (group.length >= 2) wrapFiguresInInlineImageRow(group);
-    group = [];
-  };
-  figures.forEach((figure) => {
-    if (group.length === 0 || figuresShareVisualRow(group[0], figure)) {
-      group.push(figure);
-      return;
-    }
-    flush();
-    group.push(figure);
-  });
-  flush();
-}
-
-function figuresShareVisualRow(first: HTMLElement | undefined, next: HTMLElement): boolean {
-  if (first === undefined) return false;
-  const firstRect = first.getBoundingClientRect();
-  const nextRect = next.getBoundingClientRect();
-  if (firstRect.width <= 0 || nextRect.width <= 0) return false;
-  const verticalOverlap =
-    Math.min(firstRect.bottom, nextRect.bottom) - Math.max(firstRect.top, nextRect.top);
-  const minHeight = Math.min(firstRect.height, nextRect.height);
-  return verticalOverlap >= Math.max(12, minHeight * 0.35);
-}
-
-function wrapFiguresInInlineImageRow(figures: HTMLElement[]): void {
-  const [firstFigure] = figures;
-  if (firstFigure === undefined || firstFigure.parentNode === null) return;
-  const row = createInlineImageRow();
-  firstFigure.before(row);
-  figures.forEach((figure) => row.append(figure));
-  const editor = reportEditorRoot();
-  if (editor !== null) fitInlineImageRow(row, editor);
-}
-
-function clearInlineImageFloatingStyles(figure: HTMLElement): void {
-  figure.classList.remove("is-floating", "is-dragging");
-  figure.style.removeProperty("position");
-  figure.style.removeProperty("left");
-  figure.style.removeProperty("top");
-  figure.style.removeProperty("right");
-  figure.style.removeProperty("bottom");
-  figure.style.removeProperty("width");
-  figure.style.removeProperty("height");
-  figure.style.removeProperty("margin");
-  figure.style.removeProperty("z-index");
-  figure.style.removeProperty("transform");
-  figure.style.removeProperty("pointer-events");
-}
-
-function applyExistingInlineImageDisplaySize(
-  figure: HTMLElement,
-  image: HTMLImageElement,
-): void {
-  const width =
-    parseCssPixelValue(figure.dataset.displayWidth ?? null) ??
-    parseCssPixelValue(image.dataset.displayWidth ?? null) ??
-    parseCssPixelValue(image.getAttribute("width")) ??
-    parseCssPixelValue(image.style.width);
-  const height =
-    parseCssPixelValue(figure.dataset.displayHeight ?? null) ??
-    parseCssPixelValue(image.dataset.displayHeight ?? null) ??
-    parseCssPixelValue(image.getAttribute("height")) ??
-    parseCssPixelValue(image.style.height);
-  if (width !== undefined && height !== undefined) {
-    applyInlineImageDisplaySize(figure, image, { width, height });
-  }
-}
-
-function removeLegacyInlineImageSpacers(root: HTMLElement): void {
-  root
-    .querySelectorAll<HTMLBRElement>('br[data-inline-image-spacer="true"]')
-    .forEach((spacer) => spacer.remove());
-}
-
-function defaultInlineImageContainer(): HTMLElement | null {
-  if (htmlReportBlock.value !== null) return htmlReportRef.value ?? null;
-  if (reportPaperRef.value === undefined) return null;
-  const editableBlocks = Array.from(
-    reportPaperRef.value.querySelectorAll<HTMLElement>(
-      ".editable-report-block[data-block-id]",
-    ),
-  );
-  return editableBlocks.at(-1) ?? reportPaperRef.value;
-}
-
-function reportEditorRoot(): HTMLElement | null {
-  return htmlReportRef.value ?? reportPaperRef.value ?? null;
-}
-
-function inlineImageIdsFromDom(): string[] {
-  const root = reportEditorRoot();
-  if (root === null) return [];
-  return Array.from(
-    new Set(
-      Array.from(
-        root.querySelectorAll<HTMLElement>(
-          "figure[data-file-id], img[data-file-id]",
-        ),
-      )
-        .map((element) => element.dataset.fileId)
-        .filter((value): value is string => value !== undefined),
-    ),
-  );
-}
-
-async function renderMissingInlineImages(): Promise<void> {
-  await nextTick();
-  const defaultContainer = defaultInlineImageContainer();
-  const root = reportEditorRoot();
-  if (defaultContainer === null || root === null) return;
-  root.querySelectorAll("figcaption").forEach((caption) => caption.remove());
-  normalizeInlineImageElements(root);
-  const unassignedImages = Array.from(root.querySelectorAll("img")).filter(
-    (image) =>
-      image.dataset.fileId === undefined &&
-      image.closest<HTMLElement>("[data-file-id]")?.dataset.fileId ===
-        undefined,
-  );
-  for (const fileId of allImageIds.value) {
-    const alreadyRendered = Array.from(
-      root.querySelectorAll<HTMLElement>("[data-file-id]"),
-    ).some((element) => element.dataset.fileId === fileId);
-    if (alreadyRendered) continue;
-    const importedImage = unassignedImages.shift();
-    if (importedImage !== undefined) {
-      importedImage.dataset.fileId = fileId;
-      let figure = importedImage.closest("figure");
-      if (!(figure instanceof HTMLElement)) {
-        figure = document.createElement("figure");
-        importedImage.replaceWith(figure);
-        figure.append(importedImage);
-      }
-      figure.dataset.fileId = fileId;
-      figure.classList.add("inline-report-image");
-      clearInlineImageFloatingStyles(figure);
-      figure.classList.remove("is-selected");
-      figure.contentEditable = "false";
-      figure.draggable = false;
-      importedImage.src = imageUrl(fileId);
-      importedImage.draggable = false;
-      continue;
-    }
-  }
-  normalizeInlineImageElements(root);
-}
-
-function selectInlineImage(event: MouseEvent): void {
-  const target = event.target;
-  if (
-    target instanceof Element &&
-    target.closest(".inline-image-resize-handle") !== null
-  ) {
-    return;
-  }
-  const figure =
-    target instanceof Element
-      ? target.closest<HTMLElement>("figure[data-file-id]")
-      : null;
-  if (figure === null) {
-    selectedInlineFigure?.classList.remove("is-selected");
-    selectedInlineFigure = null;
-    rememberEditorRange();
-    return;
-  }
-  selectInlineFigure(figure);
-  window.getSelection()?.removeAllRanges();
-}
-
-function selectInlineFigure(figure: HTMLElement): void {
-  if (selectedInlineFigure !== figure) {
-    selectedInlineFigure?.classList.remove("is-selected");
-    selectedInlineFigure
-      ?.querySelectorAll(".inline-image-resize-handle")
-      .forEach((handle) => handle.remove());
-  }
-  selectedInlineFigure = figure;
-  figure.classList.add("is-selected");
-  ensureResizeHandles(figure);
-}
-
-function ensureResizeHandles(figure: HTMLElement): void {
-  if (figure.querySelector(".inline-image-resize-handle") !== null) return;
-  ["nw", "ne", "se", "sw"].forEach((corner) => {
-    const handle = document.createElement("span");
-    handle.className = `inline-image-resize-handle ${corner}`;
-    handle.dataset.resizeHandle = corner;
-    handle.contentEditable = "false";
-    figure.append(handle);
-  });
-}
-
-function rememberTextSelection(event: Event): void {
-  const target = event.target;
-  if (target instanceof Element && target.closest("figure[data-file-id]") !== null) {
-    return;
-  }
-  rememberEditorRange();
-}
-
-function selectedInlineImageElement(): HTMLElement | null {
-  const root = reportEditorRoot();
-  if (
-    selectedInlineFigure !== null &&
-    selectedInlineFigure.isConnected &&
-    root?.contains(selectedInlineFigure)
-  ) {
-    return selectedInlineFigure;
-  }
-  const selection = window.getSelection();
-  if (selection === null || selection.rangeCount === 0) return null;
-  const range = selection.getRangeAt(0);
-  const candidate =
-    range.startContainer instanceof Element
-      ? range.startContainer.closest<HTMLElement>("figure[data-file-id]")
-      : range.startContainer.parentElement?.closest<HTMLElement>(
-          "figure[data-file-id]",
-        );
-  if (candidate !== undefined && candidate !== null && root?.contains(candidate)) {
-    return candidate;
-  }
-  const fragment = range.cloneContents();
-  const fileId =
-    fragment.querySelector<HTMLElement>("figure[data-file-id]")?.dataset
-      .fileId ?? null;
-  if (fileId === null) return null;
-  return (
-    root?.querySelector<HTMLElement>(
-      `figure[data-file-id="${CSS.escape(fileId)}"]`,
-    ) ?? null
-  );
-}
-
-function handleEditorKeydown(event: KeyboardEvent): void {
-  if (event.key !== "Backspace" && event.key !== "Delete") return;
-  const figure = selectedInlineImageElement();
-  if (figure === null) return;
-  event.preventDefault();
-  void removeInlineImageFromReport(figure);
-}
-
-async function removeInlineImageFromReport(figure: HTMLElement): Promise<boolean> {
-  if (draft.value === null) return false;
-  const fileId = figure.dataset.fileId;
-  if (fileId === undefined || fileId.length === 0) return false;
-  figure
-    .querySelectorAll(".inline-image-resize-handle")
-    .forEach((handle) => handle.remove());
-  selectedInlineFigure = null;
-  const row = figure.closest<HTMLElement>(".inline-image-row");
-  figure.remove();
-  if (row !== null) normalizeInlineImageRows(row);
-  syncReportContentFromDom();
-  if (!(await saveDraft(false, true))) return false;
-  const saved = await businessApi.drafts.removeImage(
-    draft.value.id,
-    fileId,
-    draft.value.entityVersion,
-  );
-  applySavedDraftMetadata(saved);
-  pendingImageIds.value = pendingImageIds.value.filter(
-    (pendingId) => pendingId !== fileId,
-  );
-  await syncInlineImageOrder(true);
-  return true;
-}
-
-function startInlineImagePointer(event: PointerEvent): void {
-  if (!draftEditable.value || event.button !== 0) return;
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-  const figure = target.closest<HTMLElement>("figure[data-file-id]");
-  if (figure === null) return;
-  const editor = event.currentTarget;
-  if (!(editor instanceof HTMLElement) || !editor.contains(figure)) return;
-  event.preventDefault();
-  event.stopPropagation();
-  selectInlineFigure(figure);
-  window.getSelection()?.removeAllRanges();
-
-  const handle = target.closest<HTMLElement>(".inline-image-resize-handle");
-  if (handle !== null) {
-    startInlineImageResize(event, figure, handle);
-    return;
-  }
-
-  figure.setPointerCapture(event.pointerId);
-  inlineImageInteraction = {
-    mode: "pending",
-    figure,
-    editor,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-  };
-}
-
-function startInlineImageResize(
-  event: PointerEvent,
-  figure: HTMLElement,
-  handle: HTMLElement,
-): void {
-  const image = figure.querySelector<HTMLImageElement>("img");
-  if (image === null) return;
-  captureInlineImageDisplaySize(figure, image);
-  const rect = image.getBoundingClientRect();
-  const width = Math.max(1, rect.width);
-  const height = Math.max(1, rect.height);
-  figure.setPointerCapture(event.pointerId);
-  figure.classList.add("is-resizing");
-  inlineImageInteraction = {
-    mode: "resizing",
-    figure,
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startWidth: width,
-    aspectRatio: width / height,
-    direction: handle.dataset.resizeHandle?.includes("w") ? -1 : 1,
-  };
-}
-
-function moveInlineImagePointer(event: PointerEvent): void {
-  const state = inlineImageInteraction;
-  if (state === null || state.pointerId !== event.pointerId) return;
-  event.preventDefault();
-  if (state.mode === "resizing") {
-    resizeInlineImage(state, event.clientX);
-    return;
-  }
-  if (state.mode === "pending") {
-    const moved = Math.hypot(
-      event.clientX - state.startX,
-      event.clientY - state.startY,
-    );
-    if (moved < 5) return;
-    const marker = createInlineImageDropMarker(state.figure);
-    state.figure.after(marker);
-    state.figure.classList.add("is-dragging");
-    inlineImageInteraction = {
-      mode: "dragging",
-      figure: state.figure,
-      editor: state.editor,
-      pointerId: state.pointerId,
-      marker,
-    };
-    moveDropMarker(state.editor, state.figure, marker, event.clientX, event.clientY);
-    return;
-  }
-  moveDropMarker(state.editor, state.figure, state.marker, event.clientX, event.clientY);
-}
-
-async function finishInlineImagePointer(event: PointerEvent): Promise<void> {
-  const state = inlineImageInteraction;
-  if (state === null || state.pointerId !== event.pointerId) return;
-  inlineImageInteraction = null;
-  state.figure.releasePointerCapture(event.pointerId);
-  if (state.mode === "pending") return;
-  if (state.mode === "dragging") {
-    state.figure.classList.remove("is-dragging");
-    state.marker.replaceWith(state.figure);
-    const row = state.figure.closest<HTMLElement>(".inline-image-row");
-    if (row !== null) {
-      normalizeInlineImageRows(row);
-      fitInlineImageRow(row, state.editor);
-    }
-    selectInlineFigure(state.figure);
-    placeCaretAfterInlineImage(state.figure);
-    syncReportContentFromDom();
-    if (await saveDraft(false, true)) await syncInlineImageOrder(true);
-    return;
-  }
-  state.figure.classList.remove("is-resizing");
-  selectInlineFigure(state.figure);
-  syncReportContentFromDom();
-  await saveDraft(false, true);
-}
-
-function cancelInlineImagePointer(event: PointerEvent): void {
-  const state = inlineImageInteraction;
-  if (state === null || state.pointerId !== event.pointerId) return;
-  inlineImageInteraction = null;
-  state.figure.releasePointerCapture(event.pointerId);
-  state.figure.classList.remove("is-dragging", "is-resizing");
-  if (state.mode === "dragging") state.marker.remove();
-}
-
-function resizeInlineImage(
-  state: Extract<typeof inlineImageInteraction, { mode: "resizing" }>,
-  clientX: number,
-): void {
-  const image = state.figure.querySelector<HTMLImageElement>("img");
-  if (image === null) return;
-  const editor = state.figure.closest<HTMLElement>(".report-paper");
-  const maxWidth = Math.max(80, (editor?.clientWidth ?? 720) - 48);
-  const delta = (clientX - state.startX) * state.direction;
-  const width = Math.min(maxWidth, Math.max(80, state.startWidth + delta));
-  const height = width / state.aspectRatio;
-  applyInlineImageDisplaySize(state.figure, image, { width, height });
-}
-
-function createInlineImageDropMarker(figure: HTMLElement): HTMLElement {
-  const marker = document.createElement("span");
-  marker.className = "inline-image-drop-marker";
-  marker.contentEditable = "false";
-  const rect = figure.getBoundingClientRect();
-  marker.style.width = `${Math.max(80, rect.width)}px`;
-  marker.style.height = `${Math.max(36, rect.height)}px`;
-  return marker;
-}
-
-function moveDropMarker(
-  editor: HTMLElement,
-  draggedFigure: HTMLElement,
-  marker: HTMLElement,
-  clientX: number,
-  clientY: number,
-): void {
-  const range = editorRangeFromPoint(editor, draggedFigure, marker, clientX, clientY);
-  if (range === null) return;
-  marker.remove();
-  range.deleteContents();
-  range.insertNode(marker);
-}
-
-function editorRangeFromPoint(
-  editor: HTMLElement,
-  draggedFigure: HTMLElement,
-  marker: HTMLElement,
-  clientX: number,
-  clientY: number,
-): Range | null {
-  draggedFigure.style.pointerEvents = "none";
-  marker.style.pointerEvents = "none";
-  const caretRange = caretRangeFromPoint(clientX, clientY);
-  draggedFigure.style.removeProperty("pointer-events");
-  marker.style.removeProperty("pointer-events");
-  if (
-    caretRange !== null &&
-    editor.contains(caretRange.commonAncestorContainer) &&
-    !draggedFigure.contains(caretRange.commonAncestorContainer) &&
-    !marker.contains(caretRange.commonAncestorContainer)
-  ) {
-    return caretRange;
-  }
-  return nearestImageBoundaryRange(editor, draggedFigure, marker, clientY);
-}
-
-function caretRangeFromPoint(clientX: number, clientY: number): Range | null {
-  const documentWithCaret = document as Document & {
-    caretRangeFromPoint?: (x: number, y: number) => Range | null;
-    caretPositionFromPoint?: (
-      x: number,
-      y: number,
-    ) => { offsetNode: Node; offset: number } | null;
-  };
-  const range = documentWithCaret.caretRangeFromPoint?.(clientX, clientY);
-  if (range !== undefined) return range;
-  const position = documentWithCaret.caretPositionFromPoint?.(clientX, clientY);
-  if (position === undefined || position === null) return null;
-  const fallback = document.createRange();
-  fallback.setStart(position.offsetNode, position.offset);
-  fallback.collapse(true);
-  return fallback;
-}
-
-function nearestImageBoundaryRange(
-  editor: HTMLElement,
-  draggedFigure: HTMLElement,
-  marker: HTMLElement,
-  clientY: number,
-): Range | null {
-  const candidates = Array.from(
-    editor.querySelectorAll<HTMLElement>(
-      "p, div, h1, h2, h3, figure[data-file-id]",
-    ),
-  ).filter((element) => element !== draggedFigure && element !== marker);
-  let closest: { element: HTMLElement; before: boolean; distance: number } | null = null;
-  for (const element of candidates) {
-    const rect = element.getBoundingClientRect();
-    if (rect.height <= 0) continue;
-    const before = clientY < rect.top + rect.height / 2;
-    const edge = before ? rect.top : rect.bottom;
-    const distance = Math.abs(clientY - edge);
-    if (closest === null || distance < closest.distance) {
-      closest = { element, before, distance };
-    }
-  }
-  if (closest === null) {
-    const end = document.createRange();
-    end.selectNodeContents(editor);
-    end.collapse(false);
-    return end;
-  }
-  const range = document.createRange();
-  if (closest.before) range.setStartBefore(closest.element);
-  else range.setStartAfter(closest.element);
-  range.collapse(true);
-  return range;
-}
-
-function placeCaretAfterInlineImage(figure: HTMLElement): void {
-  const target = figure.closest<HTMLElement>(".inline-image-row") ?? figure;
-  const spacer = createInlineImageCaretText();
-  target.after(spacer);
-  placeCaretAfter(spacer);
-}
-
-async function syncInlineImageOrder(preserveEditorDom = false): Promise<void> {
-  if (draft.value === null) return;
-  const visible = inlineImageIdsFromDom();
-  const ordered = Array.from(
-    new Set([
-      ...visible,
-      ...allImageIds.value.filter((id) => !visible.includes(id)),
-    ]),
-  );
-  if (
-    ordered.length === allImageIds.value.length &&
-    ordered.every((id, index) => id === allImageIds.value[index])
-  )
-    return;
-  imageUpdating.value = true;
-  try {
-    const saved = await businessApi.drafts.reorderImages(
-      draft.value.id,
-      ordered,
-      draft.value.entityVersion,
-    );
-    if (preserveEditorDom) applySavedDraftMetadata(saved);
-    else {
-      draft.value = saved;
-      await renderMissingInlineImages();
-    }
-    pendingImageIds.value = [];
-  } finally {
-    imageUpdating.value = false;
   }
 }
 
@@ -1882,7 +1016,7 @@ async function generate(): Promise<void> {
     ElMessage.info("AI正在后台分析，请稍后再确认正式报告。");
     return;
   }
-  syncReportContentFromDom();
+  syncDraftFromEditor();
   try {
     await standardConfirm(
       "确认后将生成正式报告并把最终原因沉淀到当前城市经验库。同一报账点和账期只保留一个正式报告。",
@@ -1899,17 +1033,8 @@ async function generate(): Promise<void> {
 
   generating.value = true;
   try {
-    if (
-      sending.value ||
-      uploadingImages.value ||
-      imageUpdating.value ||
-      saving.value
-    ) {
-      ElMessage.info("报告内容发生变化，请完成当前操作后重新确认。");
-      return;
-    }
-    syncReportContentFromDom();
-    if (!(await saveDraft(false))) return;
+    syncDraftFromEditor();
+    if (!(await flushDraftSave(false)) || draft.value === null) return;
     const report = await businessApi.drafts.generate(
       draft.value.id,
       draft.value.entityVersion,
@@ -1929,10 +1054,12 @@ async function generate(): Promise<void> {
 }
 
 async function goBack(): Promise<void> {
-  if (draft.value !== null && draft.value.formalReportId !== null) {
-    syncReportContentFromDom();
-    if (await saveDraft(false, true)) {
-      await businessApi.drafts.discardUnusedCorrection(draft.value.id).catch(() => false);
+  if (draft.value !== null) {
+    syncDraftFromEditor();
+    if ((await flushDraftSave(false)) && draft.value.formalReportId !== null) {
+      await businessApi.drafts
+        .discardUnusedCorrection(draft.value.id)
+        .catch(() => false);
     }
   }
   const from =
@@ -1942,8 +1069,23 @@ async function goBack(): Promise<void> {
   await router.push(from);
 }
 
-onMounted(load);
-onUnmounted(stopAnalysisPolling);
+onMounted(() => {
+  window.addEventListener("beforeunload", handleBeforeUnload);
+  void load();
+});
+watch(
+  () => String(route.params.draftId ?? ""),
+  (_draftId, previousDraftId) => {
+    if (previousDraftId === undefined) return;
+    void load();
+  },
+);
+onUnmounted(() => {
+  stopAnalysisPolling();
+  clearAutoSaveTimer();
+  window.removeEventListener("beforeunload", handleBeforeUnload);
+  for (const instance of editableEditors()) instance.destroy();
+});
 </script>
 
 <template>
@@ -1980,12 +1122,7 @@ onUnmounted(stopAnalysisPolling);
       class="draft-analysis-alert"
       title="AI正在后台分析"
     >
-      <ElAlert
-        type="info"
-        title="AI正在后台分析"
-        :closable="false"
-        show-icon
-      />
+      <ElAlert type="info" title="AI正在后台分析" :closable="false" show-icon />
     </div>
 
     <div
@@ -2002,7 +1139,7 @@ onUnmounted(stopAnalysisPolling);
     </div>
 
     <div
-      v-else-if="draft.status === 'AI_FAILED' && hasSubmittedAiAnalysis"
+      v-else-if="draft.status === 'AI_FAILED'"
       class="draft-analysis-alert"
       :title="analysisFailedTitle"
     >
@@ -2018,78 +1155,30 @@ onUnmounted(stopAnalysisPolling);
       class="draft-workspace"
       :class="{ 'assistant-open': assistantVisible }"
     >
-      <article
-        v-if="htmlReportBlock"
-        :key="`html-${editorRenderKey}`"
-        ref="htmlReportRef"
-        class="report-paper html-report-paper business-card"
-        aria-label="可编辑报告正文"
-        contenteditable="true"
-        spellcheck="false"
-        v-html="sanitizeEditableHtml(htmlReportBlock.content)"
-        @blur="handleEditorBlur"
-        @paste="pasteImages"
-        @click="selectInlineImage"
-        @keyup="rememberTextSelection"
-        @mouseup="rememberTextSelection"
-        @input="rememberTextSelection"
-        @keydown="handleEditorKeydown"
-        @dragstart.prevent
-        @pointerdown="startInlineImagePointer"
-        @pointermove="moveInlineImagePointer"
-        @pointerup="finishInlineImagePointer"
-        @pointercancel="cancelInlineImagePointer"
-      />
-
-      <article
-        v-else
-        :key="`blocks-${editorRenderKey}`"
-        ref="reportPaperRef"
-        class="report-paper business-card"
-        aria-label="可编辑报告正文"
-      >
-        <h1
-          v-if="headingBlock"
-          :data-block-id="headingBlock.id"
-          contenteditable="true"
-          spellcheck="false"
-          v-html="editableBlockHtml(headingBlock)"
-          @blur="handleEditorBlur"
-          @paste="pasteImages"
-          @click="selectInlineImage"
-          @keyup="rememberTextSelection"
-          @mouseup="rememberTextSelection"
-          @input="rememberTextSelection"
-          @keydown="handleEditorKeydown"
-          @dragstart.prevent
-          @pointerdown="startInlineImagePointer"
-          @pointermove="moveInlineImagePointer"
-          @pointerup="finishInlineImagePointer"
-          @pointercancel="cancelInlineImagePointer"
-        />
-
-        <section v-for="(block, index) in bodyBlocks" :key="block.id">
-          <h2>{{ chineseNumbers[index] ?? index + 1 }}、{{ block.title }}</h2>
-          <div
-            :data-block-id="block.id"
-            class="editable-report-block"
-            contenteditable="true"
-            spellcheck="false"
-            v-html="editableBlockHtml(block)"
-            @blur="handleEditorBlur"
-            @paste="pasteImages"
-            @click="selectInlineImage"
-            @keyup="rememberTextSelection"
-            @mouseup="rememberTextSelection"
-            @input="rememberTextSelection"
-            @keydown="handleEditorKeydown"
-            @dragstart.prevent
-            @pointerdown="startInlineImagePointer"
-            @pointermove="moveInlineImagePointer"
-            @pointerup="finishInlineImagePointer"
-            @pointercancel="cancelInlineImagePointer"
-          />
-        </section>
+      <article class="report-paper business-card" aria-label="稽核报告草稿">
+        <div class="report-scroll">
+          <h1 class="report-title">《{{ reportTitle }}》</h1>
+          <section
+            v-for="section in SECTION_CONFIG"
+            :key="section.key"
+            class="report-section"
+          >
+            <h2 class="report-section-title">{{ section.title }}</h2>
+            <EditorContent
+              v-if="sectionEditors[section.key].value"
+              class="report-editor"
+              :data-section="section.key"
+              :editor="sectionEditors[section.key].value"
+              @blur="flushDraftSave(false)"
+              @paste="handleEditorPaste($event, section.key)"
+              @click="handleEditorClick"
+              @pointerdown="startResize"
+              @pointermove="moveResize"
+              @pointerup="finishResize"
+              @pointercancel="cancelResize"
+            />
+          </section>
+        </div>
       </article>
 
       <aside v-if="assistantVisible" class="assistant-panel business-card">
@@ -2214,20 +1303,42 @@ onUnmounted(stopAnalysisPolling);
 <style scoped>
 .draft-summary {
   display: grid;
-  grid-template-columns:
-    minmax(0, 1fr)
-    max-content
-    max-content;
-
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
   width: 100%;
   gap: 16px;
   align-items: center;
-
   padding: 14px 18px;
   margin-bottom: 16px;
-
   overflow: hidden;
   box-sizing: border-box;
+}
+
+.draft-summary > div {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.draft-summary small {
+  flex: 0 0 auto;
+  color: #7d8ca1;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.draft-summary small::after {
+  content: "：";
+}
+
+.draft-summary strong {
+  min-width: 0;
+  color: #001733;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .draft-analysis-alert {
@@ -2242,11 +1353,6 @@ onUnmounted(stopAnalysisPolling);
   padding: 0 10px;
 }
 
-.draft-analysis-alert :deep(.el-alert__content) {
-  min-width: 0;
-  overflow: hidden;
-}
-
 .draft-analysis-alert :deep(.el-alert__title) {
   display: block;
   max-width: 100%;
@@ -2256,70 +1362,11 @@ onUnmounted(stopAnalysisPolling);
   white-space: nowrap;
 }
 
-.draft-analysis-alert :deep(.el-alert__description) {
-  display: none;
-  max-width: 100%;
-  margin: 2px 0 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-summary > div {
-  display: flex;
-  min-width: 0;
-  gap: 8px;
-  align-items: center;
-  white-space: nowrap;
-}
-
-.draft-summary > div:first-child {
-  width: 100%;
-  min-width: 0;
-}
-
-.draft-summary small {
-  flex: 0 0 auto;
-  color: #7d8ca1;
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.draft-summary small::after {
-  content: "：";
-}
-
-.draft-summary strong {
-  min-width: 0;
-  color: #001733;
-  font-size: 14px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.draft-summary > div:first-child strong {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.draft-summary > div:nth-child(2),
-.draft-summary > div:nth-child(3) {
-  flex: 0 0 auto;
-}
-
-.danger-text {
-  color: #f5223d !important;
-}
-
 .draft-workspace {
   display: grid;
   width: 100%;
   height: clamp(560px, calc(100vh - 190px), 880px);
   min-height: 520px;
-
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
@@ -2329,169 +1376,121 @@ onUnmounted(stopAnalysisPolling);
 }
 
 .draft-workspace.assistant-open {
-  grid-template-columns:
-    minmax(0, 1fr)
-    clamp(280px, 31vw, 430px);
-}
-
-.draft-workspace > * {
-  min-width: 0;
-  align-self: stretch;
+  grid-template-columns: minmax(0, 1fr) clamp(260px, 26vw, 360px);
 }
 
 .report-paper {
   position: relative;
-
-  width: 100%;
+  display: flex;
+  width: min(920px, 100%);
   height: 100%;
-
   min-width: 0;
   min-height: 0;
-
-  padding: clamp(18px, 3vw, 28px) clamp(16px, 4vw, 36px) 42px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  flex-direction: column;
+  padding: 0;
+  margin: 0 auto;
+  overflow: hidden;
   background: #fff;
   box-sizing: border-box;
 }
 
-.report-paper h1 {
+.report-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 48px 56px 64px;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.report-title {
   min-height: 38px;
   margin: 0 0 28px;
   color: #101827;
   font-size: 24px;
+  font-weight: 800;
   line-height: 1.6;
   text-align: center;
 }
 
-.report-paper h2 {
-  margin: 22px 0 12px;
+.report-section {
+  margin: 22px 0 26px;
+}
+
+.report-section-title {
+  margin: 0 0 10px;
   color: #101827;
   font-size: 18px;
+  font-weight: 800;
+  line-height: 1.6;
 }
 
-.editable-report-block {
+.report-editor {
+  width: 100%;
   min-height: 84px;
-  padding: 6px 8px;
-  margin: 0;
-  color: #1f2d3d;
-  line-height: 2;
-  white-space: pre-wrap;
+  overflow: hidden;
   border: 1px solid transparent;
   border-radius: 4px;
+  background: #fff;
+  box-sizing: border-box;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
 }
 
-.html-report-paper {
-  width: 100%;
-  min-width: 0;
-  margin: 0;
-  color: #001733;
-  line-height: 1.9;
+.report-editor:focus-within {
+  background: #fffdfd;
+  border-color: #ffb8c1;
+  box-shadow: 0 0 0 3px rgb(237 36 55 / 8%);
 }
 
-.html-report-paper :deep(h1) {
-  margin: 0 0 28px;
-  text-align: center;
-  font-size: 24px;
-  font-weight: 800;
+.report-editor :deep(.report-editor-content) {
+  min-height: 82px;
+  padding: 6px 8px;
+  color: #1f2d3d;
+  line-height: 2;
+  outline: none;
+  box-sizing: border-box;
 }
 
-.html-report-paper :deep(h2) {
-  margin: 26px 0 12px;
-  font-size: 18px;
-  font-weight: 800;
-}
-
-.html-report-paper :deep(p) {
-  margin: 10px 0;
+.report-editor :deep(p) {
+  margin: 8px 0;
   text-indent: 2em;
   white-space: pre-wrap;
 }
 
-.html-report-paper :deep(.word-preview p),
-.html-report-paper :deep(.word-preview > p:first-child) {
-  text-indent: 0;
-}
-
-.html-report-paper :deep(strong),
-.html-report-paper :deep(b) {
+.report-editor :deep(strong),
+.report-editor :deep(b) {
   font-weight: 800;
 }
 
-.html-report-paper :deep(table) {
+.report-editor :deep(table) {
   width: 100%;
   max-width: 100%;
-
   margin: 12px 0;
-
   table-layout: fixed;
   border-collapse: collapse;
 }
 
-.html-report-paper :deep(td),
-.html-report-paper :deep(th) {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.html-report-paper :deep(td),
-.html-report-paper :deep(th) {
+.report-editor :deep(td),
+.report-editor :deep(th) {
   padding: 6px 8px;
+  overflow-wrap: anywhere;
   border: 1px solid #d8e0eb;
 }
 
-.html-report-paper :deep(img) {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  margin: 12px auto;
-  object-fit: contain;
-}
-
-.html-report-paper :deep(.word-inline-image),
-.html-report-paper :deep(.word-inline-image img) {
-  display: inline-block;
-  max-width: 100%;
-  margin: 0 8px 8px 0;
-  vertical-align: top;
-}
-
-.report-paper :deep(.inline-image-row),
-.html-report-paper :deep(.inline-image-row) {
+.report-editor :deep(.inline-image-row) {
   display: flex;
   flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
   gap: 8px;
   align-items: flex-start;
   max-width: 100%;
   margin: 8px 0;
 }
 
-.report-paper :deep(.inline-image-row .inline-report-image),
-.html-report-paper :deep(.inline-image-row .inline-report-image) {
-  margin: 0;
-}
-
-.report-paper :deep(.inline-image-row img),
-.html-report-paper :deep(.inline-image-row img) {
-  margin: 0;
-}
-
-.report-paper h1[contenteditable="true"],
-.html-report-paper[contenteditable="true"],
-.editable-report-block[contenteditable="true"] {
-  cursor: text;
-  outline: none;
-}
-
-.report-paper h1[contenteditable="true"]:focus,
-.html-report-paper[contenteditable="true"]:focus,
-.editable-report-block[contenteditable="true"]:focus {
-  background: #fffdfd;
-  border-color: #ffb8c1;
-  box-shadow: 0 0 0 3px rgb(237 36 55 / 8%);
-}
-
-.report-paper :deep(.inline-report-image) {
+.report-editor :deep(.inline-report-image) {
   position: relative;
   display: inline-block;
   max-width: 100%;
@@ -2504,30 +1503,40 @@ onUnmounted(stopAnalysisPolling);
   touch-action: none;
 }
 
-.report-paper :deep(.inline-report-image img) {
-  display: block;
+.report-editor :deep(.inline-image-row .inline-report-image) {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.report-editor :deep(.inline-report-image img) {
+  display: inline-block;
   width: auto;
-  max-width: 100%;
-  height: auto !important;
+  max-width: min(100%, 682px);
+  height: auto;
   margin: 0;
   object-fit: contain;
 }
 
-.report-paper :deep(.inline-report-image:focus),
-.report-paper :deep(.inline-report-image img:focus) {
-  outline: none;
+.report-editor :deep(img.inline-report-image) {
+  display: inline-block;
+  width: auto;
+  max-width: min(100%, 682px);
+  height: auto;
+  margin: 6px 8px 6px 0;
+  object-fit: contain;
+  vertical-align: bottom;
 }
 
-.report-paper :deep(.inline-report-image.is-selected) {
+.report-editor :deep(.inline-report-image.is-selected) {
   outline: 1px solid #3b82f6;
   outline-offset: 2px;
 }
 
-.report-paper :deep(.inline-report-image.is-dragging) {
-  opacity: 0.58;
+.report-editor :deep(.inline-report-image.is-resizing) {
+  opacity: 0.85;
 }
 
-.report-paper :deep(.inline-image-resize-handle) {
+:global(.inline-image-resize-handle) {
   position: absolute;
   z-index: 2;
   width: 8px;
@@ -2538,57 +1547,26 @@ onUnmounted(stopAnalysisPolling);
   box-sizing: border-box;
 }
 
-.report-paper :deep(.inline-image-resize-handle.nw) {
-  top: -5px;
-  left: -5px;
+:global(.inline-image-resize-handle.nw) {
   cursor: nwse-resize;
 }
 
-.report-paper :deep(.inline-image-resize-handle.ne) {
-  top: -5px;
-  right: -5px;
+:global(.inline-image-resize-handle.ne) {
   cursor: nesw-resize;
 }
 
-.report-paper :deep(.inline-image-resize-handle.se) {
-  right: -5px;
-  bottom: -5px;
+:global(.inline-image-resize-handle.se) {
   cursor: nwse-resize;
 }
 
-.report-paper :deep(.inline-image-resize-handle.sw) {
-  bottom: -5px;
-  left: -5px;
+:global(.inline-image-resize-handle.sw) {
   cursor: nesw-resize;
-}
-
-.report-paper :deep(.inline-image-drop-marker) {
-  display: inline-block;
-  max-width: 100%;
-  margin: 6px 8px 6px 0;
-  vertical-align: top;
-  background: rgb(64 158 255 / 8%);
-  border: 1px dashed #409eff;
-  box-sizing: border-box;
-}
-
-.report-paper :deep(.inline-image-uploading) {
-  display: inline-block;
-  padding: 8px 12px;
-  margin: 4px;
-  color: #66768b;
-  background: #f2f5f8;
-  border-radius: 4px;
 }
 
 .assistant-panel {
-  position: static;
-
   display: flex;
-
   width: 100%;
   height: 100%;
-
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -2620,17 +1598,14 @@ onUnmounted(stopAnalysisPolling);
 
 .chat-list {
   display: flex;
-
   width: 100%;
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
-
   padding: 12px 14px;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden auto;
   box-sizing: border-box;
 }
 
@@ -2687,10 +1662,8 @@ onUnmounted(stopAnalysisPolling);
 .chat-message p {
   margin: 0 0 5px;
   color: #1f2d3d;
-
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .chat-message small {
@@ -2699,11 +1672,8 @@ onUnmounted(stopAnalysisPolling);
 
 .prompt-box {
   position: relative;
-
   flex: 0 0 auto;
-
   padding: 10px 12px;
-
   background: #fff;
   border-top: 1px solid #edf1f5;
 }
@@ -2751,232 +1721,18 @@ onUnmounted(stopAnalysisPolling);
 }
 
 @media (width <= 1280px) {
-  .draft-workspace {
-    gap: 12px;
-  }
-
   .draft-workspace.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      clamp(250px, 30vw, 360px);
+    grid-template-columns: minmax(0, 1fr) clamp(230px, 27vw, 320px);
   }
 
-  .report-paper {
-    padding: 20px 18px 42px;
-  }
-
-  .assistant-panel > header {
-    padding: 10px 12px 8px;
-  }
-
-  .chat-list {
-    gap: 10px;
-    padding: 11px 12px;
-  }
-
-  .prompt-box {
-    padding: 9px 10px;
-  }
-
-  .prompt-mode {
-    gap: 8px;
-  }
-
-  .prompt-mode .el-select {
-    width: 138px;
-  }
-
-  .prompt-box .el-button {
-    right: 18px;
-    bottom: 18px;
-  }
-}
-
-@media (width <= 1024px) {
-  /*
-   * 顶部摘要继续保持紧凑。
-   */
-  .draft-summary {
-    gap: 10px;
-    padding-right: 12px;
-    padding-left: 12px;
-  }
-
-  .draft-summary > div {
-    gap: 5px;
-  }
-
-  .draft-summary small {
-    font-size: 12px;
-  }
-
-  .draft-summary strong {
-    font-size: 13px;
-  }
-
-  /*
-   * 内容区仍然左右排列。
-   * 只压缩右栏宽度和内部间距。
-   */
-  .draft-workspace {
-    gap: 10px;
-  }
-
-  .draft-workspace.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      clamp(220px, 29vw, 300px);
-  }
-
-  .report-paper {
-    padding: 18px 14px 42px;
-  }
-
-  .report-paper h1,
-  .html-report-paper :deep(h1) {
-    font-size: 22px;
-  }
-
-  .report-paper h2,
-  .html-report-paper :deep(h2) {
-    font-size: 17px;
-  }
-
-  .assistant-panel > header {
-    padding: 9px 10px 7px;
-  }
-
-  .assistant-panel h2 {
-    font-size: 17px;
-  }
-
-  .assistant-panel header small {
-    font-size: 12px;
-    line-height: 1.3;
-  }
-
-  .chat-list {
-    gap: 8px;
-    padding: 10px;
-  }
-
-  .chat-message {
-    gap: 7px;
-  }
-
-  .chat-message > div {
-    max-width: 90%;
-    padding: 10px;
-  }
-
-  .prompt-box {
-    padding: 8px 9px;
-  }
-
-  .prompt-mode {
-    gap: 6px;
-  }
-
-  .prompt-mode .el-select {
-    width: 122px;
-  }
-
-  .prompt-box .el-button {
-    right: 16px;
-    bottom: 16px;
+  .report-scroll {
+    padding: 36px 40px 56px;
   }
 }
 
 @media (width <= 760px) {
-  /*
-   * 小屏仍然保持“左正文 + 右 AI”。
-   * 不产生横向滚动，也不把 AI 放到下面。
-   */
-  .draft-workspace {
-    gap: 8px;
-  }
-
   .draft-workspace.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      minmax(190px, 36%);
-  }
-
-  .report-paper {
-    padding: 16px 10px 42px;
-  }
-
-  .assistant-panel > header {
-    padding: 8px 9px 7px;
-  }
-
-  .assistant-panel h2 {
-    font-size: 16px;
-  }
-
-  .assistant-panel header small {
-    font-size: 11px;
-  }
-
-  .chat-list {
-    padding: 8px;
-  }
-
-  .chat-message > span {
-    width: 26px;
-    height: 26px;
-    font-size: 11px;
-  }
-
-  .chat-message > div {
-    max-width: 92%;
-    padding: 9px;
-  }
-
-  .prompt-box {
-    padding: 8px;
-  }
-
-  .prompt-mode {
-    align-items: center;
-    flex-direction: row;
-  }
-
-  .prompt-mode .el-select {
-    width: 110px;
-  }
-
-  .prompt-box .el-button {
-    right: 14px;
-    bottom: 14px;
-  }
-}
-
-@media (width <= 640px) {
-  /*
-   * 顶部摘要可拆成两行；
-   * 下方内容区仍保持左右布局。
-   */
-  .draft-summary {
-    grid-template-columns:
-      minmax(0, 1fr)
-      max-content;
-
-    gap: 8px;
-  }
-
-  .draft-summary > div:first-child {
-    grid-column: 1 / -1;
-  }
-
-  .draft-summary > div:nth-child(3) {
-    justify-self: end;
-  }
-
-  .draft-workspace.assistant-open {
-    grid-template-columns:
-      minmax(0, 1fr)
-      minmax(170px, 38%);
+    grid-template-columns: minmax(0, 1fr) minmax(190px, 36%);
   }
 
   .draft-actions {
@@ -2984,10 +1740,6 @@ onUnmounted(stopAnalysisPolling);
     left: 12px;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  .draft-actions .el-button {
-    width: auto;
   }
 }
 </style>

@@ -36,10 +36,13 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
@@ -69,6 +72,7 @@ public class ReportDraftService {
           "(?is)<div\\b[^>]*class=[\"'][^\"']*inline-image-row[^\"']*[\"'][^>]*>.*?</div>");
   private static final Pattern INLINE_FILE_REFERENCE =
       Pattern.compile("(?is)data-file-id=[\"']([^\"']+)[\"']");
+  private static final Pattern INLINE_IMAGE_TAG = Pattern.compile("(?is)<img\\b[^>]*>");
   private static final Pattern INLINE_BASE64_FIGURE =
       Pattern.compile(
           "(?is)<figure\\b[^>]*>\\s*"
@@ -80,16 +84,6 @@ public class ReportDraftService {
   private static final Pattern BASE64_IMAGE_MARKER =
       Pattern.compile("(?is)data:image/(?:png|jpe?g);base64,");
   private static final Pattern HTML_ELEMENT = Pattern.compile("(?is)<[a-z][^>]*>");
-  private static final String NON_EQUIPMENT_IMAGE_LABELS =
-      "(?:缴费信息界面图|缴费标杆信息界面图|位置点信息界面图|系统界面图|表格截图|缴费截图|标杆截图|附件截图|票据截图|缴费信息图|标杆信息图|位置点图)";
-  private static final Pattern NON_EQUIPMENT_IMAGE_LABEL_BLOCK =
-      Pattern.compile(
-          "(?is)<(p|div|h[1-6])\\b[^>]*>\\s*(?:(?!<figure\\b).)*?"
-              + NON_EQUIPMENT_IMAGE_LABELS
-              + "\\s*[：:]?\\s*(?:(?!<figure\\b).)*?</\\1>\\s*(?=<figure\\b)");
-  private static final Pattern NON_EQUIPMENT_IMAGE_LABEL_TEXT =
-      Pattern.compile(
-          "(?is)(^|(?<=>))\\s*" + NON_EQUIPMENT_IMAGE_LABELS + "\\s*[：:]?\\s*(?=<figure\\b)");
   private static final String EQUIPMENT_IMAGE_LABELS =
       "(?:设备情况|机房全景图|设备机柜现场图)";
   private static final Pattern IMAGE_FOLLOWED_BY_LABEL_BLOCK =
@@ -387,6 +381,7 @@ public class ReportDraftService {
     }
     if (changed) {
       updated = preserveInlineFigures(draft.sections(), updated);
+      updated = sanitizeAiInlineImages(updated, reportImageIds);
       updated = normalizeAiReportText(updated);
     }
     if ("CORRECTION".equals(normalizedIntent)
@@ -466,7 +461,10 @@ public class ReportDraftService {
             .toList();
     validateAnalysisImages(reportImageIds, actor.username());
     String businessKey = imageAnalysisBusinessKey(draft);
-    String payloadJson = writeJson(new ImageAnalysisTaskPayload(publicId, safeInstruction, reportImageIds));
+    String payloadJson =
+        writeJson(
+            new ImageAnalysisTaskPayload(
+                publicId, draft.currentVersion(), safeInstruction, reportImageIds, draft.sections()));
     var existing = taskRepository.findByTypeAndBusinessKey(TaskType.AI_IMAGE_ANALYSIS, businessKey);
     if (existing.isPresent()) {
       BusinessTask task = existing.get();
@@ -511,7 +509,10 @@ public class ReportDraftService {
   }
 
   private String imageAnalysisBusinessKey(Draft draft) {
-    return "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId();
+    return "AI_IMAGE_ANALYSIS:DRAFT:"
+        + draft.publicId()
+        + ":CONTENT_VERSION:"
+        + draft.currentVersion();
   }
 
   private boolean syncImageAnalysisTaskStatus(Draft draft, String actor) {
@@ -562,7 +563,7 @@ public class ReportDraftService {
                    updated_at = CURRENT_TIMESTAMP(3),
                    updated_by = ?,
                    version = version + 1
-             WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
+             WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING', 'AI_COMPLETED', 'AI_FAILED')
             """,
             writeJson(imageFileIds),
             taskPublicId,
@@ -580,6 +581,17 @@ public class ReportDraftService {
     } catch (JacksonException exception) {
       throw new BusinessRuleException("TASK_PAYLOAD_INVALID", "AI图片分析任务数据异常，请重新提交");
     }
+  }
+
+  private ImageAnalysisTaskPayload readImageAnalysisPayloadByTaskId(String taskPublicId) {
+    if (taskPublicId == null || taskPublicId.isBlank()) {
+      return null;
+    }
+    return taskRepository
+        .findByPublicId(taskPublicId)
+        .map(BusinessTask::payloadJson)
+        .map(this::readImageAnalysisPayload)
+        .orElse(null);
   }
 
   private DraftVersion latestCorrectionVersion(long draftId) {
@@ -663,19 +675,33 @@ public class ReportDraftService {
   @Transactional
   public Draft edit(
       String publicId, ReportSections sections, long expectedVersion, CurrentUser actor) {
+    return edit(publicId, sections, null, expectedVersion, actor);
+  }
+
+  @Transactional
+  public Draft edit(
+      String publicId,
+      ReportSections sections,
+      List<String> imageFileIds,
+      long expectedVersion,
+      CurrentUser actor) {
     Draft draft = find(publicId, actor);
     ensureEditable(draft);
     requireSections(sections);
     if (draft.entityVersion() != expectedVersion) {
       throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
     }
+    List<String> nextImages =
+        imageFileIds == null
+            ? draft.currentImageFileIds()
+            : draft.currentImageFileIds().stream().filter(imageFileIds::contains).toList();
     int nextVersion = draft.currentVersion() + 1;
     int updated =
         jdbcTemplate.update(
             """
             UPDATE report_draft
                SET title = ?, situation = ?, analysis = ?, rectification = ?,
-                   current_version_no = ?, updated_at = CURRENT_TIMESTAMP(3),
+                   current_image_file_ids_json = ?, current_version_no = ?, updated_at = CURRENT_TIMESTAMP(3),
                    updated_by = ?, version = version + 1
              WHERE id = ? AND version = ?
             """,
@@ -683,6 +709,7 @@ public class ReportDraftService {
             sections.situation(),
             sections.analysis(),
             sections.rectification(),
+            writeJson(nextImages),
             nextVersion,
             actor.username(),
             draft.id(),
@@ -690,8 +717,8 @@ public class ReportDraftService {
     if (updated != 1) {
       throw new ResourceConflictException("STALE_DRAFT_VERSION", "工作稿已变化，请刷新后重试");
     }
-    saveVersion(
-        draft.id(), nextVersion, "MANUAL", sections, draft.currentImageFileIds(), actor.username());
+    bindImages(draft.id(), nextImages, List.of(), actor.username());
+    saveVersion(draft.id(), nextVersion, "MANUAL", sections, nextImages, actor.username());
     return find(publicId, actor);
   }
 
@@ -702,6 +729,18 @@ public class ReportDraftService {
     if (!"AI_ANALYZING".equals(draft.analysisStatus())) {
       return;
     }
+    ImageAnalysisTaskPayload payload = readImageAnalysisPayloadByTaskId(traceId);
+    if (payload != null) {
+      if (draft.analysisTaskId() == null || !draft.analysisTaskId().equals(traceId)) {
+        return;
+      }
+      if (payload.contentVersion() != null && payload.contentVersion() != draft.currentVersion()) {
+        markImageAnalysisFailed(draft.id(), "STALE_DRAFT_VERSION", actor);
+        return;
+      }
+    }
+    ReportSections layoutSnapshot =
+        payload == null || payload.layoutSections() == null ? draft.sections() : payload.layoutSections();
     List<String> reportImageIds = imageFileIds == null ? draft.currentImageFileIds() : imageFileIds;
     try {
       validateAnalysisImages(reportImageIds, actor);
@@ -724,9 +763,9 @@ public class ReportDraftService {
       if (updated == null) {
         throw new AiServiceException("AI_RESPONSE_INCOMPLETE", "AI 未返回完整报告正文", false);
       }
-      updated = preserveInlineFigures(draft.sections(), updated);
+      updated = mergeAiTextWithLayoutSnapshot(layoutSnapshot, updated);
+      updated = sanitizeAiInlineImages(updated, reportImageIds);
       updated = normalizeImageCaptionPositions(updated);
-      updated = removeNonEquipmentImageLabels(updated);
       updated = normalizeAnalysisReasonPosition(updated);
       updated = normalizeAiReportText(updated);
       updated = normalizePositionRatedPowerFormula(draft, updated);
@@ -856,7 +895,7 @@ public class ReportDraftService {
               UPDATE report_draft
                  SET current_image_file_ids_json=?, updated_at=CURRENT_TIMESTAMP(3),
                      updated_by=?, version=version+1
-               WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+               WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING','AI_COMPLETED','AI_FAILED')
               """,
               writeJson(nextImages),
               actor.username(),
@@ -893,7 +932,7 @@ public class ReportDraftService {
                SET title=?, situation=?, analysis=?, rectification=?,
                    current_image_file_ids_json=?, current_version_no=?,
                    updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
-             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING','AI_COMPLETED','AI_FAILED')
             """,
             nextSections.title(),
             nextSections.situation(),
@@ -958,7 +997,7 @@ public class ReportDraftService {
             UPDATE report_draft
                SET current_image_file_ids_json=?, current_version_no=?,
                    updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
-             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING')
+             WHERE id=? AND version=? AND status IN ('DRAFT','CORRECTING','AI_COMPLETED','AI_FAILED')
             """,
             writeJson(safeIds),
             nextVersion,
@@ -998,7 +1037,7 @@ public class ReportDraftService {
         UPDATE report_draft SET status = 'GENERATING', confirmed_at = CURRENT_TIMESTAMP(3),
                confirmed_by = ?, updated_at = CURRENT_TIMESTAMP(3),
                updated_by = ?, version = version + 1
-         WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
+         WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING', 'AI_COMPLETED', 'AI_FAILED')
         """,
             actor.username(),
             actor.username(),
@@ -1442,6 +1481,18 @@ public class ReportDraftService {
           String analysis = value(rs.getString("analysis"));
           String rectification = value(rs.getString("rectification"));
           String historicalSummary = value(rs.getString("historical_summary"));
+          String imageAnalysisText = value(rs.getString("image_analysis_text"));
+          String equipmentStyleExamples =
+              historicalEquipmentStyleExamples(
+                  situation
+                      + "。"
+                      + analysis
+                      + "。"
+                      + rectification
+                      + "。"
+                      + historicalSummary
+                      + "。"
+                      + imageAnalysisText);
           String reasonSummary =
               firstNonBlank(
                   value(rs.getString("final_reason")),
@@ -1461,6 +1512,9 @@ public class ReportDraftService {
                           + reasonSummary
                           + "；历史原因类型="
                           + historicalReasonTypes(reasonSummary + "。" + historicalSummary)
+                          + (equipmentStyleExamples.isBlank()
+                              ? ""
+                              : "；历史图片说明写法=" + equipmentStyleExamples)
                           + "；标题="
                           + value(rs.getString("title"))
                           + "；情况="
@@ -1476,7 +1530,7 @@ public class ReportDraftService {
                           + "；历史图片分析状态="
                           + value(rs.getString("image_analysis_status"))
                           + "；历史图片证据="
-                          + value(rs.getString("image_analysis_text")),
+                          + imageAnalysisText,
                       6000),
               rs.getString("city_code"));
         },
@@ -1833,12 +1887,82 @@ public class ReportDraftService {
         preserveInlineFigures(original.rectification(), generated.rectification()));
   }
 
-  private ReportSections removeNonEquipmentImageLabels(ReportSections sections) {
+  private ReportSections mergeAiTextWithLayoutSnapshot(
+      ReportSections layoutSnapshot, ReportSections generated) {
     return new ReportSections(
-        removeNonEquipmentImageLabels(sections.title()),
-        removeNonEquipmentImageLabels(sections.situation()),
-        removeNonEquipmentImageLabels(sections.analysis()),
-        removeNonEquipmentImageLabels(sections.rectification()));
+        firstNonBlank(stripInlineImages(generated.title()), layoutSnapshot.title()),
+        preserveInlineFigures(layoutSnapshot.situation(), stripBase64Images(generated.situation())),
+        preserveInlineFigures(layoutSnapshot.analysis(), stripBase64Images(generated.analysis())),
+        preserveInlineFigures(layoutSnapshot.rectification(), stripBase64Images(generated.rectification())));
+  }
+
+  private String stripInlineImages(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    String cleaned = stripBase64Images(value);
+    cleaned = INLINE_IMAGE_ROW.matcher(cleaned).replaceAll("");
+    cleaned = INLINE_FIGURE.matcher(cleaned).replaceAll("");
+    cleaned = INLINE_IMAGE_TAG.matcher(cleaned).replaceAll("");
+    return cleaned;
+  }
+
+  private String stripBase64Images(String value) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    return INLINE_BASE64_IMAGE.matcher(INLINE_BASE64_FIGURE.matcher(value).replaceAll("")).replaceAll("");
+  }
+
+  private ReportSections sanitizeAiInlineImages(ReportSections sections, List<String> allowedImageIds) {
+    Set<String> allowed = new LinkedHashSet<>(allowedImageIds == null ? List.of() : allowedImageIds);
+    Set<String> seen = new LinkedHashSet<>();
+    return new ReportSections(
+        sanitizeAiInlineImages(sections.title(), allowed, seen),
+        sanitizeAiInlineImages(sections.situation(), allowed, seen),
+        sanitizeAiInlineImages(sections.analysis(), allowed, seen),
+        sanitizeAiInlineImages(sections.rectification(), allowed, seen));
+  }
+
+  private String sanitizeAiInlineImages(String value, Set<String> allowed, Set<String> seen) {
+    if (value == null || value.isBlank()) {
+      return value;
+    }
+    String cleaned = INLINE_BASE64_FIGURE.matcher(value).replaceAll("");
+    cleaned = INLINE_BASE64_IMAGE.matcher(cleaned).replaceAll("");
+    cleaned = removeDuplicateOrUnknownFigures(cleaned, allowed, seen);
+    return removeUnknownImageTags(cleaned, allowed);
+  }
+
+  private String removeDuplicateOrUnknownFigures(String value, Set<String> allowed, Set<String> seen) {
+    Matcher matcher = INLINE_FIGURE.matcher(value);
+    StringBuffer buffer = new StringBuffer();
+    while (matcher.find()) {
+      String fileId = matcher.group(1);
+      String replacement = "";
+      if (allowed.contains(fileId) && !seen.contains(fileId)) {
+        seen.add(fileId);
+        replacement = matcher.group();
+      }
+      matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+    }
+    matcher.appendTail(buffer);
+    return buffer.toString();
+  }
+
+  private String removeUnknownImageTags(String value, Set<String> allowed) {
+    Matcher matcher = INLINE_IMAGE_TAG.matcher(value);
+    StringBuffer buffer = new StringBuffer();
+    while (matcher.find()) {
+      Matcher idMatcher = INLINE_FILE_REFERENCE.matcher(matcher.group());
+      String replacement = "";
+      if (idMatcher.find() && allowed.contains(idMatcher.group(1))) {
+        replacement = matcher.group();
+      }
+      matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+    }
+    matcher.appendTail(buffer);
+    return buffer.toString();
   }
 
   private ReportSections normalizeAiReportText(ReportSections sections) {
@@ -1967,33 +2091,119 @@ public class ReportDraftService {
     return IMAGE_FOLLOWED_BY_LABEL_TEXT.matcher(normalized).replaceAll("$2$1");
   }
 
-  private String removeNonEquipmentImageLabels(String value) {
-    if (value == null || value.isBlank()) {
-      return value;
-    }
-    String cleaned = NON_EQUIPMENT_IMAGE_LABEL_BLOCK.matcher(value).replaceAll("");
-    return NON_EQUIPMENT_IMAGE_LABEL_TEXT.matcher(cleaned).replaceAll("$1");
-  }
-
   private String preserveInlineFigures(String original, String generated) {
     String merged = generated == null ? "" : generated;
-    var matcher = INLINE_FIGURE.matcher(original == null ? "" : original);
-    var figures = new java.util.ArrayList<String>();
-    while (matcher.find()) {
-      String fileId = matcher.group(1);
-      if (!merged.contains("data-file-id=\"" + fileId + "\"")
-          && !merged.contains("data-file-id='" + fileId + "'")) {
-        figures.add(matcher.group());
-      }
+    List<InlineImageUnit> originalUnits = inlineImageUnits(original);
+    if (originalUnits.isEmpty()) {
+      return merged;
     }
-    if (figures.isEmpty()) return restoreInlineImageRows(original, merged);
     if (!HTML_ELEMENT.matcher(merged).find()) {
       merged =
           "<div>" + htmlEscape(merged).replace("\r\n", "<br />").replace("\n", "<br />") + "</div>";
     }
-    return restoreInlineImageRows(original, merged + String.join("", figures));
+    for (InlineImageUnit unit : originalUnits) {
+      String restored = replaceFirstInlineImageUnit(merged, unit);
+      if (!restored.equals(merged)) {
+        merged = restored;
+      } else if (!containsAnyInlineImageId(merged, unit.fileIds())) {
+        merged += unit.html();
+      }
+    }
+    return merged;
   }
 
+  private List<InlineImageUnit> inlineImageUnits(String html) {
+    String source = html == null ? "" : html;
+    var units = new ArrayList<InlineImageUnit>();
+    int index = 0;
+    while (index < source.length()) {
+      Matcher rowMatcher = INLINE_IMAGE_ROW.matcher(source);
+      Matcher figureMatcher = INLINE_FIGURE.matcher(source);
+      boolean hasRow = rowMatcher.find(index);
+      boolean hasFigure = figureMatcher.find(index);
+      if (!hasRow && !hasFigure) {
+        break;
+      }
+      if (hasRow && (!hasFigure || rowMatcher.start() <= figureMatcher.start())) {
+        units.add(new InlineImageUnit(inlineFileIdsInOrder(rowMatcher.group()), rowMatcher.group()));
+        index = rowMatcher.end();
+      } else {
+        units.add(new InlineImageUnit(List.of(figureMatcher.group(1)), figureMatcher.group()));
+        index = figureMatcher.end();
+      }
+    }
+    return units.stream().filter((unit) -> !unit.fileIds().isEmpty()).toList();
+  }
+
+  private String replaceFirstInlineImageUnit(String html, InlineImageUnit unit) {
+    if (unit.fileIds().size() > 1) {
+      return replaceInlineImageRowUnit(html, unit);
+    }
+    Matcher rowMatcher = INLINE_IMAGE_ROW.matcher(html == null ? "" : html);
+    while (rowMatcher.find()) {
+      if (containsAllInlineImageIds(rowMatcher.group(), unit.fileIds())) {
+        return html.substring(0, rowMatcher.start()) + unit.html() + html.substring(rowMatcher.end());
+      }
+    }
+    for (String id : unit.fileIds()) {
+      Pattern figurePattern =
+          Pattern.compile(
+              "(?is)\\s*<figure\\b[^>]*data-file-id=[\"']"
+                  + Pattern.quote(id)
+                  + "[\"'][^>]*>.*?</figure>\\s*");
+      Matcher figureMatcher = figurePattern.matcher(html);
+      if (figureMatcher.find()) {
+        return figureMatcher.replaceFirst(Matcher.quoteReplacement(unit.html()));
+      }
+    }
+    return html;
+  }
+
+  private String replaceInlineImageRowUnit(String html, InlineImageUnit unit) {
+    String source = html == null ? "" : html;
+    String placeholder = "__INLINE_IMAGE_ROW_RESTORE_" + Math.abs(unit.html().hashCode()) + "__";
+    Matcher rowMatcher = INLINE_IMAGE_ROW.matcher(source);
+    while (rowMatcher.find()) {
+      if (containsAllInlineImageIds(rowMatcher.group(), unit.fileIds())) {
+        String withPlaceholder =
+            source.substring(0, rowMatcher.start())
+                + placeholder
+                + source.substring(rowMatcher.end());
+        return removeInlineFiguresByIds(withPlaceholder, unit.fileIds()).replace(placeholder, unit.html());
+      }
+    }
+    String withPlaceholder = source;
+    boolean inserted = false;
+    for (String id : unit.fileIds()) {
+      Pattern figurePattern = inlineFigurePattern(id);
+      Matcher figureMatcher = figurePattern.matcher(withPlaceholder);
+      if (!inserted && figureMatcher.find()) {
+        withPlaceholder = figureMatcher.replaceFirst(Matcher.quoteReplacement(placeholder));
+        inserted = true;
+      }
+    }
+    if (!inserted) {
+      return source;
+    }
+    return removeInlineFiguresByIds(withPlaceholder, unit.fileIds()).replace(placeholder, unit.html());
+  }
+
+  private String removeInlineFiguresByIds(String html, List<String> ids) {
+    String cleaned = html == null ? "" : html;
+    for (String id : ids) {
+      cleaned = inlineFigurePattern(id).matcher(cleaned).replaceAll("");
+    }
+    return cleaned;
+  }
+
+  private Pattern inlineFigurePattern(String id) {
+    return Pattern.compile(
+        "(?is)\\s*<figure\\b[^>]*data-file-id=[\"']"
+            + Pattern.quote(id)
+            + "[\"'][^>]*>.*?</figure>\\s*");
+  }
+
+  @SuppressWarnings("unused")
   private String restoreInlineImageRows(String original, String generated) {
     String merged = generated == null ? "" : generated;
     var rowMatcher = INLINE_IMAGE_ROW.matcher(original == null ? "" : original);
@@ -2152,7 +2362,7 @@ public class ReportDraftService {
                ai_final_reason = COALESCE(NULLIF(?, ''), ai_final_reason),
                updated_at = CURRENT_TIMESTAMP(3),
                updated_by = ?, version = version + 1
-         WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
+         WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING', 'AI_COMPLETED', 'AI_FAILED')
         """,
             sections.title(),
             sections.situation(),
@@ -2363,9 +2573,16 @@ public class ReportDraftService {
   }
 
   private void ensureEditable(Draft draft) {
-    if (!("DRAFT".equals(draft.status()) || "CORRECTING".equals(draft.status()))) {
+    if (!isEditableDraftStatus(draft.status())) {
       throw new ResourceConflictException("DRAFT_NOT_EDITABLE", "工作稿当前状态不可编辑，请刷新任务状态");
     }
+  }
+
+  private boolean isEditableDraftStatus(String status) {
+    return "DRAFT".equals(status)
+        || "CORRECTING".equals(status)
+        || "AI_COMPLETED".equals(status)
+        || "AI_FAILED".equals(status);
   }
 
   private void requireExpectedVersion(Draft draft, long expectedVersion) {
@@ -2380,7 +2597,7 @@ public class ReportDraftService {
             """
             UPDATE report_draft
                SET version = version
-             WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING')
+             WHERE id = ? AND version = ? AND status IN ('DRAFT', 'CORRECTING', 'AI_COMPLETED', 'AI_FAILED')
             """,
             draftId,
             expectedVersion);
@@ -2580,6 +2797,51 @@ public class ReportDraftService {
       types.add("业务量波动");
     }
     return types.isEmpty() ? "未分类" : String.join("、", types);
+  }
+
+  private String historicalEquipmentStyleExamples(String value) {
+    String normalized =
+        value(value)
+            .replaceAll("(?is)<br\\s*/?>", "。")
+            .replaceAll("(?is)</(?:p|div|h[1-6]|li)>", "。")
+            .replaceAll("(?is)<[^>]+>", " ")
+            .replace("&nbsp;", " ")
+            .replace("&#x20;", " ")
+            .replaceAll("\\s+", " ")
+            .trim();
+    if (normalized.isBlank()) {
+      return "";
+    }
+    var examples = new ArrayList<String>();
+    for (String sentence : normalized.split("[。；;\\n]+")) {
+      String trimmed = sentence.trim();
+      if (trimmed.length() < 6) {
+        continue;
+      }
+      boolean looksLikeEquipment =
+          containsAny(
+              trimmed,
+              "设备情况",
+              "BBU",
+              "RRU",
+              "AAU",
+              "700M",
+              "NB",
+              "诺基亚",
+              "华为",
+              "中兴",
+              "爱立信");
+      boolean hasOperatorOrCaption =
+          containsAny(trimmed, "移动", "联通", "电信", "设备情况", "设备机柜", "机房全景");
+      if (looksLikeEquipment && hasOperatorOrCaption) {
+        examples.add(compact(trimmed, 360));
+      }
+    }
+    return examples.stream()
+        .distinct()
+        .limit(4)
+        .reduce((left, right) -> left + "；" + right)
+        .orElse("");
   }
 
   private String normalizeHistoricalText(String value) {
@@ -3033,10 +3295,16 @@ public class ReportDraftService {
 
   private record AnalysisImageInput(AiImage image, List<String> fileIds) {}
 
+  private record InlineImageUnit(List<String> fileIds, String html) {}
+
   private record CorrectionContent(ReportSections sections, List<String> imageIds) {}
 
   public record ImageAnalysisTaskPayload(
-      String draftId, String instruction, List<String> imageFileIds) {}
+      String draftId,
+      Integer contentVersion,
+      String instruction,
+      List<String> imageFileIds,
+      ReportSections layoutSections) {}
 
   private record Snapshot(
       long id,

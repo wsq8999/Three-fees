@@ -54,12 +54,14 @@ const rawContent = computed(
   () => report.value?.previewHtml || report.value?.summary || "",
 );
 const normalizedContent = computed(() =>
-  normalizePreviewContent(rawContent.value),
+  isHistorical.value
+    ? normalizeHistoricalPreviewHtml(rawContent.value)
+    : normalizePreviewContent(rawContent.value),
 );
 const contentHtml = computed(() => {
   if (!looksLikeHtml(normalizedContent.value)) return "";
   return isHistorical.value
-    ? normalizeHistoricalPreviewHtml(normalizedContent.value)
+    ? normalizedContent.value
     : emphasizeReportCauses(normalizedContent.value);
 });
 const reportSections = computed(() => {
@@ -240,38 +242,11 @@ function normalizeReportHtmlWhitespace(value: string): string {
 }
 
 function normalizeHistoricalPreviewHtml(value: string): string {
-  const template = document.createElement("template");
-  template.innerHTML = normalizeReportHtmlWhitespace(value);
-  template.content.querySelectorAll<HTMLElement>("img,figure").forEach((element) => {
-    element.removeAttribute("data-display-width");
-    element.removeAttribute("data-display-height");
-    element.removeAttribute("width");
-    element.removeAttribute("height");
-    removeSizingStyle(element);
-  });
-  template.content.querySelectorAll<HTMLElement>("p").forEach((paragraph) => {
-    const hasVisibleContent =
-      (paragraph.textContent ?? "").trim().length > 0 ||
-      paragraph.querySelector("img,table") !== null;
-    if (!hasVisibleContent) paragraph.remove();
-  });
-  return template.innerHTML;
-}
-
-function removeSizingStyle(element: HTMLElement): void {
-  const rawStyle = element.getAttribute("style");
-  if (rawStyle === null) return;
-  const kept = rawStyle
-    .split(";")
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .filter((item) => !/^(?:min-|max-)?(?:width|height)\s*:/i.test(item))
-    .join(";");
-  if (kept.length > 0) {
-    element.setAttribute("style", kept);
-  } else {
-    element.removeAttribute("style");
-  }
+  return value
+    .trim()
+    .replace(/Historical Word preview/gi, "")
+    .replace(/Original Word file is the source of truth\./gi, "")
+    .trim();
 }
 
 function clearPreviewImageHandlers(): void {
@@ -345,18 +320,29 @@ function enhanceReportPreviewImages(): void {
 
 function reconcilePreviewImageSize(image: HTMLImageElement): void {
   if (image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+  const availableWidth = previewContentRef.value?.clientWidth ?? 0;
   const width =
     parseCssPixelValue(image.dataset.displayWidth ?? null) ??
     parseCssPixelValue(image.getAttribute("width")) ??
     parseCssPixelValue(cssProperty(image.getAttribute("style"), "width"));
   if (width === undefined) return;
-  const height = Math.round((width * image.naturalHeight * 100) / image.naturalWidth) / 100;
-  image.dataset.displayWidth = String(width);
+  const displayWidth =
+    availableWidth > 0 ? Math.min(width, availableWidth) : width;
+  const height =
+    Math.round((displayWidth * image.naturalHeight * 100) / image.naturalWidth) /
+    100;
+  image.dataset.displayWidth = String(displayWidth);
   image.dataset.displayHeight = String(height);
-  image.setAttribute("width", String(Math.round(width)));
+  image.setAttribute("width", String(Math.round(displayWidth)));
   image.setAttribute("height", String(Math.round(height)));
-  image.style.width = `${width}px`;
+  image.style.width = `${displayWidth}px`;
   image.style.height = `${height}px`;
+  const figure = image.closest<HTMLElement>("figure");
+  if (figure !== null) {
+    figure.style.maxWidth = "100%";
+    figure.style.marginLeft = "auto";
+    figure.style.marginRight = "auto";
+  }
 }
 
 function parseCssPixelValue(value: string | null): number | undefined {
@@ -571,7 +557,10 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="report-preview business-card" aria-label="报告预览">
-      <article class="report-sheet">
+      <article
+        class="report-sheet"
+        :class="{ 'report-sheet--historical': isHistorical }"
+      >
         <article
           v-if="contentHtml"
           ref="previewContentRef"
@@ -711,32 +700,41 @@ onBeforeUnmount(() => {
 }
 
 .report-sheet {
-  width: min(960px, 100%);
+  box-sizing: border-box;
+  width: min(794px, 100%);
   min-height: 620px;
-  padding: 48px 56px;
+  padding: 48px 56px 64px;
   margin: 0 auto;
   color: #001733;
-  line-height: 1.9;
+  line-height: 2;
   background: #fff;
 }
 
-.report-sheet :deep(h1) {
+.word-preview-content {
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.report-sheet:not(.report-sheet--historical) :deep(h1) {
   margin: 0 0 28px;
   text-align: center;
   font-size: 24px;
   font-weight: 800;
+  line-height: 1.6;
 }
 
-.report-sheet h2,
-.report-sheet :deep(h2) {
-  margin: 26px 0 12px;
+.report-sheet:not(.report-sheet--historical) h2,
+.report-sheet:not(.report-sheet--historical) :deep(h2) {
+  margin: 22px 0 12px;
   font-size: 18px;
   font-weight: 800;
 }
 
-.report-sheet p,
-.report-sheet :deep(p) {
-  margin: 10px 0;
+.report-sheet:not(.report-sheet--historical) p,
+.report-sheet:not(.report-sheet--historical) :deep(p) {
+  margin: 0;
+  padding: 6px 8px;
   text-indent: 2em;
   white-space: pre-wrap;
 }
@@ -748,8 +746,9 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
-.word-preview-content :deep(p) {
-  margin: 10px 0;
+.word-preview-content:not(.word-preview-content--historical) :deep(p) {
+  margin: 0;
+  padding: 6px 8px;
   text-indent: 2em;
   white-space: pre-wrap;
 }
@@ -759,64 +758,99 @@ onBeforeUnmount(() => {
   text-indent: 0;
 }
 
-.word-preview-content :deep(table) {
+.report-sheet--historical {
+  width: min(794px, 100%);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.word-preview-content--historical {
   width: 100%;
-  margin: 12px 0;
-  border-collapse: collapse;
+  max-width: 100%;
 }
 
-.word-preview-content :deep(td),
-.word-preview-content :deep(th) {
-  padding: 6px 8px;
-  border: 1px solid #d8e0eb;
-}
-
-.word-preview-content :deep(img) {
+.word-preview-content:not(.word-preview-content--historical) :deep(img) {
   display: block;
   max-width: 100%;
-  height: auto !important;
+  height: auto;
   margin: 12px auto;
   object-fit: contain;
 }
 
+.word-preview-content:not(.word-preview-content--historical) :deep(figure) {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
 .word-preview-content:not(.word-preview-content--historical) :deep(img:not([height]):not([style*="height"])) {
-  height: auto !important;
+  height: auto;
 }
 
 .word-preview-content--historical :deep(img) {
-  display: inline-block;
   max-width: 100%;
-  height: auto !important;
-  margin: 0 8px 8px 0;
-  vertical-align: top;
+  height: auto;
   object-fit: contain;
 }
 
-.word-preview-content--historical :deep(.word-inline-image) {
-  display: inline-block;
+.word-preview-content--historical :deep(figure) {
   max-width: 100%;
+}
+
+.word-preview-content--historical :deep(.word-inline-image) {
+  max-width: 100%;
+}
+
+.word-preview-content--historical :deep(table) {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.word-preview-content--historical :deep(td),
+.word-preview-content--historical :deep(th) {
+  padding: 6px 8px;
   vertical-align: top;
+  border: 1px solid #d8e0eb;
+}
+
+.word-preview-content--historical :deep(td > p:first-child),
+.word-preview-content--historical :deep(th > p:first-child) {
+  margin-top: 0;
+}
+
+.word-preview-content--historical :deep(td > p:last-child),
+.word-preview-content--historical :deep(th > p:last-child) {
+  margin-bottom: 0;
 }
 
 .word-preview-content :deep(.inline-image-row) {
   display: flex;
   flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
   gap: 8px;
   align-items: flex-start;
   max-width: 100%;
   margin: 8px 0;
+  overflow: visible;
 }
 
 .word-preview-content :deep(.inline-image-row figure),
 .word-preview-content :deep(.inline-image-row img) {
+  box-sizing: border-box;
   display: inline-block;
-  max-width: 100%;
   margin: 0;
   vertical-align: top;
 }
 
-.report-sheet .word-preview-content--historical :deep(p) {
-  text-indent: 0;
+.word-preview-content :deep(.inline-image-row figure) {
+  flex: 0 0 auto;
+}
+
+.word-preview-content :deep(.inline-image-row img) {
+  display: block;
+  max-width: min(100%, 682px);
 }
 
 .report-sheet .word-preview-content--historical :deep(.word-preview > p:first-child) {

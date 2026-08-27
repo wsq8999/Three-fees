@@ -77,8 +77,8 @@ public class FormalReportTaskProcessor implements TaskProcessor {
       }
       var generated = documentGenerator.generate(input.sections(), images);
       byte[] wordBytes =
-          correction && isFullDocumentHtml(input.sections())
-              ? documentGenerator.generateWordFromHtml(input.sections().situation(), images)
+          isHtmlDraft(input.sections())
+              ? documentGenerator.generateWordFromHtml(reportHtml(input.sections()), images)
               : generated.word();
       word =
           storedFileService.storeGenerated(
@@ -153,6 +153,43 @@ public class FormalReportTaskProcessor implements TaskProcessor {
     return looksLikeHtml(sections.situation())
         && isBlank(sections.analysis())
         && isBlank(sections.rectification());
+  }
+
+  static boolean isHtmlDraft(ReportSections sections) {
+    return looksLikeHtml(sections.situation())
+        || looksLikeHtml(sections.analysis())
+        || looksLikeHtml(sections.rectification());
+  }
+
+  static String reportHtml(ReportSections sections) {
+    if (isFullDocumentHtml(sections)) {
+      return sections.situation();
+    }
+    return "<article class=\"confirmed-report-content\"><h1>"
+        + escapeHtml(sections.title())
+        + "</h1><h2>一、情况说明</h2>"
+        + htmlContent(sections.situation())
+        + "<h2>二、排查分析</h2>"
+        + htmlContent(sections.analysis())
+        + "<h2>三、整改小结</h2>"
+        + htmlContent(sections.rectification())
+        + "</article>";
+  }
+
+  private static String htmlContent(String value) {
+    if (value == null || value.isBlank()) {
+      return "";
+    }
+    return looksLikeHtml(value) ? value : "<p>" + escapeHtml(value).replace("\n", "<br />") + "</p>";
+  }
+
+  private static String escapeHtml(String value) {
+    return (value == null ? "" : value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;");
   }
 
   private static boolean isBlank(String value) {

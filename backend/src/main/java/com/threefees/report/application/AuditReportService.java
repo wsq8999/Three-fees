@@ -34,12 +34,17 @@ public class AuditReportService {
   private final JdbcTemplate jdbcTemplate;
   private final ObjectMapper objectMapper;
   private final StoredFileService storedFileService;
+  private final ReportDocumentGenerator documentGenerator;
 
   public AuditReportService(
-      JdbcTemplate jdbcTemplate, ObjectMapper objectMapper, StoredFileService storedFileService) {
+      JdbcTemplate jdbcTemplate,
+      ObjectMapper objectMapper,
+      StoredFileService storedFileService,
+      ReportDocumentGenerator documentGenerator) {
     this.jdbcTemplate = jdbcTemplate;
     this.objectMapper = objectMapper;
     this.storedFileService = storedFileService;
+    this.documentGenerator = documentGenerator;
   }
 
   @Transactional(readOnly = true)
@@ -793,7 +798,58 @@ public class AuditReportService {
             .findFirst()
             .orElseThrow(() -> new ResourceNotFoundException("正式报告"));
     requireScope(actor, detail.cityCode());
-    return detail;
+    return refreshHistoricalPreview(detail);
+  }
+
+  private ReportDetail refreshHistoricalPreview(ReportDetail detail) {
+    if (!isHistoricalSource(detail.sourceType()) || detail.wordFileId() == null) {
+      return detail;
+    }
+    try {
+      var file = storedFileService.find(detail.wordFileId());
+      String previewHtml =
+          documentGenerator.extractWordPreviewHtml(
+              storedFileService.readBytes(file), file.originalName());
+      if (previewHtml == null || previewHtml.isBlank()) {
+        return detail;
+      }
+      return new ReportDetail(
+          detail.id(),
+          detail.reportNumber(),
+          detail.billingPointPeriodId(),
+          detail.billingPointCode(),
+          detail.billingPointName(),
+          detail.cityCode(),
+          detail.cityName(),
+          detail.district(),
+          detail.period(),
+          detail.periodStart(),
+          detail.periodEnd(),
+          detail.sourceType(),
+          detail.status(),
+          detail.actualEnergy(),
+          detail.actualAmount(),
+          detail.overLimitType(),
+          detail.maxRatio(),
+          detail.overLimitRatios(),
+          new ReportSections(detail.sections().title(), previewHtml, "", ""),
+          detail.wordFileId(),
+          detail.pdfFileId(),
+          detail.businessSnapshot(),
+          detail.generatedAt(),
+          detail.updatedAt(),
+          detail.updatedBy(),
+          detail.correctionReason(),
+          detail.correctedAt(),
+          detail.correctedBy(),
+          detail.version());
+    } catch (RuntimeException exception) {
+      return detail;
+    }
+  }
+
+  private boolean isHistoricalSource(String sourceType) {
+    return "HISTORICAL".equals(sourceType) || "IMPORTED".equals(sourceType);
   }
 
   public FileAccess reportFile(String reportId, boolean pdf, CurrentUser actor) {

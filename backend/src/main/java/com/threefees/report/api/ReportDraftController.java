@@ -89,7 +89,8 @@ public class ReportDraftController {
       @RequestHeader(HttpHeaders.IF_MATCH) String ifMatch,
       @Valid @RequestBody UpdateDraftRequest request,
       @AuthenticationPrincipal CurrentUser actor) {
-    Draft draft = service.edit(publicId, request.toSections(), parseVersion(ifMatch), actor);
+    Draft draft =
+        service.edit(publicId, request.toSections(), request.imageFileIds(), parseVersion(ifMatch), actor);
     return draftResponse(draft).body(DraftResponse.from(draft));
   }
 
@@ -221,7 +222,8 @@ public class ReportDraftController {
       @NotBlank @Size(max = 500) String title,
       @NotBlank @Size(max = 100_000) String situation,
       @NotNull @Size(max = 100_000) String analysis,
-      @NotNull @Size(max = 100_000) String rectification) {
+      @NotNull @Size(max = 100_000) String rectification,
+      List<String> imageFileIds) {
 
     ReportSections toSections() {
       return new ReportSections(title, situation, analysis, rectification);

@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 import com.threefees.ai.application.AiServiceException;
+import com.threefees.ai.application.AiServiceClient.ReportSections;
 import com.threefees.report.application.ReportDraftService.ImageAnalysisTaskPayload;
 import com.threefees.task.application.TaskExecutionException;
 import com.threefees.task.domain.BusinessTask;
@@ -27,13 +28,18 @@ class AiImageAnalysisTaskProcessorTest {
         new AiImageAnalysisTaskProcessor(objectMapper, draftService);
     String payload =
         objectMapper.writeValueAsString(
-            new ImageAnalysisTaskPayload("draft-1", "分析图片", List.of("file-1")));
+            new ImageAnalysisTaskPayload(
+                "draft-1",
+                1,
+                "分析图片",
+                List.of("file-1"),
+                new ReportSections("标题", "<p>情况</p>", "<p>分析</p>", "<p>整改</p>")));
     BusinessTask task =
         new BusinessTask(
             1L,
             "task-1",
             TaskType.AI_IMAGE_ANALYSIS,
-            "AI_IMAGE_ANALYSIS:SNAPSHOT:snapshot-1",
+            "AI_IMAGE_ANALYSIS:DRAFT:draft-1:CONTENT_VERSION:1",
             TaskStatus.RUNNING,
             1,
             3,

@@ -78,6 +78,27 @@ class ReportDocumentGeneratorTest {
   }
 
   @Test
+  void keepsTablesInHistoricalPreviewHtml() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    byte[] wordBytes;
+    try (var document = new XWPFDocument();
+        var output = new ByteArrayOutputStream()) {
+      var table = document.createTable(1, 2);
+      table.getRow(0).getCell(0).setText("表格左列");
+      table.getRow(0).getCell(1).setText("表格右列");
+      document.write(output);
+      wordBytes = output.toByteArray();
+    }
+
+    String html = generator.extractWordPreviewHtml(wordBytes, "历史报告.docx");
+
+    assertThat(html)
+        .contains("<table class=\"word-table\">", "<tr>", "<td>")
+        .contains("表格左列", "表格右列")
+        .contains("</td>", "</tr>", "</table>");
+  }
+
+  @Test
   void splitsMultipleCauseSentencesIntoSeparatePreviewParagraphs() throws Exception {
     var generator = new ReportDocumentGenerator("");
     byte[] wordBytes;
@@ -497,7 +518,7 @@ class ReportDocumentGeneratorTest {
   }
 
   @Test
-  void keepsInlineImageRowInOneWordParagraphAndScalesToPageWidth() throws Exception {
+  void keepsInlineImageRowOnOneWordLineWhenImagesFitA4Width() throws Exception {
     var generator = new ReportDocumentGenerator("");
     var firstBytes = new ByteArrayOutputStream();
     var secondBytes = new ByteArrayOutputStream();
@@ -506,6 +527,59 @@ class ReportDocumentGeneratorTest {
     var sections =
         new ReportSections(
             "并排图片报告",
+            "情况正文",
+            "<div class=\"inline-image-row\" data-image-group-id=\"group-1\">"
+                + "<figure class=\"inline-report-image\" data-file-id=\"row-image-1\""
+                + " data-display-width=\"220\" data-display-height=\"110\">"
+                + "<img data-file-id=\"row-image-1\" width=\"220\" height=\"110\" /></figure>"
+                + "<figure class=\"inline-report-image\" data-file-id=\"row-image-2\""
+                + " data-display-width=\"220\" data-display-height=\"110\">"
+                + "<img data-file-id=\"row-image-2\" width=\"220\" height=\"110\" /></figure>"
+                + "</div>",
+            "整改内容");
+
+    var generated =
+        generator.generate(
+            sections,
+            List.of(
+                new ReportImage("row-image-1", "first.png", "image/png", firstBytes.toByteArray()),
+                new ReportImage("row-image-2", "second.png", "image/png", secondBytes.toByteArray())));
+
+    try (var word = new XWPFDocument(new ByteArrayInputStream(generated.word()))) {
+      assertThat(word.getTables()).hasSize(1);
+      var table = word.getTables().getFirst();
+      assertThat(table.getRows()).hasSize(1);
+      assertThat(table.getRow(0).getTableCells()).hasSize(2);
+      long embeddedPictureCount =
+          table.getRow(0).getTableCells().stream()
+              .flatMap(cell -> cell.getParagraphs().stream())
+              .flatMap(paragraph -> paragraph.getRuns().stream())
+              .flatMap(run -> run.getEmbeddedPictures().stream())
+              .count();
+      assertThat(embeddedPictureCount).isEqualTo(2);
+      var extents =
+          table.getRow(0).getTableCells().stream()
+              .flatMap(cell -> cell.getParagraphs().stream())
+              .flatMap(paragraph -> paragraph.getRuns().stream())
+              .flatMap(run -> run.getEmbeddedPictures().stream())
+              .map(picture -> picture.getCTPicture().getSpPr().getXfrm().getExt())
+              .toList();
+      assertThat(extents).hasSize(2);
+      long totalWidth = extents.stream().mapToLong(extent -> extent.getCx()).sum();
+      assertThat(totalWidth).isLessThanOrEqualTo(Units.toEMU(420));
+    }
+  }
+
+  @Test
+  void wrapsInlineImageRowInWordWhenImagesDoNotFitA4Width() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    var firstBytes = new ByteArrayOutputStream();
+    var secondBytes = new ByteArrayOutputStream();
+    ImageIO.write(new BufferedImage(800, 400, BufferedImage.TYPE_INT_RGB), "png", firstBytes);
+    ImageIO.write(new BufferedImage(800, 400, BufferedImage.TYPE_INT_RGB), "png", secondBytes);
+    var sections =
+        new ReportSections(
+            "自然换行图片报告",
             "情况正文",
             "<div class=\"inline-image-row\" data-image-group-id=\"group-1\">"
                 + "<figure class=\"inline-report-image\" data-file-id=\"row-image-1\""
@@ -525,24 +599,22 @@ class ReportDocumentGeneratorTest {
                 new ReportImage("row-image-2", "second.png", "image/png", secondBytes.toByteArray())));
 
     try (var word = new XWPFDocument(new ByteArrayInputStream(generated.word()))) {
-      var imageParagraphs =
-          word.getParagraphs().stream()
-              .filter(
-                  paragraph ->
-                      paragraph.getRuns().stream()
-                          .flatMap(run -> run.getEmbeddedPictures().stream())
-                          .findAny()
-                          .isPresent())
-              .toList();
-      assertThat(imageParagraphs).hasSize(1);
-      var extents =
-          imageParagraphs.getFirst().getRuns().stream()
+      assertThat(word.getTables()).hasSize(2);
+      assertThat(word.getTables())
+          .allSatisfy(
+              table -> {
+                assertThat(table.getRows()).hasSize(1);
+                assertThat(table.getRow(0).getTableCells()).hasSize(1);
+              });
+      long embeddedPictureCount =
+          word.getTables().stream()
+              .flatMap(table -> table.getRows().stream())
+              .flatMap(row -> row.getTableCells().stream())
+              .flatMap(cell -> cell.getParagraphs().stream())
+              .flatMap(paragraph -> paragraph.getRuns().stream())
               .flatMap(run -> run.getEmbeddedPictures().stream())
-              .map(picture -> picture.getCTPicture().getSpPr().getXfrm().getExt())
-              .toList();
-      assertThat(extents).hasSize(2);
-      long totalWidth = extents.stream().mapToLong(extent -> extent.getCx()).sum();
-      assertThat(totalWidth).isLessThanOrEqualTo(Units.toEMU(420));
+              .count();
+      assertThat(embeddedPictureCount).isEqualTo(2);
     }
   }
 

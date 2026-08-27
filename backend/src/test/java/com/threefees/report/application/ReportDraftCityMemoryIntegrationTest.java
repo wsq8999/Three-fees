@@ -107,7 +107,7 @@ class ReportDraftCityMemoryIntegrationTest {
         "MEMORY-POINT-001",
         "南京测试报账点",
         "2026-06",
-        "南京同点历史：上月核查为空调运行时长增加。");
+        "南京同点历史：上月核查为空调运行时长增加。设备情况：移动：4G诺基亚BBU*1+RRU*3，NB BBU*1+RRU*6，700MRRU*3；联通：4G中兴BBU*1+RRU*3。");
     seedAuditReport(
         "320100",
         "CITY-OTHER-001",
@@ -127,7 +127,13 @@ class ReportDraftCityMemoryIntegrationTest {
         .anySatisfy(
             reference ->
                 assertThat(reference.summary())
-                    .contains("南京同点历史", "历史明确原因", "历史原因类型"));
+                    .contains(
+                        "南京同点历史",
+                        "历史明确原因",
+                        "历史原因类型",
+                        "历史图片说明写法",
+                        "移动：4G诺基亚BBU*1+RRU*3",
+                        "联通：4G中兴BBU*1+RRU*3"));
     assertThat(context.cityMemories())
         .anySatisfy(reference -> assertThat(reference.summary()).contains("南京本市其他案例"));
     assertThat(context.cityMemories())
@@ -319,6 +325,44 @@ class ReportDraftCityMemoryIntegrationTest {
   }
 
   @Test
+  void manualEditPersistsOnlyVisibleInlineImages() {
+    String snapshotId = seedOverLimitSnapshot();
+    CurrentUser actor = mock(CurrentUser.class);
+    when(actor.username()).thenReturn("city-memory-test");
+    when(actor.cityCode()).thenReturn("320100");
+    when(actor.roles()).thenReturn(Set.of(Role.CITY_USER));
+    var draft = service.createOrResume(snapshotId, actor);
+    List<String> imageIds = seedDraftImages(draft.id());
+    draft = service.find(draft.publicId(), actor);
+
+    var edited =
+        service.edit(
+            draft.publicId(),
+            new ReportSections(
+                draft.sections().title(),
+                draft.sections().situation(),
+                "<p>只保留第一张图片</p><figure data-file-id=\""
+                    + imageIds.getFirst()
+                    + "\"><img data-file-id=\""
+                    + imageIds.getFirst()
+                    + "\"></figure>",
+                draft.sections().rectification()),
+            List.of(imageIds.getFirst()),
+            draft.entityVersion(),
+            actor);
+
+    var reloaded = service.find(draft.publicId(), actor);
+
+    assertThat(edited.currentImageFileIds()).containsExactly(imageIds.getFirst());
+    assertThat(reloaded.currentImageFileIds()).containsExactly(imageIds.getFirst());
+    assertThat(reloaded.sections().analysis())
+        .contains(imageIds.getFirst())
+        .doesNotContain(imageIds.get(1));
+    assertThat(service.versions(draft.publicId(), actor).getLast().imageFileIds())
+        .containsExactly(imageIds.getFirst());
+  }
+
+  @Test
   void findSyncsFailedImageAnalysisTaskBackToDraft() {
     String snapshotId = seedOverLimitSnapshot();
     CurrentUser actor = mock(CurrentUser.class);
@@ -336,7 +380,7 @@ class ReportDraftCityMemoryIntegrationTest {
                 'city-memory-test', 'city-memory-test')
         """,
         taskId,
-        "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId(),
+        "AI_IMAGE_ANALYSIS:DRAFT:" + draft.publicId() + ":CONTENT_VERSION:" + draft.currentVersion(),
         "{\"draftId\":\"" + draft.publicId() + "\",\"instruction\":\"测试\",\"imageFileIds\":[]}");
     jdbcTemplate.update(
         """
@@ -441,7 +485,7 @@ class ReportDraftCityMemoryIntegrationTest {
                 'city-memory-test', 'city-memory-test')
         """,
         taskId,
-        "AI_IMAGE_ANALYSIS:SNAPSHOT:" + draft.billingPointPeriodId(),
+        "AI_IMAGE_ANALYSIS:DRAFT:" + draft.publicId() + ":CONTENT_VERSION:" + draft.currentVersion(),
         "{\"draftId\":\"" + draft.publicId() + "\",\"instruction\":\"测试\",\"imageFileIds\":[]}");
 
     var hidden = taskController.list(null, null, null, null, 0, 20, actor);
@@ -462,29 +506,6 @@ class ReportDraftCityMemoryIntegrationTest {
 
     assertThat(visible.items()).hasSize(1);
     assertThat(visible.items().getFirst().relatedDraftId()).isEqualTo(draft.publicId());
-  }
-
-  @Test
-  void removesNonEquipmentImageLabelsButKeepsFigures() throws Exception {
-    ReportDraftService target = AopTestUtils.getTargetObject(service);
-    var method = ReportDraftService.class.getDeclaredMethod("removeNonEquipmentImageLabels", String.class);
-    method.setAccessible(true);
-    String figure = "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>";
-
-    String cleaned =
-        (String)
-            method.invoke(
-                target,
-                "<p>缴费信息界面图：</p>"
-                    + figure
-                    + "<p>设备情况：移动4G BBU*1、RRU*3。</p>"
-                    + "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>");
-
-    assertThat(cleaned)
-        .doesNotContain("缴费信息界面图")
-        .contains(figure)
-        .contains("设备情况：移动4G BBU*1、RRU*3。")
-        .contains("file-2");
   }
 
   @Test
@@ -550,6 +571,90 @@ class ReportDraftCityMemoryIntegrationTest {
 
     assertThat(cleaned)
         .containsSubsequence("机房全景图", firstFigure, "设备情况", secondFigure, "本期电量同比超标原因");
+  }
+
+  @Test
+  void preserveInlineFiguresRestoresOriginalImageRowsWhenAiSplitsTheGroup() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method =
+        ReportDraftService.class.getDeclaredMethod(
+            "preserveInlineFigures", String.class, String.class);
+    method.setAccessible(true);
+    String originalRow =
+        "<div class=\"inline-image-row\" data-image-group-id=\"group-1\">"
+            + "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>"
+            + "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>"
+            + "</div>";
+    String generated =
+        "<p>设备情况：移动5G电源。</p>"
+            + "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>"
+            + "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>";
+
+    String cleaned = (String) method.invoke(target, originalRow, generated);
+
+    assertThat(cleaned)
+        .contains("inline-image-row", "data-image-group-id=\"group-1\"")
+        .containsSubsequence(
+            "inline-image-row",
+            "data-file-id=\"file-1\"",
+            "data-file-id=\"file-2\"");
+    assertThat(countOccurrences(cleaned, "data-file-id=\"file-1\"")).isEqualTo(2);
+    assertThat(countOccurrences(cleaned, "data-file-id=\"file-2\"")).isEqualTo(2);
+  }
+
+  @Test
+  void mergeAiTextWithLayoutSnapshotKeepsAiCaptionsAndOriginalImageNodes() throws Exception {
+    ReportDraftService target = AopTestUtils.getTargetObject(service);
+    var method =
+        ReportDraftService.class.getDeclaredMethod(
+            "mergeAiTextWithLayoutSnapshot", ReportSections.class, ReportSections.class);
+    method.setAccessible(true);
+    String originalRow =
+        "<div class=\"inline-image-row\" data-image-group-id=\"group-1\">"
+            + "<figure class=\"inline-report-image\" data-file-id=\"file-1\" data-display-width=\"240\" data-display-height=\"120\"><img data-file-id=\"file-1\"></figure>"
+            + "<figure class=\"inline-report-image\" data-file-id=\"file-2\" data-display-width=\"220\" data-display-height=\"110\"><img data-file-id=\"file-2\"></figure>"
+            + "</div>";
+    var layout =
+        new ReportSections(
+            "原标题",
+            "<p></p>",
+            originalRow
+                + "<figure class=\"inline-report-image\" data-file-id=\"file-3\" data-display-width=\"300\"><img data-file-id=\"file-3\"></figure>",
+            "");
+    var generated =
+        new ReportSections(
+            "AI标题<figure data-file-id=\"file-x\"><img data-file-id=\"file-x\"></figure>",
+            "<p>本期电量同比超标，需结合现场图片核查。</p>",
+            "<p>设备情况：电信：4GRRU*3、2.1GRRU*3。</p>"
+                + "<figure data-file-id=\"file-2\"><img data-file-id=\"file-2\"></figure>"
+                + "<figure data-file-id=\"file-1\"><img data-file-id=\"file-1\"></figure>"
+                + "<p>机房全景图：</p>"
+                + "<figure data-file-id=\"file-3\"><img data-file-id=\"file-3\"></figure>"
+                + "<p>本期电量同比超标原因：分摊比例上升。</p>"
+                + "<img src=\"data:image/png;base64,abc\" />",
+            "<p>经核查，不存在跑冒滴漏。</p>");
+
+    ReportSections merged = (ReportSections) method.invoke(target, layout, generated);
+
+    assertThat(merged.title()).isEqualTo("AI标题");
+    assertThat(merged.situation())
+        .contains("本期电量同比超标");
+    assertThat(merged.analysis())
+        .containsSubsequence(
+            "设备情况：电信",
+            "inline-image-row",
+            "file-1",
+            "file-2",
+            "机房全景图",
+            "data-file-id=\"file-3\"",
+            "本期电量同比超标原因")
+        .contains(
+            "data-image-group-id=\"group-1\"",
+            "data-display-width=\"240\"",
+            "data-display-width=\"300\"");
+    assertThat(merged.rectification()).contains("经核查，不存在跑冒滴漏。");
+    assertThat(merged.title()).doesNotContain("file-x");
+    assertThat(merged.analysis()).doesNotContain("base64");
   }
 
   @Test
@@ -888,6 +993,16 @@ class ReportDraftCityMemoryIntegrationTest {
     var method = ReportDraftService.class.getDeclaredMethod("agentContext", draft.getClass(), String.class);
     method.setAccessible(true);
     return (AgentContext) method.invoke(target, draft, intent);
+  }
+
+  private int countOccurrences(String value, String needle) {
+    int count = 0;
+    int index = 0;
+    while ((index = value.indexOf(needle, index)) >= 0) {
+      count++;
+      index += needle.length();
+    }
+    return count;
   }
 
   private String seedAuditReport(

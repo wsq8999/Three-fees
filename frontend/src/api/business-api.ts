@@ -163,6 +163,7 @@ interface ReportSections {
   situation: string;
   analysis: string;
   rectification: string;
+  imageFileIds?: string[];
 }
 
 interface BackendDraftMessage {
@@ -1195,10 +1196,12 @@ export const businessApi = {
     },
 
     async save(id: string, draft: ReportDraft): Promise<ReportDraft> {
+      const sections = blocksToSections(draft.blocks);
+      sections.imageFileIds = draft.imageFileIds;
       const raw = asResult<BackendReportDraft>(
         await httpClient.patch(
           `/api/v1/report-drafts/${encodeURIComponent(id)}`,
-          blocksToSections(draft.blocks),
+          sections,
           { headers: { "If-Match": String(draft.entityVersion) } },
         ),
       );

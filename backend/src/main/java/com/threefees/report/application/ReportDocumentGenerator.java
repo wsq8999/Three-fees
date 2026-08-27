@@ -6,6 +6,7 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -55,6 +56,9 @@ import org.apache.poi.xwpf.usermodel.XWPFRun;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STBorder;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STTblWidth;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STVerticalJc;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.w3c.dom.Element;
@@ -146,7 +150,7 @@ public class ReportDocumentGenerator {
       Map<String, ReportImage> imagesById =
           images.stream()
               .collect(Collectors.toMap(ReportImage::fileId, Function.identity(), (a, b) -> a));
-      appendHtmlFragment(document, contentHtml, imagesById);
+      appendHtmlFragment(document, contentHtml, new HtmlRenderContext(imagesById, new java.util.HashSet<>()));
       document.write(output);
       return output.toByteArray();
     } catch (Exception exception) {
@@ -173,7 +177,7 @@ public class ReportDocumentGenerator {
   }
 
   private void appendHtmlFragment(
-      XWPFDocument document, String contentHtml, Map<String, ReportImage> imagesById)
+      XWPFDocument document, String contentHtml, HtmlRenderContext context)
       throws Exception {
     String wrapped = "<root>" + normalizeHtml(contentHtml) + "</root>";
     var factory = DocumentBuilderFactory.newInstance();
@@ -183,17 +187,17 @@ public class ReportDocumentGenerator {
         factory
             .newDocumentBuilder()
             .parse(new ByteArrayInputStream(wrapped.getBytes(StandardCharsets.UTF_8)));
-    appendHtmlChildren(document, dom.getDocumentElement(), imagesById);
+    appendHtmlChildren(document, dom.getDocumentElement(), context);
   }
 
   private void appendHtmlChildren(
-      XWPFDocument document, Node parent, Map<String, ReportImage> imagesById) throws Exception {
+      XWPFDocument document, Node parent, HtmlRenderContext context) throws Exception {
     for (Node child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-      appendHtmlNode(document, child, imagesById);
+      appendHtmlNode(document, child, context);
     }
   }
 
-  private void appendHtmlNode(XWPFDocument document, Node node, Map<String, ReportImage> imagesById)
+  private void appendHtmlNode(XWPFDocument document, Node node, HtmlRenderContext context)
       throws Exception {
     if (node.getNodeType() == Node.TEXT_NODE) {
       String text = cleanWordText(node.getTextContent());
@@ -209,32 +213,36 @@ public class ReportDocumentGenerator {
       return;
     }
     if (hasClass(element, "inline-image-row")) {
-      appendHtmlImageRow(document, element, imagesById);
+      appendHtmlImageRow(document, element, context);
       return;
     }
     String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
     switch (tag) {
       case "h1" -> appendWordParagraph(document, element.getTextContent(), true, 18, true);
       case "h2", "h3" -> appendWordParagraph(document, element.getTextContent(), true, 14, false);
-      case "p", "div" -> appendHtmlBlock(document, element, imagesById);
-      case "section", "article" -> appendHtmlChildren(document, element, imagesById);
-      case "figure" -> appendHtmlInlineBlock(document, element, imagesById);
+      case "p", "div" -> appendHtmlBlock(document, element, context);
+      case "section", "article" -> appendHtmlChildren(document, element, context);
+      case "figure" -> appendHtmlInlineBlock(document, element, context);
       case "br" -> appendBlankWordParagraph(document);
-      case "table" -> appendHtmlTable(document, element);
-      case "img" -> appendHtmlImage(document, element, imagesById);
-      default -> appendHtmlChildren(document, element, imagesById);
+      case "table" -> appendHtmlTable(document, element, context);
+      case "img" -> appendHtmlImage(document, element, context);
+      default -> appendHtmlChildren(document, element, context);
     }
   }
 
   private void appendHtmlBlock(
-      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      XWPFDocument document, Element element, HtmlRenderContext context)
       throws Exception {
     if (containsElement(element, Set.of("table", "h1", "h2", "h3"))) {
-      appendHtmlChildren(document, element, imagesById);
+      appendHtmlChildren(document, element, context);
+      return;
+    }
+    if (containsInlineImageRow(element)) {
+      appendHtmlChildren(document, element, context);
       return;
     }
     if (containsElement(element, Set.of("img", "figure"))) {
-      appendHtmlInlineBlock(document, element, imagesById);
+      appendHtmlInlineBlock(document, element, context);
       return;
     }
     String text = cleanWordText(element.getTextContent());
@@ -247,7 +255,7 @@ public class ReportDocumentGenerator {
   }
 
   private void appendHtmlInlineBlock(
-      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      XWPFDocument document, Element element, HtmlRenderContext context)
       throws Exception {
     if (cleanWordText(element.getTextContent()).isBlank()
         && !containsElement(element, Set.of("img"))) {
@@ -255,41 +263,113 @@ public class ReportDocumentGenerator {
     }
     var paragraph = document.createParagraph();
     applyParagraphStyle(paragraph, false, false);
-    appendInlineRunsWithImages(paragraph, element, imagesById, false, 12);
+    appendInlineRunsWithImages(paragraph, element, context, false, 12);
   }
 
   private void appendHtmlImageRow(
-      XWPFDocument document, Element element, Map<String, ReportImage> imagesById)
+      XWPFDocument document, Element element, HtmlRenderContext context)
       throws Exception {
     var images = descendantElements(element, "img");
     if (images.isEmpty()) {
       return;
     }
-    var sizes = new ArrayList<ImageSize>();
+    var rowImages = new ArrayList<RowImage>();
     for (Element image : images) {
-      ImageBytes bytes = htmlImageBytes(image, imagesById);
+      if (isDuplicateImage(image, context)) {
+        continue;
+      }
+      ImageBytes bytes = htmlImageBytes(image, context.imagesById());
       if (bytes == null) {
         continue;
       }
-      sizes.add(wordImageSize(bytes.bytes(), htmlImageDisplaySize(image)));
+      rowImages.add(new RowImage(image, wordImageSize(bytes.bytes(), htmlImageDisplaySize(image))));
     }
-    if (sizes.isEmpty()) {
+    if (rowImages.isEmpty()) {
       return;
     }
-    double totalWidthPoints =
-        sizes.stream().mapToDouble(size -> emuToPoints(size.widthEmu())).sum()
-            + Math.max(0, sizes.size() - 1) * 6.0;
-    double scale = Math.min(1.0, WORD_PAGE_IMAGE_MAX_WIDTH_POINTS / Math.max(1.0, totalWidthPoints));
-    var paragraph = document.createParagraph();
-    applyParagraphStyle(paragraph, false, false);
-    for (Element image : images) {
-      appendHtmlImageRun(paragraph, image, imagesById, scale);
-      paragraph.createRun().setText(" ");
+    for (List<RowImage> rowImagesOnLine : wrapRowImages(rowImages)) {
+      appendInlineImageTableRow(document, rowImagesOnLine, context);
     }
   }
 
+  private List<List<RowImage>> wrapRowImages(List<RowImage> images) {
+    var rows = new ArrayList<List<RowImage>>();
+    var current = new ArrayList<RowImage>();
+    double currentWidth = 0;
+    for (RowImage image : images) {
+      double imageWidth = emuToPoints(image.size().widthEmu());
+      double nextWidth = currentWidth + (current.isEmpty() ? 0 : 6.0) + imageWidth;
+      if (!current.isEmpty() && nextWidth > WORD_PAGE_IMAGE_MAX_WIDTH_POINTS) {
+        rows.add(current);
+        current = new ArrayList<>();
+        currentWidth = 0;
+      }
+      current.add(image);
+      currentWidth += (current.size() == 1 ? 0 : 6.0) + imageWidth;
+    }
+    if (!current.isEmpty()) {
+      rows.add(current);
+    }
+    return rows;
+  }
+
+  private void appendInlineImageTableRow(
+      XWPFDocument document, List<RowImage> images, HtmlRenderContext context) throws Exception {
+    var table = document.createTable(1, images.size());
+    configureInlineImageTable(table);
+    XWPFTableRow row = table.getRow(0);
+    int cellIndex = 0;
+    for (RowImage image : images) {
+      if (isDuplicateImage(image.element(), context)) {
+        continue;
+      }
+      XWPFTableCell cell = row.getCell(cellIndex++);
+      configureInlineImageCell(cell);
+      XWPFParagraph paragraph = firstCellParagraph(cell);
+      paragraph.setAlignment(ParagraphAlignment.CENTER);
+      if (!appendHtmlImageRun(paragraph, image.element(), context)) {
+        cellIndex--;
+      }
+    }
+  }
+
+  private void configureInlineImageTable(XWPFTable table) {
+    table.setWidth("100%");
+    var ctTable = table.getCTTbl();
+    var properties = ctTable.getTblPr() == null ? ctTable.addNewTblPr() : ctTable.getTblPr();
+    var width = properties.isSetTblW() ? properties.getTblW() : properties.addNewTblW();
+    width.setType(STTblWidth.PCT);
+    width.setW(BigInteger.valueOf(5000));
+    var borders = properties.isSetTblBorders() ? properties.getTblBorders() : properties.addNewTblBorders();
+    borders.addNewTop().setVal(STBorder.NIL);
+    borders.addNewBottom().setVal(STBorder.NIL);
+    borders.addNewLeft().setVal(STBorder.NIL);
+    borders.addNewRight().setVal(STBorder.NIL);
+    borders.addNewInsideH().setVal(STBorder.NIL);
+    borders.addNewInsideV().setVal(STBorder.NIL);
+    table.setCellMargins(0, 0, 0, 0);
+  }
+
+  private void configureInlineImageCell(XWPFTableCell cell) {
+    cell.setVerticalAlignment(XWPFTableCell.XWPFVertAlign.CENTER);
+    var ctCell = cell.getCTTc();
+    var properties = ctCell.isSetTcPr() ? ctCell.getTcPr() : ctCell.addNewTcPr();
+    properties.addNewVAlign().setVal(STVerticalJc.CENTER);
+  }
+
+  private XWPFParagraph firstCellParagraph(XWPFTableCell cell) {
+    if (!cell.getParagraphs().isEmpty()) {
+      XWPFParagraph paragraph = cell.getParagraphs().getFirst();
+      paragraph.setSpacingBefore(0);
+      paragraph.setSpacingAfter(0);
+      paragraph.setIndentationFirstLine(0);
+      return paragraph;
+    }
+    return cell.addParagraph();
+  }
+
   private void appendInlineImageRowRuns(
-      XWPFParagraph paragraph, Element element, Map<String, ReportImage> imagesById)
+      XWPFParagraph paragraph, Element element, HtmlRenderContext context)
       throws Exception {
     var images = descendantElements(element, "img");
     if (images.isEmpty()) {
@@ -297,24 +377,34 @@ public class ReportDocumentGenerator {
     }
     var sizes = new ArrayList<ImageSize>();
     for (Element image : images) {
-      ImageBytes bytes = htmlImageBytes(image, imagesById);
+      if (isDuplicateImage(image, context)) {
+        continue;
+      }
+      ImageBytes bytes = htmlImageBytes(image, context.imagesById());
       if (bytes != null) {
         sizes.add(wordImageSize(bytes.bytes(), htmlImageDisplaySize(image)));
       }
     }
-    double totalWidthPoints =
-        sizes.stream().mapToDouble(size -> emuToPoints(size.widthEmu())).sum()
-            + Math.max(0, sizes.size() - 1) * 6.0;
-    double scale = Math.min(1.0, WORD_PAGE_IMAGE_MAX_WIDTH_POINTS / Math.max(1.0, totalWidthPoints));
     for (Element image : images) {
-      appendHtmlImageRun(paragraph, image, imagesById, scale);
-      paragraph.createRun().setText(" ");
+      if (appendHtmlImageRun(paragraph, image, context)) {
+        paragraph.createRun().setText(" ");
+      }
     }
   }
 
   private boolean containsElement(Element element, Set<String> tags) {
     for (String tag : tags) {
       if (element.getElementsByTagName(tag).getLength() > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean containsInlineImageRow(Element element) {
+    var nodes = element.getElementsByTagName("*");
+    for (int index = 0; index < nodes.getLength(); index++) {
+      if (nodes.item(index) instanceof Element child && hasClass(child, "inline-image-row")) {
         return true;
       }
     }
@@ -353,7 +443,7 @@ public class ReportDocumentGenerator {
   private void appendInlineRunsWithImages(
       XWPFParagraph paragraph,
       Node node,
-      Map<String, ReportImage> imagesById,
+      HtmlRenderContext context,
       boolean bold,
       int size)
       throws Exception {
@@ -376,12 +466,13 @@ public class ReportDocumentGenerator {
     }
     String tag = element.getTagName().toLowerCase(java.util.Locale.ROOT);
     if (hasClass(element, "inline-image-row")) {
-      appendInlineImageRowRuns(paragraph, element, imagesById);
+      appendInlineImageRowRuns(paragraph, element, context);
       return;
     }
     if (tag.equals("img")) {
-      appendHtmlImageRun(paragraph, element, imagesById);
-      paragraph.createRun().setText(" ");
+      if (appendHtmlImageRun(paragraph, element, context)) {
+        paragraph.createRun().setText(" ");
+      }
       return;
     }
     boolean childBold = bold || tag.equals("strong") || tag.equals("b");
@@ -390,7 +481,7 @@ public class ReportDocumentGenerator {
       return;
     }
     for (Node child = node.getFirstChild(); child != null; child = child.getNextSibling()) {
-      appendInlineRunsWithImages(paragraph, child, imagesById, childBold, size);
+      appendInlineRunsWithImages(paragraph, child, context, childBold, size);
     }
   }
 
@@ -585,50 +676,34 @@ public class ReportDocumentGenerator {
     run.setFontSize(size);
   }
 
-  private void appendHtmlTable(XWPFDocument document, Element tableElement) {
-    var rows = tableElement.getElementsByTagName("tr");
-    if (rows.getLength() == 0) {
-      return;
-    }
-    var table = document.createTable(rows.getLength(), 1);
-    for (int rowIndex = 0; rowIndex < rows.getLength(); rowIndex++) {
-      var rowElement = (Element) rows.item(rowIndex);
-      var cells = rowElement.getElementsByTagName("td");
-      if (cells.getLength() == 0) {
-        cells = rowElement.getElementsByTagName("th");
-      }
-      var row = table.getRow(rowIndex);
-      while (row.getTableCells().size() < Math.max(cells.getLength(), 1)) {
-        row.addNewTableCell();
-      }
-      for (int cellIndex = 0; cellIndex < Math.max(cells.getLength(), 1); cellIndex++) {
-        row.getCell(cellIndex)
-            .setText(cellIndex < cells.getLength() ? cells.item(cellIndex).getTextContent() : "");
-      }
-    }
+  private void appendHtmlTable(XWPFDocument document, Element tableElement, HtmlRenderContext context)
+      throws Exception {
+    appendHtmlChildren(document, tableElement, context);
   }
 
-  private void appendHtmlImage(
-      XWPFDocument document, Element image, Map<String, ReportImage> imagesById) throws Exception {
+  private void appendHtmlImage(XWPFDocument document, Element image, HtmlRenderContext context)
+      throws Exception {
     Optional<DisplaySize> displaySize = htmlImageDisplaySize(image);
-    ImageBytes bytes = htmlImageBytes(image, imagesById);
+    if (!claimImage(image, context)) return;
+    ImageBytes bytes = htmlImageBytes(image, context.imagesById());
     if (bytes == null) return;
     appendWordImage(document, bytes.bytes(), bytes.mediaType(), bytes.name(), displaySize);
   }
 
-  private void appendHtmlImageRun(
-      XWPFParagraph paragraph, Element image, Map<String, ReportImage> imagesById)
+  private boolean appendHtmlImageRun(XWPFParagraph paragraph, Element image, HtmlRenderContext context)
       throws Exception {
-    appendHtmlImageRun(paragraph, image, imagesById, 1.0);
+    return appendHtmlImageRun(paragraph, image, context, 1.0);
   }
 
-  private void appendHtmlImageRun(
-      XWPFParagraph paragraph, Element image, Map<String, ReportImage> imagesById, double scale)
+  private boolean appendHtmlImageRun(
+      XWPFParagraph paragraph, Element image, HtmlRenderContext context, double scale)
       throws Exception {
     Optional<DisplaySize> displaySize = htmlImageDisplaySize(image);
-    ImageBytes bytes = htmlImageBytes(image, imagesById);
-    if (bytes == null) return;
+    if (!claimImage(image, context)) return false;
+    ImageBytes bytes = htmlImageBytes(image, context.imagesById());
+    if (bytes == null) return false;
     appendWordImageRun(paragraph, bytes.bytes(), bytes.mediaType(), bytes.name(), displaySize, scale);
+    return true;
   }
 
   private ImageBytes htmlImageBytes(Element image, Map<String, ReportImage> imagesById) {
@@ -645,6 +720,28 @@ public class ReportDocumentGenerator {
     String mediaType = src.substring("data:".length(), semicolon);
     byte[] bytes = Base64.getDecoder().decode(src.substring(comma + 1));
     return new ImageBytes(bytes, mediaType, "pasted-image");
+  }
+
+  private boolean isDuplicateImage(Element image, HtmlRenderContext context) {
+    String identity = imageIdentity(image);
+    return identity != null && context.renderedImageIds().contains(identity);
+  }
+
+  private boolean claimImage(Element image, HtmlRenderContext context) {
+    String identity = imageIdentity(image);
+    return identity == null || context.renderedImageIds().add(identity);
+  }
+
+  private String imageIdentity(Element image) {
+    String fileId = image.getAttribute("data-file-id");
+    if (fileId != null && !fileId.isBlank()) {
+      return "file:" + fileId.trim();
+    }
+    String src = image.getAttribute("src");
+    if (src != null && src.startsWith("data:image/")) {
+      return "src:" + src;
+    }
+    return null;
   }
 
   private void appendWordImage(
@@ -887,33 +984,59 @@ public class ReportDocumentGenerator {
     try (var document = new HWPFDocument(new ByteArrayInputStream(bytes))) {
       StringBuilder html = new StringBuilder("<div class=\"word-preview\">");
       Range range = document.getRange();
-      boolean[] tableParagraph = new boolean[Math.max(range.numParagraphs(), 0)];
-      TableIterator iterator = new TableIterator(range);
-      while (iterator.hasNext()) {
-        Table table = iterator.next();
-        html.append("<table>");
-        for (int rowIndex = 0; rowIndex < table.numRows(); rowIndex++) {
-          TableRow row = table.getRow(rowIndex);
-          html.append("<tr>");
-          for (int cellIndex = 0; cellIndex < row.numCells(); cellIndex++) {
-            TableCell cell = row.getCell(cellIndex);
-            html.append("<td>");
-            appendDocRange(html, document.getPicturesTable(), cell);
-            html.append("</td>");
-            markTableParagraphs(range, cell, tableParagraph);
-          }
-          html.append("</tr>");
-        }
-        html.append("</table>");
-      }
+      List<DocTable> tables = docTables(range);
+      Set<Integer> emittedTableIndexes = new java.util.HashSet<>();
       for (int index = 0; index < range.numParagraphs(); index++) {
-        if (!tableParagraph[index]) {
-          appendDocParagraph(html, document.getPicturesTable(), range.getParagraph(index));
+        Paragraph paragraph = range.getParagraph(index);
+        int tableIndex = docTableIndex(tables, paragraph);
+        if (tableIndex >= 0) {
+          if (emittedTableIndexes.add(tableIndex)) {
+            appendDocTable(html, document.getPicturesTable(), tables.get(tableIndex).table());
+          }
+          continue;
         }
+        appendDocParagraph(html, document.getPicturesTable(), paragraph);
       }
       html.append("</div>");
       return html.toString();
     }
+  }
+
+  private List<DocTable> docTables(Range range) {
+    List<DocTable> tables = new ArrayList<>();
+    TableIterator iterator = new TableIterator(range);
+    while (iterator.hasNext()) {
+      Table table = iterator.next();
+      tables.add(new DocTable(table, table.getStartOffset(), table.getEndOffset()));
+    }
+    return tables;
+  }
+
+  private int docTableIndex(List<DocTable> tables, Paragraph paragraph) {
+    for (int index = 0; index < tables.size(); index++) {
+      DocTable table = tables.get(index);
+      if (paragraph.getStartOffset() >= table.startOffset()
+          && paragraph.getEndOffset() <= table.endOffset()) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  private void appendDocTable(StringBuilder html, PicturesTable picturesTable, Table table) {
+    html.append("<table class=\"word-table\">");
+    for (int rowIndex = 0; rowIndex < table.numRows(); rowIndex++) {
+      TableRow row = table.getRow(rowIndex);
+      html.append("<tr>");
+      for (int cellIndex = 0; cellIndex < row.numCells(); cellIndex++) {
+        TableCell cell = row.getCell(cellIndex);
+        html.append("<td>");
+        appendDocRange(html, picturesTable, cell);
+        html.append("</td>");
+      }
+      html.append("</tr>");
+    }
+    html.append("</table>");
   }
 
   private void appendDocxBodyElements(StringBuilder html, List<IBodyElement> elements) {
@@ -1001,17 +1124,6 @@ public class ReportDocumentGenerator {
     }
     if (!appendBufferedParagraph(html, text, paragraphStyle(paragraph)) && !wroteContent) {
       appendParagraph(html, paragraph.text(), paragraphStyle(paragraph));
-    }
-  }
-
-  private void markTableParagraphs(Range range, TableCell cell, boolean[] tableParagraph) {
-    int start = cell.getStartOffset();
-    int end = cell.getEndOffset();
-    for (int index = 0; index < range.numParagraphs(); index++) {
-      var paragraph = range.getParagraph(index);
-      if (paragraph.getStartOffset() >= start && paragraph.getEndOffset() <= end) {
-        tableParagraph[index] = true;
-      }
     }
   }
 
@@ -1380,13 +1492,14 @@ public class ReportDocumentGenerator {
       String situation = stripLeadingSectionHeading(sections.situation(), "一、情况说明");
       String analysis = stripLeadingSectionHeading(sections.analysis(), "二、排查分析");
       String rectification = stripLeadingSectionHeading(sections.rectification(), "三、整改小结");
-      addSection(document, "一、情况说明", situation, imagesById);
-      addSection(document, "二、排查分析", analysis, imagesById);
-      addSection(document, "三、整改小结", rectification, imagesById);
+      var context = new HtmlRenderContext(imagesById, new java.util.HashSet<>());
+      addSection(document, "一、情况说明", situation, context);
+      addSection(document, "二、排查分析", analysis, context);
+      addSection(document, "三、整改小结", rectification, context);
       Set<String> inlineIds =
           inlineFileIds(situation, analysis, rectification);
       for (ReportImage image : images) {
-        if (inlineIds.contains(image.fileId())) continue;
+        if (inlineIds.contains(image.fileId()) || context.renderedImageIds().contains("file:" + image.fileId())) continue;
         appendWordImage(document, image.bytes(), image.mediaType(), image.name());
       }
       document.write(output);
@@ -1397,7 +1510,7 @@ public class ReportDocumentGenerator {
   }
 
   private void addSection(
-      XWPFDocument document, String heading, String content, Map<String, ReportImage> imagesById)
+      XWPFDocument document, String heading, String content, HtmlRenderContext context)
       throws Exception {
     var headingParagraph = document.createParagraph();
     applyParagraphStyle(headingParagraph, true, false);
@@ -1407,7 +1520,7 @@ public class ReportDocumentGenerator {
     headingRun.setFontFamily("SimHei");
     headingRun.setFontSize(14);
     if (HTML_TAG.matcher(content).find()) {
-      appendHtmlFragment(document, content, imagesById);
+      appendHtmlFragment(document, content, context);
       return;
     }
     for (String line : content.split("\\R", -1)) {
@@ -1554,7 +1667,14 @@ public class ReportDocumentGenerator {
 
   private record ImageBytes(byte[] bytes, String mediaType, String name) {}
 
+  private record RowImage(Element element, ImageSize size) {}
+
   private record DisplaySize(double widthPoints, double heightPoints) {}
+
+  private record DocTable(Table table, int startOffset, int endOffset) {}
+
+  private record HtmlRenderContext(
+      Map<String, ReportImage> imagesById, Set<String> renderedImageIds) {}
 
   private static final class PdfWriter {
 
