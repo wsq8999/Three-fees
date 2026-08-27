@@ -17,12 +17,15 @@ public record DashboardSummary(
     long finalReportCount,
     List<DatasetImportSummary> imports,
     List<NameCount> districtOverLimitCounts,
+    List<NameRatio> districtMaxOverLimitRatios,
     List<NameCount> overLimitTypeCounts,
     List<PendingReportTask> pendingTasks) {
 
   public record DatasetImportSummary(String datasetType, Object activeBatch) {}
 
   public record NameCount(String name, long count) {}
+
+  public record NameRatio(String name, java.math.BigDecimal ratio) {}
 
   public record PendingReportTask(
       String id,

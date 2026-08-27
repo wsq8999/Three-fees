@@ -247,6 +247,7 @@ export interface DashboardData {
   pendingReportCount: number;
   finalReportCount: number;
   districtOverLimitCounts: Array<{ name: string; count: number }>;
+  districtMaxOverLimitRatios: Array<{ name: string; ratio: number }>;
   overLimitTypeCounts: Array<{ name: string; count: number }>;
   pendingTasks: Array<{
     id: string;

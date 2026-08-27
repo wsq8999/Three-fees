@@ -58,6 +58,7 @@ public class DashboardQueryService {
         countReports(period, cityScope),
         importSummaries(period, cityScope),
         districtOverLimitCounts(period, cityScope),
+        districtMaxOverLimitRatios(period, cityScope),
         overLimitTypeCounts(period, cityScope),
         pendingTasks(period, cityScope));
   }
@@ -79,6 +80,7 @@ public class DashboardQueryService {
         DATASET_TYPES.stream()
             .map(type -> new DashboardSummary.DatasetImportSummary(type, null))
             .toList(),
+        List.of(),
         List.of(),
         List.of(),
         List.of());
@@ -308,6 +310,39 @@ public class DashboardQueryService {
     return jdbcTemplate.query(
         sql.toString(),
         (rs, row) -> new DashboardSummary.NameCount(rs.getString("name"), rs.getLong("total")),
+        args.toArray());
+  }
+
+  private List<DashboardSummary.NameRatio> districtMaxOverLimitRatios(
+      String period, String cityScope) {
+    var sql =
+        new StringBuilder(
+            """
+            SELECT COALESCE(
+                     NULLIF(JSON_UNQUOTE(JSON_EXTRACT(COALESCE(m.resource_summary_json, s.data_json), '$."所属区县"')), ''),
+                     NULLIF(s.district_name, ''),
+                     NULLIF(s.district_code, ''),
+                     '未填写'
+                   ) AS name,
+                   MAX(a.max_ratio) AS ratio
+              FROM billing_point_snapshot s
+              LEFT JOIN billing_point_master m
+                ON m.city_code = s.city_code
+               AND m.billing_point_code = s.billing_point_code
+              JOIN audit_result a
+                ON a.billing_point_code = s.billing_point_code
+               AND a.data_period = s.data_period
+               AND a.city_code = s.city_code
+             WHERE s.data_period = ?
+               AND a.audit_status = 'OVER_LIMIT'
+            """);
+    var args = new ArrayList<>();
+    args.add(period);
+    appendCityScope(sql, args, cityScope, "s");
+    sql.append(" GROUP BY name ORDER BY ratio DESC, name ASC LIMIT 8");
+    return jdbcTemplate.query(
+        sql.toString(),
+        (rs, row) -> new DashboardSummary.NameRatio(rs.getString("name"), rs.getBigDecimal("ratio")),
         args.toArray());
   }
 

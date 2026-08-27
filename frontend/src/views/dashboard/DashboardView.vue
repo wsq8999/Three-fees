@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
+import type { EChartsType } from "echarts/core";
 import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
@@ -19,6 +20,9 @@ const errorMessage = ref("");
 const selectedPeriod = ref("");
 const importGuideVisible = ref(false);
 const openingTaskId = ref<string | null>(null);
+const statusPieChartElement = ref<HTMLElement | null>(null);
+let statusPieChart: EChartsType | undefined;
+let statusPieResizeObserver: ResizeObserver | undefined;
 
 const periodLabel = computed(() => {
   const period = selectedPeriod.value || dashboard.value?.currentDataPeriod;
@@ -39,8 +43,8 @@ const overRate = computed(() => {
   return `${((dashboard.value.overLimitBillingPointCount / dashboard.value.billingPointCount) * 100).toFixed(2)}%`;
 });
 
-const districtChartData = computed(() =>
-  [...(dashboard.value?.districtOverLimitCounts ?? [])].sort((left, right) => right.count - left.count),
+const districtRatioChartData = computed(() =>
+  [...(dashboard.value?.districtMaxOverLimitRatios ?? [])].sort((left, right) => right.ratio - left.ratio),
 );
 
 const overLimitTypeChartData = computed(() => dashboard.value?.overLimitTypeCounts ?? []);
@@ -54,13 +58,10 @@ const statusChartData = computed(() => {
     { name: "数据不足", count: data.pendingReviewCount, color: "#d98b00" },
   ];
 });
-
-const hasDistrictChart = computed(() => districtChartData.value.some((item) => item.count > 0));
+const hasDistrictChart = computed(() => districtRatioChartData.value.some((item) => item.ratio > 0));
 const hasOverLimitTypeChart = computed(() => overLimitTypeChartData.value.some((item) => item.count > 0));
 const hasStatusChart = computed(() => (dashboard.value?.billingPointCount ?? 0) > 0);
-const maxDistrictCount = computed(() => Math.max(1, ...districtChartData.value.map((item) => item.count)));
-const maxTypeCount = computed(() => Math.max(1, ...overLimitTypeChartData.value.map((item) => item.count)));
-const maxStatusCount = computed(() => Math.max(1, ...statusChartData.value.map((item) => item.count)));
+const maxDistrictRatio = computed(() => Math.max(1, ...districtRatioChartData.value.map((item) => item.ratio)));
 
 function asPendingTask(row: unknown): DashboardData["pendingTasks"][number] {
   return row as DashboardData["pendingTasks"][number];
@@ -74,6 +75,71 @@ function taskRegion(task: DashboardData["pendingTasks"][number]): string {
   const city = task.cityName ?? "";
   const county = task.county ?? "";
   return [city, county].filter(Boolean).join("-");
+}
+
+function formatChartRatio(value: number): string {
+  return `${Number(value).toFixed(2)}%`;
+}
+
+async function renderStatusPieChart(): Promise<void> {
+  if (!hasStatusChart.value) {
+    statusPieResizeObserver?.disconnect();
+    statusPieResizeObserver = undefined;
+    statusPieChart?.dispose();
+    statusPieChart = undefined;
+    return;
+  }
+  await nextTick();
+  if (statusPieChartElement.value === null) return;
+  if (statusPieChart === undefined) {
+    const { createAuditChart } = await import("./components/audit-chart-runtime");
+    statusPieChart = createAuditChart(statusPieChartElement.value);
+    statusPieResizeObserver = new ResizeObserver(() => statusPieChart?.resize());
+    statusPieResizeObserver.observe(statusPieChartElement.value);
+  }
+  statusPieChart.setOption({
+    color: statusChartData.value.map((item) => item.color),
+    tooltip: {
+      trigger: "item",
+      formatter: "{b}<br/>数量：{c}<br/>占比：{d}%",
+      confine: false,
+      appendToBody: true,
+      backgroundColor: "#ffffff",
+      borderColor: "#d8e0ea",
+      borderWidth: 1,
+      extraCssText: "box-shadow: 0 8px 20px rgba(23, 36, 58, 0.14); border-radius: 6px;",
+      textStyle: {
+        color: "#17243a",
+        fontSize: 12,
+        fontWeight: 600,
+      },
+    },
+    series: [
+      {
+        name: "当前账期状态",
+        type: "pie",
+        radius: ["50%", "82%"],
+        center: ["50%", "50%"],
+        clockwise: true,
+        startAngle: 90,
+        avoidLabelOverlap: true,
+        label: { show: false },
+        labelLine: { show: false },
+        emphasis: {
+          scale: true,
+          scaleSize: 4,
+          itemStyle: {
+            shadowBlur: 10,
+            shadowColor: "rgba(25, 42, 70, 0.16)",
+          },
+        },
+        data: statusChartData.value.map((item) => ({
+          name: item.name,
+          value: item.count,
+        })),
+      },
+    ],
+  });
 }
 
 async function load(period = selectedPeriod.value): Promise<void> {
@@ -138,7 +204,20 @@ async function openTask(task: DashboardData["pendingTasks"][number]): Promise<vo
   }
 }
 
-onMounted(load);
+watch(
+  () => statusChartData.value.map((item) => `${item.name}:${item.count}`).join("|"),
+  () => void renderStatusPieChart(),
+);
+
+onMounted(async () => {
+  await load();
+  await renderStatusPieChart();
+});
+
+onBeforeUnmount(() => {
+  statusPieResizeObserver?.disconnect();
+  statusPieChart?.dispose();
+});
 </script>
 
 <template>
@@ -283,23 +362,23 @@ onMounted(load);
 
     <section class="chart-grid">
       <article class="chart-card">
-        <h3>各区县超标报账点数量</h3>
+        <h3>各区县最高超标比例</h3>
 
         <div v-if="hasDistrictChart" class="district-chart-scroll">
           <div
-            v-for="(item, index) in districtChartData"
+            v-for="(item, index) in districtRatioChartData"
             :key="item.name"
-            class="bar-row"
-            :title="`${item.name}：${item.count}`"
+            class="rank-row"
+            :title="`${item.name}：${formatChartRatio(item.ratio)}`"
           >
+            <em>{{ index + 1 }}</em>
             <span>{{ item.name }}</span>
             <i
               :style="{
-                width: `${Math.max(8, (item.count / maxDistrictCount) * 100)}%`,
-                opacity: String(Math.max(0.35, 1 - index * 0.1)),
+                '--bar-width': `${Math.max(8, (item.ratio / maxDistrictRatio) * 100)}%`,
               }"
             />
-            <b>{{ item.count }}</b>
+            <b>{{ formatChartRatio(item.ratio) }}</b>
           </div>
         </div>
 
@@ -313,20 +392,17 @@ onMounted(load);
 
       <article class="chart-card">
         <h3>超标类型分布</h3>
-        <div v-if="hasOverLimitTypeChart" class="columns">
-          <span
+        <div v-if="hasOverLimitTypeChart" class="type-dot-chart">
+          <div
             v-for="item in overLimitTypeChartData"
             :key="item.name"
+            class="type-dot-row"
             :title="`${item.name}：${item.count}`"
           >
+            <span>{{ item.name }}</span>
+            <i />
             <b>{{ item.count }}</b>
-            <i
-              :style="{
-                height: `${Math.max(8, (item.count / maxTypeCount) * 52)}px`,
-              }"
-            />
-            <small>{{ item.name }}</small>
-          </span>
+          </div>
         </div>
         <ElEmpty
           v-else
@@ -338,13 +414,22 @@ onMounted(load);
 
       <article class="chart-card">
         <h3>当前账期状态分布</h3>
-        <div v-if="hasStatusChart" class="status-bars">
-          <div v-for="item in statusChartData" :key="item.name" class="status-row">
-            <span>{{ item.name }}</span>
-            <i :style="{ width: `${Math.max(4, (item.count / maxStatusCount) * 100)}%`, background: item.color }" />
-            <b>{{ item.count }}</b>
+        <div v-if="hasStatusChart" class="status-pie-panel">
+          <div class="status-pie-figure">
+            <div ref="statusPieChartElement" class="status-pie-chart" />
+            <div class="status-pie-center">
+              <span>
+                <b>{{ dashboard.billingPointCount }}</b>
+                <small>总数</small>
+              </span>
+            </div>
           </div>
-          <p>合计：{{ dashboard.billingPointCount }} 个报账点</p>
+          <div class="status-pie-legend">
+            <span v-for="item in statusChartData" :key="item.name">
+              <i :style="{ background: item.color }" />
+              {{ item.name }}
+            </span>
+          </div>
         </div>
         <ElEmpty
           v-else
@@ -463,7 +548,7 @@ onMounted(load);
 .stat-card h3 {
   overflow: hidden;
   color: #17243a;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -475,8 +560,8 @@ onMounted(load);
   margin-top: 3px;
   overflow: hidden;
   color: #66758a;
-  font-size: 10px;
-  line-height: 14px;
+  font-size: 12px;
+  line-height: 15px;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow-wrap: anywhere;
@@ -486,7 +571,7 @@ onMounted(load);
   display: block;
   width: 46px;
   color: #ef3146;
-  font-size: 24px;
+  font-size: 28px;
   font-weight: 800;
   line-height: 1;
   text-align: right;
@@ -521,8 +606,8 @@ onMounted(load);
 .task-card h2 {
   margin: 0;
   color: #111d31;
-  font-size: 16px;
-  line-height: 22px;
+  font-size: 18px;
+  line-height: 24px;
 }
 
 .task-card p {
@@ -576,7 +661,7 @@ onMounted(load);
 }
 
 .task-table :deep(.el-table__cell) {
-  padding: 7px 0;
+  padding: 10px 0;
 }
 
 .task-table :deep(.el-table),
@@ -588,18 +673,18 @@ onMounted(load);
 }
 
 .task-table :deep(.el-table__header .cell) {
-  padding-right: 6px;
-  padding-left: 6px;
-  font-size: 12px;
+  padding-right: 8px;
+  padding-left: 8px;
+  font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
 }
 
 .task-table :deep(.el-table__body .cell) {
-  padding-right: 6px;
-  padding-left: 6px;
-  font-size: 12px;
-  line-height: 1.35;
+  padding-right: 8px;
+  padding-left: 8px;
+  font-size: 14px;
+  line-height: 1.45;
   overflow: visible;
   text-overflow: clip;
   white-space: nowrap;
@@ -607,7 +692,7 @@ onMounted(load);
 
 .task-table :deep(.el-tag) {
   padding: 0 5px;
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -624,9 +709,9 @@ onMounted(load);
 
 .chart-card {
   display: flex;
-  height: 168px !important;
-  min-height: 168px !important;
-  max-height: 168px;
+  height: 230px !important;
+  min-height: 230px !important;
+  max-height: 230px;
   min-width: 0;
   flex-direction: column;
   padding: 10px 12px;
@@ -636,9 +721,9 @@ onMounted(load);
 
 .chart-card h3 {
   flex: 0 0 auto;
-  margin: 0 0 6px;
+  margin: 0 0 12px;
   color: #17243a;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.25;
 }
@@ -652,7 +737,8 @@ onMounted(load);
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
-  grid-auto-rows: minmax(20px, 1fr);
+  grid-auto-rows: minmax(34px, 1fr);
+  gap: 8px;
   padding-right: 3px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -676,129 +762,194 @@ onMounted(load);
   background: #b8c2d0;
 }
 
-.bar-row,
-.status-row {
+.rank-row {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(48px, 68px) minmax(0, 1fr) 22px;
-  gap: 5px;
+  grid-template-columns: 22px minmax(72px, 96px) minmax(0, 1fr) 58px;
+  gap: 9px;
   align-items: center;
+  padding: 4px 2px;
   color: #23324a;
   font-size: 13px;
 }
 
-.bar-row {
-  min-height: 20px;
-  margin: 0;
+.rank-row em {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: #9aa8b7;
+  font-style: normal;
+  font-weight: 700;
+  background: #f3f6fa;
+  border-radius: 999px;
 }
 
-.bar-row span,
-.status-row span {
+.rank-row span {
   min-width: 0;
   overflow: hidden;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.bar-row b,
-.status-row b {
-  font-size: 13px;
+.rank-row b {
+  color: #17243a;
+  font-size: 14px;
+  font-weight: 800;
   text-align: right;
   white-space: nowrap;
 }
 
-.bar-row i,
-.status-row i {
-  height: 5px;
+.rank-row i {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  background: #eef2f7;
   border-radius: 99px;
 }
 
-.bar-row i {
-  background: linear-gradient(90deg, #ee3145, #f79aa5);
+.rank-row i::after {
+  position: absolute;
+  inset: 0;
+  width: var(--bar-width, 0%);
+  content: "";
+  background: linear-gradient(90deg, #c14453, #f3aab5);
+  border-radius: inherit;
 }
 
-/*
- * 第二张图：
- * 4种类型横向完全等分；
- * 每一项纵向使用“数字 / 柱体区 / 标签”三段，
- * 内容从上到下真正占满图表主体，不再只堆在底部。
- */
-.columns {
+.type-dot-chart {
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
-  align-items: stretch;
+  gap: 14px;
+  align-content: center;
   overflow: hidden;
 }
 
-.columns span {
+.type-dot-row {
   display: grid;
   min-width: 0;
-  height: 100%;
-  grid-template-rows: 16px minmax(0, 1fr) 28px;
-  align-items: end;
-  justify-items: center;
-  color: #23324a;
+  grid-template-columns: minmax(96px, 136px) minmax(0, 1fr) 28px;
+  gap: 10px;
+  align-items: center;
 }
 
-.columns b {
-  align-self: start;
-  margin: 0;
-  font-size: 13px;
-  line-height: 16px;
-}
-
-.columns i {
-  width: 22px;
-  max-height: 52px;
-  align-self: end;
-  background: linear-gradient(180deg, #f9a3ad, #ef3146);
-  border-radius: 6px 6px 0 0;
-}
-
-.columns small {
-  display: -webkit-box;
-  width: 100%;
-  min-height: 28px;
-  margin: 0;
+.type-dot-row span {
+  min-width: 0;
   overflow: hidden;
-  align-self: end;
-  color: #66758a;
-  font-size: 11px;
-  line-height: 14px;
-  text-align: center;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  word-break: break-word;
+  color: #23324a;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/*
- * 第三张图：
- * 正常 / 超标 / 待稽核 / 合计 4行等分整个可用高度。
- * 这样不会全部挤在上半部分，下方留下大块空白。
- */
-.status-bars {
+.type-dot-row i {
+  position: relative;
+  height: 1px;
+  background: #dbe4ef;
+}
+
+.type-dot-row i::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  content: "";
+  background: #3b73c4;
+  border: 3px solid #eff8ff;
+  border-radius: 999px;
+  transform: translateY(-50%);
+}
+
+.type-dot-row b {
+  color: #17243a;
+  font-size: 14px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.status-pie-panel {
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
-  grid-template-rows: repeat(4, minmax(0, 1fr));
-  align-items: stretch;
+  width: fit-content;
+  max-width: 100%;
+  grid-template-columns: 150px max-content;
+  gap: 14px;
+  align-items: center;
+  justify-content: center;
+  place-self: center;
+  overflow: hidden;
 }
 
-.status-row {
-  min-height: 0;
-  margin: 0;
-  align-self: center;
+.status-pie-figure {
+  position: relative;
+  width: 150px;
+  aspect-ratio: 1;
 }
 
-.status-bars p {
-  margin: 0;
-  align-self: center;
+.status-pie-chart {
+  width: 100%;
+  height: 100%;
+}
+
+.status-pie-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.status-pie-center span {
+  display: grid;
+  width: 68px;
+  aspect-ratio: 1;
+  place-items: center;
+  background: #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px #edf1f6;
+}
+
+.status-pie-center b {
+  color: #17243a;
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.status-pie-center small {
+  margin-top: -12px;
   color: #66758a;
+  font-size: 11px;
+}
+
+.status-pie-legend {
+  display: flex;
+  max-width: 100%;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.status-pie-legend span {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  color: #42526a;
   font-size: 12px;
-  line-height: 1.3;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pie-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
 }
 
 .chart-empty {
@@ -863,6 +1014,26 @@ onMounted(load);
     font-size: 22px;
   }
 
+  .task-card h2 {
+    font-size: 16px;
+    line-height: 22px;
+  }
+
+  .task-table :deep(.el-table__cell) {
+    padding: 7px 0;
+  }
+
+  .task-table :deep(.el-table__header .cell),
+  .task-table :deep(.el-table__body .cell) {
+    padding-right: 6px;
+    padding-left: 6px;
+    font-size: 12px;
+  }
+
+  .task-table :deep(.el-table__body .cell) {
+    line-height: 1.35;
+  }
+
   .chart-grid {
     gap: 8px;
   }
@@ -879,42 +1050,73 @@ onMounted(load);
     font-size: 15px;
   }
 
-  .bar-row,
-  .status-row {
-    grid-template-columns: minmax(42px, 58px) minmax(0, 1fr) 20px;
-    gap: 4px;
+  .rank-row {
+    grid-template-columns: 22px minmax(48px, 64px) minmax(0, 1fr) 48px;
+    gap: 6px;
+    padding: 3px 1px;
     font-size: 13px;
   }
 
-  .bar-row b,
-  .status-row b {
+  .rank-row em {
+    width: 19px;
+    height: 19px;
+    border-radius: 7px;
+  }
+
+  .rank-row b {
     font-size: 13px;
   }
 
-  .columns {
-    gap: 4px;
+  .type-dot-chart {
+    gap: 9px;
   }
 
-  .columns span {
-    grid-template-rows: 17px minmax(0, 1fr) 28px;
+  .type-dot-row {
+    grid-template-columns: minmax(74px, 104px) minmax(0, 1fr) 22px;
+    gap: 7px;
   }
 
-  .columns b {
-    font-size: 13px;
-  }
-
-  .columns i {
-    width: 20px;
-  }
-
-  .columns small {
-    min-height: 28px;
-    font-size: 11px;
-    line-height: 14px;
-  }
-
-  .status-bars p {
+  .type-dot-row span {
     font-size: 12px;
+  }
+
+  .type-dot-row b {
+    font-size: 13px;
+  }
+
+  .status-pie-panel {
+    grid-template-columns: 102px max-content;
+    gap: 10px;
+  }
+
+  .status-pie-figure {
+    width: 102px;
+  }
+
+  .status-pie-center span {
+    width: 48px;
+  }
+
+  .status-pie-center b {
+    font-size: 16px;
+  }
+
+  .status-pie-center small {
+    margin-top: -10px;
+    font-size: 10px;
+  }
+
+  .status-pie-legend {
+    gap: 7px;
+  }
+
+  .status-pie-legend span {
+    font-size: 11px;
+  }
+
+  .status-pie-legend i {
+    width: 7px;
+    height: 7px;
   }
 }
 
@@ -953,6 +1155,10 @@ onMounted(load);
     padding-bottom: 6px;
   }
 
+  .task-table :deep(.el-table__cell) {
+    padding: 6px 0;
+  }
+
   .chart-card {
     height: 142px !important;
     min-height: 142px !important;
@@ -963,6 +1169,15 @@ onMounted(load);
   .chart-card h3 {
     margin-bottom: 4px;
     font-size: 14px;
+  }
+
+  .status-pie-panel {
+    grid-template-columns: 92px max-content;
+    gap: 8px;
+  }
+
+  .status-pie-figure {
+    width: 92px;
   }
 }
 

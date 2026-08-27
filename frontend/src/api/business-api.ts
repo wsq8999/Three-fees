@@ -79,6 +79,7 @@ function mapDashboard(value: Partial<DashboardData>): DashboardData {
     pendingReportCount,
     finalReportCount: value.finalReportCount ?? 0,
     districtOverLimitCounts: value.districtOverLimitCounts ?? [],
+    districtMaxOverLimitRatios: value.districtMaxOverLimitRatios ?? [],
     overLimitTypeCounts: (value.overLimitTypeCounts ?? []).map((item) => ({
       ...item,
       name: overLimitTypeLabel(item.name) ?? item.name,

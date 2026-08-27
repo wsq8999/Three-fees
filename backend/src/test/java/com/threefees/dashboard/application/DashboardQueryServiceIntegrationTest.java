@@ -137,6 +137,11 @@ public class DashboardQueryServiceIntegrationTest {
         .containsExactlyInAnyOrder(
             org.assertj.core.groups.Tuple.tuple("玄武区", 1L),
             org.assertj.core.groups.Tuple.tuple("鼓楼区", 1L));
+    assertThat(summary.districtMaxOverLimitRatios())
+        .extracting(item -> item.name(), item -> item.ratio().stripTrailingZeros())
+        .containsExactlyInAnyOrder(
+            org.assertj.core.groups.Tuple.tuple("玄武区", new java.math.BigDecimal("0.35")),
+            org.assertj.core.groups.Tuple.tuple("鼓楼区", new java.math.BigDecimal("0.35")));
     assertThat(summary.overLimitTypeCounts())
         .extracting(DashboardSummary.NameCount::name, DashboardSummary.NameCount::count)
         .contains(org.assertj.core.groups.Tuple.tuple("多项超标", 2L));

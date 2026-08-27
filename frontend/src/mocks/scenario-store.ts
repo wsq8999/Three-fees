@@ -1172,6 +1172,11 @@ export function createScenarioStore(): ScenarioStore {
               .length,
           },
         ],
+        districtMaxOverLimitRatios: [
+          { name: "鼓楼区", ratio: 23.32 },
+          { name: "玄武区", ratio: 12.08 },
+          { name: "建邺区", ratio: 8.56 },
+        ],
         overLimitTypeCounts: [
           {
             name: "同比",
