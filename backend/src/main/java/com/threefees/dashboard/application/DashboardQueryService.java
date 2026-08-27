@@ -1,5 +1,6 @@
 package com.threefees.dashboard.application;
 
+import com.threefees.billingpoint.application.BillingPointQueryService;
 import com.threefees.identity.application.CurrentUser;
 import com.threefees.identity.domain.Role;
 import com.threefees.organization.application.CityQueryService;
@@ -21,10 +22,15 @@ public class DashboardQueryService {
       List.of("BILLING_POINT", "PAYMENT", "METER_READING", "BENCHMARK");
 
   private final CityQueryService cityQueryService;
+  private final BillingPointQueryService billingPointQueryService;
   private final JdbcTemplate jdbcTemplate;
 
-  public DashboardQueryService(CityQueryService cityQueryService, JdbcTemplate jdbcTemplate) {
+  public DashboardQueryService(
+      CityQueryService cityQueryService,
+      BillingPointQueryService billingPointQueryService,
+      JdbcTemplate jdbcTemplate) {
     this.cityQueryService = cityQueryService;
+    this.billingPointQueryService = billingPointQueryService;
     this.jdbcTemplate = jdbcTemplate;
   }
 
@@ -42,25 +48,41 @@ public class DashboardQueryService {
       return emptySummary(visibleCityCount, periods);
     }
 
+    var billingPoints = billingPointQueryService.findDashboardSummaries(period, cityScope);
+    long billingPointCount = billingPoints.size();
+    long overLimitBillingPointCount = countBillingPointStatus(billingPoints, "OVER_LIMIT");
+    long normalBillingPointCount = countBillingPointStatus(billingPoints, "NORMAL");
+    long pendingReviewCount =
+        billingPoints.stream()
+            .filter(
+                summary ->
+                    !"NORMAL".equals(summary.auditStatus())
+                        && !"OVER_LIMIT".equals(summary.auditStatus()))
+            .count();
     long pendingReportCount = countPendingReports(period, cityScope);
     return new DashboardSummary(
         period,
         periods,
         visibleCityCount,
-        countSnapshots(period, cityScope),
-        countAuditStatus(period, cityScope, "OVER_LIMIT"),
+        billingPointCount,
+        overLimitBillingPointCount,
         pendingReportCount,
         pendingReportCount,
         countDistinctSite(period, cityScope),
         lastUpdatedAt(period, cityScope),
-        countAuditStatus(period, cityScope, "NORMAL"),
-        countPendingAudit(period, cityScope),
+        normalBillingPointCount,
+        pendingReviewCount,
         countReports(period, cityScope),
         importSummaries(period, cityScope),
         districtOverLimitCounts(period, cityScope),
         districtMaxOverLimitRatios(period, cityScope),
         overLimitTypeCounts(period, cityScope),
         pendingTasks(period, cityScope));
+  }
+
+  private long countBillingPointStatus(
+      List<BillingPointQueryService.BillingPointSummary> billingPoints, String status) {
+    return billingPoints.stream().filter(summary -> status.equals(summary.auditStatus())).count();
   }
 
   private DashboardSummary emptySummary(int visibleCityCount, List<String> periods) {

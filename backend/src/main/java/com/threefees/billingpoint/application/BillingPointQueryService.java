@@ -147,6 +147,11 @@ public class BillingPointQueryService {
         List.copyOf(districts));
   }
 
+  @Transactional(readOnly = true)
+  public List<BillingPointSummary> findDashboardSummaries(String period, String cityScope) {
+    return loadSummaries(period, cityScope, null, null);
+  }
+
   private List<BillingPointSummary> loadSummaries(
       String period, String cityScope, String focusPeriod, String focusCityCode) {
 

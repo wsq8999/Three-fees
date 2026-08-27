@@ -969,7 +969,7 @@ watch(
 
       <ElTableColumn
         label="超标比例"
-        min-width="230"
+        min-width="310"
       >
         <template #default="scope">
           <OverLimitRatioTags

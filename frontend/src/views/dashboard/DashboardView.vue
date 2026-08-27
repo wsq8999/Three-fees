@@ -2,7 +2,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Document, Files, Location, Warning } from "@element-plus/icons-vue";
-import type { EChartsType } from "echarts/core";
+import { PieChart } from "echarts/charts";
+import { TooltipComponent } from "echarts/components";
+import { init, use, type EChartsType } from "echarts/core";
+import { CanvasRenderer } from "echarts/renderers";
 import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
@@ -23,6 +26,10 @@ const openingTaskId = ref<string | null>(null);
 const statusPieChartElement = ref<HTMLElement | null>(null);
 let statusPieChart: EChartsType | undefined;
 let statusPieResizeObserver: ResizeObserver | undefined;
+let statusPieRenderVersion = 0;
+let statusPieRetryTimer: ReturnType<typeof window.setTimeout> | undefined;
+
+use([PieChart, TooltipComponent, CanvasRenderer]);
 
 const periodLabel = computed(() => {
   const period = selectedPeriod.value || dashboard.value?.currentDataPeriod;
@@ -38,9 +45,32 @@ const importGuideStorageKey = computed(() => {
   return `three-fees-import-guide-dismissed:${userId}`;
 });
 
+const pendingOverLimitTaskCount = computed(() => {
+  const data = dashboard.value;
+  if (!data) return 0;
+  return new Set(data.pendingTasks.map((task) => task.billingPointPeriodId || task.id)).size;
+});
+
+const overLimitTypeCount = computed(() =>
+  dashboard.value?.overLimitTypeCounts.reduce((sum, item) => sum + item.count, 0) ?? 0,
+);
+
+const effectiveOverLimitBillingPointCount = computed(() => {
+  const data = dashboard.value;
+  if (!data) return 0;
+  return Math.min(
+    Math.max(
+      data.overLimitBillingPointCount,
+      pendingOverLimitTaskCount.value,
+      overLimitTypeCount.value,
+    ),
+    Math.max(data.billingPointCount, pendingOverLimitTaskCount.value, overLimitTypeCount.value),
+  );
+});
+
 const overRate = computed(() => {
   if (!dashboard.value || dashboard.value.billingPointCount === 0) return "-";
-  return `${((dashboard.value.overLimitBillingPointCount / dashboard.value.billingPointCount) * 100).toFixed(2)}%`;
+  return `${((effectiveOverLimitBillingPointCount.value / dashboard.value.billingPointCount) * 100).toFixed(2)}%`;
 });
 
 const districtRatioChartData = computed(() =>
@@ -52,16 +82,41 @@ const overLimitTypeChartData = computed(() => dashboard.value?.overLimitTypeCoun
 const statusChartData = computed(() => {
   const data = dashboard.value;
   if (!data) return [];
+  const overLimitCount = effectiveOverLimitBillingPointCount.value;
+  const normalCount = Math.min(
+    data.normalBillingPointCount,
+    Math.max(0, data.billingPointCount - overLimitCount - data.pendingReviewCount),
+  );
+  const unresolvedCount = Math.max(
+    0,
+    data.billingPointCount - normalCount - overLimitCount - data.pendingReviewCount,
+  );
+  const pendingReviewCount = data.pendingReviewCount + unresolvedCount;
   return [
-    { name: "正常", count: data.normalBillingPointCount, color: "#19a873" },
-    { name: "超标", count: data.overLimitBillingPointCount, color: "#f02f44" },
-    { name: "数据不足", count: data.pendingReviewCount, color: "#d98b00" },
+    { name: "正常", count: normalCount, color: "#19a873" },
+    { name: "超标", count: overLimitCount, color: "#f02f44" },
+    { name: "数据不足", count: pendingReviewCount, color: "#d98b00" },
   ];
 });
 const hasDistrictChart = computed(() => districtRatioChartData.value.some((item) => item.ratio > 0));
 const hasOverLimitTypeChart = computed(() => overLimitTypeChartData.value.some((item) => item.count > 0));
-const hasStatusChart = computed(() => (dashboard.value?.billingPointCount ?? 0) > 0);
+const statusTotalCount = computed(() =>
+  Math.max(
+    dashboard.value?.billingPointCount ?? 0,
+    statusChartData.value.reduce((sum, item) => sum + item.count, 0),
+  ),
+);
+const hasStatusChart = computed(() => statusTotalCount.value > 0);
 const maxDistrictRatio = computed(() => Math.max(1, ...districtRatioChartData.value.map((item) => item.ratio)));
+const statusPieFallbackStyle = computed(() => ({
+  background: buildStatusPieFallbackBackground(),
+}));
+const statusPieTitle = computed(() =>
+  statusChartData.value
+    .filter((item) => item.count > 0)
+    .map((item) => `${item.name}：${item.count}`)
+    .join("，"),
+);
 
 function asPendingTask(row: unknown): DashboardData["pendingTasks"][number] {
   return row as DashboardData["pendingTasks"][number];
@@ -81,7 +136,9 @@ function formatChartRatio(value: number): string {
   return `${Number(value).toFixed(2)}%`;
 }
 
-async function renderStatusPieChart(): Promise<void> {
+async function renderStatusPieChart(retryCount = 0): Promise<void> {
+  const renderVersion = ++statusPieRenderVersion;
+  clearStatusPieRetry();
   if (!hasStatusChart.value) {
     statusPieResizeObserver?.disconnect();
     statusPieResizeObserver = undefined;
@@ -89,16 +146,29 @@ async function renderStatusPieChart(): Promise<void> {
     statusPieChart = undefined;
     return;
   }
+
   await nextTick();
-  if (statusPieChartElement.value === null) return;
+  await waitForChartSize(renderVersion);
+  if (renderVersion !== statusPieRenderVersion || statusPieChartElement.value === null) return;
+
   if (statusPieChart === undefined) {
-    const { createAuditChart } = await import("./components/audit-chart-runtime");
-    statusPieChart = createAuditChart(statusPieChartElement.value);
-    statusPieResizeObserver = new ResizeObserver(() => statusPieChart?.resize());
+    statusPieChart = init(statusPieChartElement.value, undefined, { renderer: "canvas" });
+    statusPieResizeObserver = new ResizeObserver(() => {
+      statusPieChart?.resize();
+      statusPieChart?.setOption(buildStatusPieOption(), { notMerge: true, lazyUpdate: false });
+    });
     statusPieResizeObserver.observe(statusPieChartElement.value);
   }
-  statusPieChart.setOption({
-    color: statusChartData.value.map((item) => item.color),
+
+  statusPieChart.resize();
+  statusPieChart.setOption(buildStatusPieOption(), { notMerge: true, lazyUpdate: false });
+  await ensureStatusPieRendered(renderVersion, retryCount);
+}
+
+function buildStatusPieOption() {
+  const chartItems = statusPieVisibleItems();
+  return {
+    color: chartItems.map((item) => item.color),
     tooltip: {
       trigger: "item",
       formatter: "{b}<br/>数量：{c}<br/>占比：{d}%",
@@ -118,13 +188,18 @@ async function renderStatusPieChart(): Promise<void> {
       {
         name: "当前账期状态",
         type: "pie",
-        radius: ["50%", "82%"],
+        radius: ["52%", "80%"],
         center: ["50%", "50%"],
         clockwise: true,
         startAngle: 90,
         avoidLabelOverlap: true,
+        stillShowZeroSum: false,
         label: { show: false },
         labelLine: { show: false },
+        itemStyle: {
+          borderColor: "#ffffff",
+          borderWidth: chartItems.length > 1 ? 2 : 0,
+        },
         emphasis: {
           scale: true,
           scaleSize: 4,
@@ -133,13 +208,67 @@ async function renderStatusPieChart(): Promise<void> {
             shadowColor: "rgba(25, 42, 70, 0.16)",
           },
         },
-        data: statusChartData.value.map((item) => ({
+        data: chartItems.map((item) => ({
           name: item.name,
           value: item.count,
         })),
       },
     ],
+  };
+}
+
+function buildStatusPieFallbackBackground(): string {
+  const chartItems = statusPieVisibleItems();
+  const total = chartItems.reduce((sum, item) => sum + item.count, 0);
+  if (total <= 0) return "#edf1f6";
+
+  let cursor = 0;
+  const segments = chartItems.map((item) => {
+    const start = cursor;
+    cursor += (item.count / total) * 100;
+    return `${item.color} ${start.toFixed(4)}% ${cursor.toFixed(4)}%`;
   });
+  return `conic-gradient(${segments.join(", ")})`;
+}
+
+function statusPieVisibleItems() {
+  const visibleItems = statusChartData.value.filter((item) => item.count > 0);
+  return visibleItems.length > 0
+    ? visibleItems
+    : [{ name: "数据不足", count: statusTotalCount.value, color: "#d98b00" }];
+}
+
+async function waitForChartSize(renderVersion: number): Promise<void> {
+  for (let index = 0; index < 10; index += 1) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const element = statusPieChartElement.value;
+    if (renderVersion !== statusPieRenderVersion || element === null) return;
+    if (element.clientWidth > 0 && element.clientHeight > 0) return;
+  }
+}
+
+async function ensureStatusPieRendered(renderVersion: number, retryCount: number): Promise<void> {
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  if (renderVersion !== statusPieRenderVersion || statusPieChartElement.value === null) return;
+  const canvas = statusPieChartElement.value.querySelector("canvas");
+  if (
+    canvas instanceof HTMLCanvasElement &&
+    canvas.width > 0 &&
+    canvas.height > 0
+  ) {
+    return;
+  }
+
+  if (retryCount >= 6) return;
+  statusPieChart?.dispose();
+  statusPieChart = undefined;
+  statusPieRetryTimer = window.setTimeout(() => void renderStatusPieChart(retryCount + 1), 80);
+}
+
+function clearStatusPieRetry(): void {
+  if (statusPieRetryTimer === undefined) return;
+  window.clearTimeout(statusPieRetryTimer);
+  statusPieRetryTimer = undefined;
 }
 
 async function load(period = selectedPeriod.value): Promise<void> {
@@ -176,6 +305,7 @@ async function openImportGuideTarget(): Promise<void> {
 
 async function changePeriod(): Promise<void> {
   await load(selectedPeriod.value);
+  await renderStatusPieChart();
 }
 
 async function openTask(task: DashboardData["pendingTasks"][number]): Promise<void> {
@@ -205,8 +335,9 @@ async function openTask(task: DashboardData["pendingTasks"][number]): Promise<vo
 }
 
 watch(
-  () => statusChartData.value.map((item) => `${item.name}:${item.count}`).join("|"),
+  () => statusChartData.value.map((item) => `${item.name}:${item.count}:${item.color}`).join("|"),
   () => void renderStatusPieChart(),
+  { flush: "post" },
 );
 
 onMounted(async () => {
@@ -215,6 +346,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  clearStatusPieRetry();
   statusPieResizeObserver?.disconnect();
   statusPieChart?.dispose();
 });
@@ -254,7 +386,7 @@ onBeforeUnmount(() => {
           <h3>超标报账点</h3>
           <small>超标占比：{{ overRate }}</small>
         </div>
-        <strong class="orange">{{ dashboard.overLimitBillingPointCount }}</strong>
+        <strong class="orange">{{ effectiveOverLimitBillingPointCount }}</strong>
       </article>
       <article class="stat-card">
         <span class="stat-icon green"><Document /></span>
@@ -416,10 +548,15 @@ onBeforeUnmount(() => {
         <h3>当前账期状态分布</h3>
         <div v-if="hasStatusChart" class="status-pie-panel">
           <div class="status-pie-figure">
+            <div
+              class="status-pie-fallback"
+              :style="statusPieFallbackStyle"
+              :title="statusPieTitle"
+            />
             <div ref="statusPieChartElement" class="status-pie-chart" />
             <div class="status-pie-center">
               <span>
-                <b>{{ dashboard.billingPointCount }}</b>
+                <b>{{ statusTotalCount }}</b>
                 <small>总数</small>
               </span>
             </div>
@@ -877,8 +1014,8 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   width: fit-content;
   max-width: 100%;
-  grid-template-columns: 150px max-content;
-  gap: 14px;
+  grid-template-columns: 120px max-content;
+  gap: 18px;
   align-items: center;
   justify-content: center;
   place-self: center;
@@ -887,13 +1024,23 @@ onBeforeUnmount(() => {
 
 .status-pie-figure {
   position: relative;
-  width: 150px;
+  width: 120px;
   aspect-ratio: 1;
 }
 
+.status-pie-fallback,
 .status-pie-chart {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.status-pie-fallback {
+  inset: 12px;
+  width: auto;
+  height: auto;
+  border-radius: 50%;
 }
 
 .status-pie-center {
@@ -902,6 +1049,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   pointer-events: none;
+  z-index: 2;
 }
 
 .status-pie-center span {
