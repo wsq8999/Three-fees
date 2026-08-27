@@ -67,9 +67,6 @@ const canImport = computed(
   () => session.hasRole("SUPER_ADMIN") || session.hasRole("CITY_USER"),
 );
 
-const periodOptions = computed(() =>
-  reportFilterOptions.value.periods,
-);
 const cityOptions = computed<BusinessCity[]>(() => {
   const map = new Map<string, BusinessCity>();
   const currentCity = session.currentUser?.city;
@@ -576,18 +573,14 @@ onMounted(async () => {
 
     <label class="history-query-item">
       <span>账期</span>
-      <ElSelect
+      <ElDatePicker
         v-model="filters.period"
+        type="month"
+        value-format="YYYY-MM"
+        format="YYYY年MM月"
         placeholder="全部账期"
         clearable
-      >
-        <ElOption
-          v-for="period in periodOptions"
-          :key="period"
-          :label="period"
-          :value="period"
-        />
-      </ElSelect>
+      />
     </label>
 
     <label class="history-query-item">

@@ -38,24 +38,23 @@ const correctionReason = computed(() => String(route.query.reason ?? "").trim())
 const isCorrection = computed(() => correctionReportId.value.length > 0);
 
 const candidateOptions = computed(() =>
-  candidates.value.map((item) => ({
-    key: candidateKey(item),
-    label: `${item.billingPointCode} ｜ ${item.billingPointName} ｜ ${item.cityName} ｜ ${item.period}`,
-    item,
-  })),
+  candidates.value.map((item) => {
+    const parts = [
+      item.billingPointCode,
+      item.billingPointName,
+      item.cityName,
+      item.period,
+    ].filter(Boolean);
+    return {
+      key: candidateKey(item),
+      label: parts.join(" | "),
+    };
+  }),
 );
 
 const selectedOptionLabel = computed(
   () => candidateOptions.value.find((option) => option.key === selectedKey.value)?.label ?? "",
 );
-const selectedOptionWidth = computed(() => {
-  const label = selectedOptionLabel.value || "请选择报账点";
-  const textWidth = Array.from(label).reduce(
-    (total, char) => total + (char.charCodeAt(0) > 255 ? 18 : 10),
-    0,
-  );
-  return `${Math.max(760, textWidth + 160)}px`;
-});
 const hasUnsavedContent = computed(
   () => !generated.value && Boolean(selected.value) && Boolean(editorRef.value?.innerHTML.trim()),
 );
@@ -373,9 +372,9 @@ onMounted(load);
         <ElSelect
           v-model="selectedKey"
           filterable
+          fit-input-width
           class="candidate-select"
           popper-class="candidate-select-popper"
-          :style="{ '--candidate-select-width': selectedOptionWidth }"
           :loading="initializing"
           :disabled="isCorrection"
           placeholder="暂无待生成报告"
@@ -662,20 +661,32 @@ onMounted(load);
 
 .candidate-option {
   display: block;
+  width: 100%;
   min-width: 0;
-  overflow: visible;
-  white-space: normal;
-  word-break: keep-all;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-:global(.candidate-select-popper) {
-  max-width: min(860px, calc(100vw - 32px));
+:global(.candidate-select-popper .el-select-dropdown__list) {
+  padding: 4px 0;
 }
 
 :global(.candidate-select-popper .el-select-dropdown__item) {
-  height: auto;
-  min-height: 34px;
-  line-height: 1.45;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 12px;
+  line-height: 36px;
+}
+
+:global(.candidate-select-popper .el-select-dropdown__item.is-hovering),
+:global(.candidate-select-popper .el-select-dropdown__item.hover) {
+  background-color: #f4f8fc;
+}
+
+:global(.candidate-select-popper .el-select-dropdown__item.is-selected) {
+  background-color: #eef6ff;
 }
 
 .danger-text {
@@ -897,5 +908,4 @@ onMounted(load);
     padding: 24px 18px;
   }
 }
-
 </style>
