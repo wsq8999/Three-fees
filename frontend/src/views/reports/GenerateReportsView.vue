@@ -48,6 +48,8 @@ const candidateOptions = computed(() =>
     return {
       key: candidateKey(item),
       label: parts.join(" | "),
+      statusLabel: candidateAnalysisStatusLabel(item),
+      statusType: candidateAnalysisStatusType(item),
     };
   }),
 );
@@ -61,6 +63,29 @@ const hasUnsavedContent = computed(
 
 function candidateKey(item: ReportGenerationCandidate): string {
   return `${item.billingPointCode}@@${item.period}`;
+}
+
+function candidateAnalysisStatusLabel(candidate: ReportGenerationCandidate): string {
+  const taskLabels: Record<string, string> = {
+    QUEUED: "排队中",
+    RUNNING: "AI分析中",
+    RETRY_WAIT: "等待重试",
+    SUCCEEDED: "AI完成待确认",
+    FAILED: "AI分析失败",
+  };
+  const taskStatus = candidate.draftAnalysisTaskStatus;
+  return taskStatus === null || taskStatus === undefined ? "" : (taskLabels[taskStatus] ?? "");
+}
+
+function candidateAnalysisStatusType(
+  candidate: ReportGenerationCandidate,
+): "warning" | "success" | "danger" | "info" {
+  const taskStatus = candidate.draftAnalysisTaskStatus;
+  if (taskStatus === "QUEUED") return "info";
+  if (taskStatus === "RUNNING" || taskStatus === "RETRY_WAIT") return "warning";
+  if (taskStatus === "SUCCEEDED") return "success";
+  if (taskStatus === "FAILED") return "danger";
+  return "info";
 }
 
 function currentQueryTarget(): { billingPointCode: string; period: string } | null {
@@ -387,7 +412,18 @@ onMounted(load);
             :label="option.label"
             :value="option.key"
           >
-            <span class="candidate-option" :title="option.label">{{ option.label }}</span>
+            <span class="candidate-option" :title="option.label">
+              <span class="candidate-option-label">{{ option.label }}</span>
+              <ElTag
+                v-if="option.statusLabel"
+                class="candidate-status-tag"
+                :type="option.statusType"
+                size="small"
+                effect="light"
+              >
+                {{ option.statusLabel }}
+              </ElTag>
+            </span>
           </ElOption>
         </ElSelect>
       </label>
@@ -661,13 +697,25 @@ onMounted(load);
 }
 
 .candidate-option {
-  display: block;
+  display: flex;
   width: 100%;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.candidate-option-label {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.candidate-status-tag {
+  flex: 0 0 auto;
 }
 
 :global(.candidate-select-popper .el-select-dropdown__list) {

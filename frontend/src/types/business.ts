@@ -437,6 +437,9 @@ export interface ReportGenerationCandidate {
   overLimitType?: string | null;
   maxExceedRatio?: string | null;
   overLimitRatios?: OverLimitRatio[];
+  draftId?: string | null;
+  draftAnalysisStatus?: string | null;
+  draftAnalysisTaskStatus?: AiTaskStatus | string | null;
 }
 
 export interface ReportGenerationInitialContent {

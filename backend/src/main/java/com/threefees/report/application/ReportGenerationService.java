@@ -82,7 +82,9 @@ public class ReportGenerationService {
                m.resource_summary_json AS master_json,
                s.data_period, a.over_limit_type, a.max_ratio,
                a.yoy_result, a.mom_result, a.rated_result,
-               a.yoy_ratio, a.mom_ratio, a.rated_ratio
+               a.yoy_ratio, a.mom_ratio, a.rated_ratio,
+               d.public_id AS draft_id, d.analysis_status AS draft_analysis_status,
+               t.status AS draft_analysis_task_status
           FROM billing_point_snapshot s
           JOIN city c ON c.code = s.city_code
           LEFT JOIN billing_point_master m
@@ -92,6 +94,10 @@ public class ReportGenerationService {
             ON a.billing_point_code = s.billing_point_code
            AND a.data_period = s.data_period
            AND a.city_code = s.city_code
+          LEFT JOIN report_draft d ON d.billing_point_snapshot_id = s.id
+          LEFT JOIN business_task t
+            ON t.public_id = d.analysis_task_public_id
+           AND t.task_type = 'AI_IMAGE_ANALYSIS'
           LEFT JOIN audit_report r ON r.billing_point_snapshot_id = s.id
         """
             + where
@@ -119,7 +125,10 @@ public class ReportGenerationService {
                     rs.getString("rated_result"),
                     rs.getBigDecimal("yoy_ratio"),
                     rs.getBigDecimal("mom_ratio"),
-                    rs.getBigDecimal("rated_ratio"))),
+                rs.getBigDecimal("rated_ratio")),
+                rs.getString("draft_id"),
+                rs.getString("draft_analysis_status"),
+                rs.getString("draft_analysis_task_status")),
         args.toArray());
   }
 
@@ -525,7 +534,10 @@ public class ReportGenerationService {
         source.period(),
         overLimitDisplayType(source),
         source.maxRatio(),
-        overLimitRatios(source));
+        overLimitRatios(source),
+        null,
+        null,
+        null);
   }
 
   private String existingReportForSnapshot(long snapshotId) {
@@ -754,7 +766,10 @@ public class ReportGenerationService {
       String period,
       String overLimitType,
       BigDecimal maxExceedRatio,
-      List<OverLimitRatio> overLimitRatios) {}
+      List<OverLimitRatio> overLimitRatios,
+      String draftId,
+      String draftAnalysisStatus,
+      String draftAnalysisTaskStatus) {}
 
   public record OverLimitRatio(String type, String label, String ratio) {}
 
