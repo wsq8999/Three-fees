@@ -920,7 +920,7 @@ onMounted(load);
       </ElTabs>
     </section>
 
-    <footer class="fixed-actions">
+    <footer class="detail-actions">
       <ElButton @click="goBack">返回</ElButton>
       <ElButton :icon="Download" :disabled="!canExport" @click="exportVisible = true">
         导出Excel
@@ -1163,20 +1163,14 @@ onMounted(load);
   font-weight: 800;
 }
 
-.fixed-actions {
-  position: fixed;
-  right: 16px;
-  bottom: 0;
-  left: calc(var(--sidebar-width) + 16px);
-  z-index: 50;
+.detail-actions {
   display: flex;
-  min-height: 58px;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
   justify-content: flex-end;
-  padding: 10px 18px;
-  background: rgb(255 255 255 / 96%);
-  border-top: 1px solid #dfe5ec;
+  margin-top: 14px;
+  padding: 0;
+  background: transparent;
 }
 
 :deep(.selected-business-row td.el-table__cell) {

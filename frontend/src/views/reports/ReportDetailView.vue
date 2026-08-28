@@ -975,13 +975,12 @@ onBeforeUnmount(() => {
 }
 
 .report-actions {
-  position: sticky;
-  bottom: 0;
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 12px 0 0;
-  background: #f6f8fb;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 0;
+  background: transparent;
 }
 
 .correction-form {

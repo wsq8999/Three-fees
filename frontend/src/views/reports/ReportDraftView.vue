@@ -1303,10 +1303,10 @@ onUnmounted(() => {
 
 <style scoped>
 .draft-page {
-  display: grid;
+  display: flex;
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  flex-direction: column;
   overflow: hidden;
 }
 
@@ -1318,6 +1318,7 @@ onUnmounted(() => {
   height: calc(100dvh - var(--topbar-height));
   min-height: 0;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .draft-summary {
@@ -1384,8 +1385,8 @@ onUnmounted(() => {
 .draft-workspace {
   display: grid;
   width: 100%;
-  height: auto;
   min-height: 0;
+  flex: 1 1 0;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
@@ -1400,7 +1401,7 @@ onUnmounted(() => {
 .report-paper {
   position: relative;
   display: flex;
-  width: min(920px, 100%);
+  width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
@@ -1718,13 +1719,18 @@ onUnmounted(() => {
 
 .draft-actions {
   display: flex;
-  min-height: 58px;
+  height: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
   gap: 12px;
   align-items: center;
   justify-content: flex-end;
-  padding: 10px 0 0;
-  background: rgb(255 255 255 / 96%);
-  border-top: 1px solid #dfe5ec;
+  padding: 8px 0 0;
+  background: transparent;
+}
+
+.draft-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 @media (width <= 1280px) {
@@ -1738,13 +1744,23 @@ onUnmounted(() => {
 }
 
 @media (width <= 760px) {
-  .draft-workspace.assistant-open {
-    grid-template-columns: minmax(0, 1fr) minmax(190px, 36%);
+  .draft-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .draft-summary > div {
+    justify-self: stretch;
   }
 
   .draft-actions {
+    height: auto;
+    min-height: 40px;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .draft-workspace.assistant-open {
+    grid-template-columns: minmax(0, 1fr) minmax(190px, 36%);
   }
 }
 </style>
