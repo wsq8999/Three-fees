@@ -293,6 +293,9 @@ public class ReportGenerationService {
       if (existingReportForSnapshot(source.snapshotId()) != null) {
         throw formalReportExists();
       }
+      if (reportNumberExists(reportNumber)) {
+        throw reportNumberAlreadyExists(reportNumber);
+      }
       throw exception;
     }
     return new GeneratedReport(publicId, reportNumber);
@@ -564,19 +567,43 @@ public class ReportGenerationService {
     } catch (DuplicateKeyException ignored) {
       // Concurrent creation is serialized by the row lock below.
     }
-    Long next =
-        jdbcTemplate.queryForObject(
-            "SELECT next_value FROM report_number_sequence WHERE business_month = ? FOR UPDATE",
-            Long.class,
-            month);
-    if (next == null || next > 999_999L) {
-      throw new IllegalStateException("Monthly report number sequence exhausted");
-    }
+    long next =
+        java.util.Objects.requireNonNullElse(
+            jdbcTemplate.queryForObject(
+                "SELECT next_value FROM report_number_sequence WHERE business_month = ? FOR UPDATE",
+                Long.class,
+                month),
+            1L);
+    String reportNumber;
+    do {
+      if (next > 999_999L) {
+        throw new IllegalStateException("Monthly report number sequence exhausted");
+      }
+      reportNumber = "BG-" + month + "-" + String.format(java.util.Locale.ROOT, "%06d", next);
+      next += 1;
+    } while (reportNumberExists(reportNumber));
     jdbcTemplate.update(
         "UPDATE report_number_sequence SET next_value = ?, version = version + 1 WHERE business_month = ?",
-        next + 1,
+        next,
         month);
-    return "BG-" + month + "-" + String.format(java.util.Locale.ROOT, "%06d", next);
+    return reportNumber;
+  }
+
+  private boolean reportNumberExists(String reportNumber) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM audit_report WHERE report_number = ?",
+            Integer.class,
+            reportNumber);
+    return count != null && count > 0;
+  }
+
+  private ResourceConflictException reportNumberAlreadyExists(String reportNumber) {
+    return new ResourceConflictException(
+        "REPORT_NUMBER_ALREADY_EXISTS",
+        "报告编号 "
+            + reportNumber
+            + "已存在。报告编号是系统归档报告的唯一标识，不允许重复，请刷新后重试。");
   }
 
   private String titleFromHtml(String html, GenerationSource source) {

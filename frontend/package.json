@@ -15,7 +15,6 @@
     "test": "vitest run",
     "test:unit": "vitest",
     "test:watch": "vitest",
-    "test:e2e": "vite build --mode mock && playwright test",
     "lint": "eslint . --max-warnings=0",
     "lint:styles": "stylelint \"src/**/*.{css,vue}\"",
     "format": "prettier --write .",

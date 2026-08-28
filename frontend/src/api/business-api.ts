@@ -1430,35 +1430,6 @@ export const businessApi = {
       throw new Error("历史报告导入任务未返回报告编号");
     },
 
-    async correct(
-      id: string,
-      input: { reason: string; correctedSummary?: string; file?: File },
-    ): Promise<ReportSummary> {
-      if (input.file !== undefined) {
-        const form = new FormData();
-        form.set("reason", input.reason);
-        form.set("file", input.file);
-        return asResult<ReportSummary>(
-          await httpClient.postForm(
-            `/api/v1/audit-reports/${encodeURIComponent(id)}/corrections`,
-            form,
-          ),
-        );
-      }
-
-      return asResult<ReportSummary>(
-        await httpClient.post(
-          `/api/v1/audit-reports/${encodeURIComponent(id)}/corrections`,
-          {
-            reason: input.reason,
-            ...(input.correctedSummary === undefined
-              ? {}
-              : { correctedSummary: input.correctedSummary }),
-          },
-        ),
-      );
-    },
-
     async downloadWord(id: string): Promise<Blob> {
       return httpClient.getBlob(
         `/api/v1/reports/${encodeURIComponent(id)}/word`,

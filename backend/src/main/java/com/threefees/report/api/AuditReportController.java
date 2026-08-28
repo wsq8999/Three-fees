@@ -54,6 +54,7 @@ public class AuditReportController {
         String period,
         @RequestParam(required = false) String cityCode,
         @RequestParam(required = false) String district,
+        @RequestParam(required = false) String source,
         @RequestParam(defaultValue = "0") @Min(0) int page,
         @RequestParam(defaultValue = "10") @Min(1) @Max(100) int size,
         @AuthenticationPrincipal CurrentUser actor) {
@@ -65,6 +66,7 @@ public class AuditReportController {
             period,
             cityCode,
             district,
+            source,
             page,
             size,
             actor);

@@ -198,6 +198,9 @@ public class AuditReportService {
       if (concurrent != null) {
         return new FinalizationResult(concurrent, false);
       }
+      if (reportNumberExists(reportNumber)) {
+        throw reportNumberAlreadyExists(reportNumber);
+      }
       throw exception;
     }
     jdbcTemplate.update(
@@ -317,6 +320,7 @@ public class AuditReportService {
         String period,
         String cityCode,
         String district,
+        String source,
         int page,
         int size,
         CurrentUser actor) {
@@ -399,9 +403,11 @@ public class AuditReportService {
                 "%" + billingPointName.trim() + "%");
         }
 
+        appendSourceFilter(where, arguments, source);
+
         long total =
             jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) "
+                "SELECT COUNT(DISTINCT r.id) "
                     + "FROM audit_report r "
                     + "JOIN billing_point_snapshot s "
                     + "ON s.id = r.billing_point_snapshot_id"
@@ -998,25 +1004,46 @@ public class AuditReportService {
                 "billingPoint", snapshot.data(),
                 "audit", snapshot.audit(),
                 "historicalSource", true));
-    jdbcTemplate.update(
-        """
-        INSERT INTO audit_report
-          (public_id, report_number, billing_point_snapshot_id, source_type, status,
-           title, situation, analysis, rectification, word_file_id, pdf_file_id,
-           business_snapshot_json, updated_by)
-        VALUES (?, ?, ?, 'IMPORTED', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        publicId,
-        reportNumber,
-        snapshotId,
-        title,
-        situation,
-        analysis,
-        rectification,
-        sourceWordFileId,
-        previewPdfFileId,
-        businessSnapshot,
-        actor);
+    try {
+      jdbcTemplate.update(
+          """
+          INSERT INTO audit_report
+            (public_id, report_number, billing_point_snapshot_id, source_type, status,
+             title, situation, analysis, rectification, word_file_id, pdf_file_id,
+             business_snapshot_json, updated_by)
+          VALUES (?, ?, ?, 'IMPORTED', 'GENERATED', ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          publicId,
+          reportNumber,
+          snapshotId,
+          title,
+          situation,
+          analysis,
+          rectification,
+          sourceWordFileId,
+          previewPdfFileId,
+          businessSnapshot,
+          actor);
+    } catch (DuplicateKeyException exception) {
+      String concurrent = existingReportForSnapshot(snapshotId);
+      if (concurrent != null) {
+        jdbcTemplate.update(
+            """
+            UPDATE historical_report_import
+               SET status='SUCCEEDED', report_public_id=?,
+                   updated_at=CURRENT_TIMESTAMP(3), updated_by=?, version=version+1
+             WHERE id=?
+            """,
+            concurrent,
+            actor,
+            historicalImportId);
+        return new FinalizationResult(concurrent, false);
+      }
+      if (reportNumberExists(reportNumber)) {
+        throw reportNumberAlreadyExists(reportNumber);
+      }
+      throw exception;
+    }
     jdbcTemplate.update(
         """
         UPDATE historical_report_import
@@ -1081,19 +1108,43 @@ public class AuditReportService {
     } catch (DuplicateKeyException ignored) {
       // A concurrent transaction created the month row; the row lock below serializes allocation.
     }
-    Long next =
-        jdbcTemplate.queryForObject(
-            "SELECT next_value FROM report_number_sequence WHERE business_month = ? FOR UPDATE",
-            Long.class,
-            month);
-    if (next == null || next > 999_999L) {
-      throw new IllegalStateException("Monthly report number sequence exhausted");
-    }
+    long next =
+        java.util.Objects.requireNonNullElse(
+            jdbcTemplate.queryForObject(
+                "SELECT next_value FROM report_number_sequence WHERE business_month = ? FOR UPDATE",
+                Long.class,
+                month),
+            1L);
+    String reportNumber;
+    do {
+      if (next > 999_999L) {
+        throw new IllegalStateException("Monthly report number sequence exhausted");
+      }
+      reportNumber = "BG-" + month + "-" + String.format(java.util.Locale.ROOT, "%06d", next);
+      next += 1;
+    } while (reportNumberExists(reportNumber));
     jdbcTemplate.update(
         "UPDATE report_number_sequence SET next_value = ?, version = version + 1 WHERE business_month = ?",
-        next + 1,
+        next,
         month);
-    return "BG-" + month + "-" + String.format(java.util.Locale.ROOT, "%06d", next);
+    return reportNumber;
+  }
+
+  private boolean reportNumberExists(String reportNumber) {
+    Integer count =
+        jdbcTemplate.queryForObject(
+            "SELECT COUNT(*) FROM audit_report WHERE report_number = ?",
+            Integer.class,
+            reportNumber);
+    return count != null && count > 0;
+  }
+
+  private ResourceConflictException reportNumberAlreadyExists(String reportNumber) {
+    return new ResourceConflictException(
+        "REPORT_NUMBER_ALREADY_EXISTS",
+        "报告编号 "
+            + reportNumber
+            + "已存在。报告编号是系统归档报告的唯一标识，不允许重复，请刷新后重试。");
   }
 
   private String scopeCity(CurrentUser actor, String requestedCity) {
