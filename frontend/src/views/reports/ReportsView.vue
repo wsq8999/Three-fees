@@ -980,12 +980,8 @@ onMounted(async () => {
   font-weight: 700;
 }
 
-.report-table :deep(.el-table__body-wrapper) {
-  min-height: 455px;
-}
-
 .report-table :deep(.el-table__empty-block) {
-  min-height: 430px;
+  min-height: 220px;
 }
 
 .report-table :deep(.el-table__fixed-right .el-table__fixed-body-wrapper),
