@@ -309,7 +309,7 @@ function handleUserCommand(command: string): void {
   align-items: center;
 
   /* 原来左右16px，改成12px，给完整系统名称腾出空间 */
-  padding: var(--space-2) 12px;
+  padding: 6px 12px;
 
   color: var(--color-neutral-900);
   border-bottom: 1px solid var(--color-neutral-200);
@@ -331,8 +331,8 @@ function handleUserCommand(command: string): void {
 
 .brand-mark {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   flex: none;
   place-items: center;
   color: white;
@@ -342,7 +342,7 @@ function handleUserCommand(command: string): void {
 }
 
 .brand-mark :deep(svg) {
-  width: 20px;
+  width: 18px;
 }
 
 .collapse-navigation {
@@ -408,7 +408,7 @@ function handleUserCommand(command: string): void {
   min-height: var(--topbar-height);
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-2) var(--space-6);
+  padding: 6px var(--space-6);
   background: rgb(255 255 255 / 96%);
   border-bottom: 1px solid var(--color-neutral-200);
   backdrop-filter: blur(10px);
@@ -436,8 +436,8 @@ function handleUserCommand(command: string): void {
 
 .avatar {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   place-items: center;
   color: white;
   background: #26384e;
@@ -452,7 +452,7 @@ function handleUserCommand(command: string): void {
   width: min(100%, var(--content-max-width));
   min-width: 0;
   min-height: calc(100vh - var(--topbar-height));
-  padding: var(--page-padding);
+  padding: 9px var(--page-padding) var(--page-padding);
   margin: 0 auto;
 }
 

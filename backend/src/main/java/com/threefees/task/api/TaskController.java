@@ -199,6 +199,7 @@ public class TaskController {
         task.updatedAt(),
         related.relatedDraftId(),
         related.relatedReportId(),
+        related.billingPointCode(),
         related.billingPointName(),
         related.cityName(),
         related.period(),
@@ -212,7 +213,7 @@ public class TaskController {
     if (draftId == null) draftId = text(result, "draftId");
     RelatedTaskTarget draftTarget = draftTarget(draftId);
     return draftTarget == null
-        ? new RelatedTaskTarget(null, null, null, null, null, null, true)
+        ? new RelatedTaskTarget(null, null, null, null, null, null, null, true)
         : draftTarget;
   }
 
@@ -224,7 +225,7 @@ public class TaskController {
             SELECT d.public_id AS draft_id, d.formal_report_public_id AS report_id,
                    d.status AS draft_record_status, d.analysis_status,
                    d.analysis_submitted_at,
-                   s.billing_point_name, c.name AS city_name, s.data_period
+                   s.billing_point_code, s.billing_point_name, c.name AS city_name, s.data_period
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               JOIN city c ON c.code = s.city_code
@@ -234,6 +235,7 @@ public class TaskController {
                 new RelatedTaskTarget(
                     rs.getString("draft_id"),
                     rs.getString("report_id"),
+                    rs.getString("billing_point_code"),
                     rs.getString("billing_point_name"),
                     rs.getString("city_name"),
                     rs.getString("data_period"),
@@ -390,6 +392,7 @@ public class TaskController {
       LocalDateTime updatedAt,
       String relatedDraftId,
       String relatedReportId,
+      String billingPointCode,
       String billingPointName,
       String cityName,
       String period,
@@ -417,6 +420,7 @@ public class TaskController {
   private record RelatedTaskTarget(
       String relatedDraftId,
       String relatedReportId,
+      String billingPointCode,
       String billingPointName,
       String cityName,
       String period,

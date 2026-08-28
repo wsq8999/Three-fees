@@ -374,6 +374,7 @@ export interface AiTaskListItem {
   updatedAt: string;
   relatedDraftId: string | null;
   relatedReportId: string | null;
+  billingPointCode: string | null;
   billingPointName: string | null;
   cityName: string | null;
   period: string | null;

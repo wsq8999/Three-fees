@@ -81,6 +81,7 @@ const DEFAULT_PASTED_IMAGE_HEIGHT = 180;
 const A4_CONTENT_WIDTH = 682;
 const INLINE_IMAGE_GAP = 8;
 const AUTO_SAVE_DELAY_MS = 800;
+const DRAFT_PAGE_SCROLL_LOCK_CLASS = "draft-page-scroll-locked";
 
 const draftEditable = computed(
   () =>
@@ -1070,6 +1071,7 @@ async function goBack(): Promise<void> {
 }
 
 onMounted(() => {
+  document.body.classList.add(DRAFT_PAGE_SCROLL_LOCK_CLASS);
   window.addEventListener("beforeunload", handleBeforeUnload);
   void load();
 });
@@ -1081,6 +1083,7 @@ watch(
   },
 );
 onUnmounted(() => {
+  document.body.classList.remove(DRAFT_PAGE_SCROLL_LOCK_CLASS);
   stopAnalysisPolling();
   clearAutoSaveTimer();
   window.removeEventListener("beforeunload", handleBeforeUnload);
@@ -1098,7 +1101,7 @@ onUnmounted(() => {
     @retry="load"
   />
 
-  <template v-else-if="draft">
+  <div v-else-if="draft" class="draft-page">
     <section class="draft-summary business-card">
       <div>
         <small>报账点</small>
@@ -1186,9 +1189,6 @@ onUnmounted(() => {
         <header>
           <div>
             <h2>AI报告助手</h2>
-            <small
-              >分析图片后自动补充报告内容，人工确认后再生成正式报告。</small
-            >
           </div>
         </header>
 
@@ -1298,10 +1298,28 @@ onUnmounted(() => {
         确认报告并导出 Word
       </ElButton>
     </footer>
-  </template>
+  </div>
 </template>
 
 <style scoped>
+.draft-page {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+:global(body.draft-page-scroll-locked) {
+  overflow-y: hidden;
+}
+
+:global(body.draft-page-scroll-locked .main-content) {
+  height: calc(100dvh - var(--topbar-height));
+  min-height: 0;
+  overflow: hidden;
+}
+
 .draft-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content max-content;
@@ -1309,7 +1327,7 @@ onUnmounted(() => {
   gap: 16px;
   align-items: center;
   padding: 14px 18px;
-  margin-bottom: 16px;
+  margin-bottom: 6px;
   overflow: hidden;
   box-sizing: border-box;
 }
@@ -1343,8 +1361,8 @@ onUnmounted(() => {
 }
 
 .draft-analysis-alert {
-  height: 34px;
-  margin: 6px 0 8px;
+  min-height: 34px;
+  margin: 0 0 6px;
   overflow: hidden;
 }
 
@@ -1366,12 +1384,11 @@ onUnmounted(() => {
 .draft-workspace {
   display: grid;
   width: 100%;
-  height: clamp(560px, calc(100vh - 190px), 880px);
-  min-height: 520px;
+  height: auto;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: stretch;
-  padding-bottom: 72px;
   overflow: hidden;
   box-sizing: border-box;
 }
@@ -1581,20 +1598,14 @@ onUnmounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  padding: 12px 14px 10px;
+  padding: 12px 14px;
   border-bottom: 1px solid #edf1f5;
 }
 
 .assistant-panel h2 {
-  margin: 0 0 2px;
+  margin: 0;
   color: #1f2d3d;
   font-size: 18px;
-}
-
-.assistant-panel header small {
-  color: #7d8ca1;
-  font-size: 12px;
-  line-height: 1.35;
 }
 
 .chat-list {
@@ -1706,17 +1717,12 @@ onUnmounted(() => {
 }
 
 .draft-actions {
-  position: fixed;
-  right: 16px;
-  bottom: 0;
-  left: calc(var(--sidebar-width) + 16px);
-  z-index: 50;
   display: flex;
   min-height: 58px;
   gap: 12px;
   align-items: center;
   justify-content: flex-end;
-  padding: 10px 18px;
+  padding: 10px 0 0;
   background: rgb(255 255 255 / 96%);
   border-top: 1px solid #dfe5ec;
 }
@@ -1737,8 +1743,6 @@ onUnmounted(() => {
   }
 
   .draft-actions {
-    right: 12px;
-    left: 12px;
     gap: 8px;
     flex-wrap: wrap;
   }

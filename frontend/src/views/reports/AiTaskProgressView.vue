@@ -26,8 +26,6 @@ const filters = reactive({
 
 const cityOptions = computed(() => pageData.value?.filterOptions?.cityNames ?? []);
 
-const periodOptions = computed(() => pageData.value?.filterOptions?.periods ?? []);
-
 const statusOptions: Array<{ label: string; value: AiTaskStatus }> = [
   { label: "排队中", value: "QUEUED" },
   { label: "AI分析中", value: "RUNNING" },
@@ -133,10 +131,6 @@ function errorText(task: AiTaskListItem): string {
   return messages[task.errorCode] ?? "AI图片分析失败，请稍后重试。";
 }
 
-function relatedLabel(task: AiTaskListItem): string {
-  return task.billingPointName ?? task.id;
-}
-
 function formatTaskTime(value: string): string {
   return value.replace("T", " ").slice(0, 19);
 }
@@ -213,18 +207,14 @@ onBeforeUnmount(stopRefresh);
 
       <label>
         <span>账期</span>
-        <ElSelect
+        <ElDatePicker
           v-model="filters.period"
+          type="month"
+          value-format="YYYY-MM"
+          format="YYYY年MM月"
           placeholder="全部账期"
           clearable
-        >
-          <ElOption
-            v-for="period in periodOptions"
-            :key="period"
-            :label="period"
-            :value="period"
-          />
-        </ElSelect>
+        />
       </label>
 
       <div class="ai-task-query-actions">
@@ -239,14 +229,6 @@ onBeforeUnmount(stopRefresh);
         </ElButton>
         <ElButton class="ai-task-query-button" :icon="Refresh" @click="reset">
           重置
-        </ElButton>
-        <ElButton
-          class="ai-task-query-button"
-          :icon="Refresh"
-          :loading="loading"
-          @click="load()"
-        >
-          刷新
         </ElButton>
       </div>
     </div>
@@ -272,13 +254,19 @@ onBeforeUnmount(stopRefresh);
       :data="pageData?.items ?? []"
       table-layout="auto"
     >
-      <ElTableColumn label="报账点" min-width="260" show-overflow-tooltip>
+      <ElTableColumn label="报账点编码" min-width="190" show-overflow-tooltip>
         <template #default="scope">
-          {{ relatedLabel(scope.row as AiTaskListItem) }}
+          {{ (scope.row as AiTaskListItem).billingPointCode ?? "—" }}
         </template>
       </ElTableColumn>
 
-      <ElTableColumn prop="cityName" label="城市" min-width="130" show-overflow-tooltip />
+      <ElTableColumn label="报账点名称" min-width="180" show-overflow-tooltip>
+        <template #default="scope">
+          {{ (scope.row as AiTaskListItem).billingPointName ?? "—" }}
+        </template>
+      </ElTableColumn>
+
+      <ElTableColumn prop="cityName" label="所属地市" min-width="130" show-overflow-tooltip />
       <ElTableColumn prop="period" label="账期" min-width="120" />
 
       <ElTableColumn label="AI任务状态" min-width="150">
@@ -301,12 +289,6 @@ onBeforeUnmount(stopRefresh);
       <ElTableColumn label="任务提交时间" min-width="180">
         <template #default="scope">
           {{ formatTaskTime((scope.row as AiTaskListItem).createdAt) }}
-        </template>
-      </ElTableColumn>
-
-      <ElTableColumn label="任务更新时间" min-width="180">
-        <template #default="scope">
-          {{ formatTaskTime((scope.row as AiTaskListItem).updatedAt) }}
         </template>
       </ElTableColumn>
 
@@ -374,58 +356,54 @@ onBeforeUnmount(stopRefresh);
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 1fr)
-    minmax(0, 1.25fr)
-    minmax(0, 0.9fr)
-    minmax(0, 0.9fr)
-    max-content;
-  gap: 12px;
-  align-items: center;
-  white-space: nowrap;
+    repeat(
+      auto-fit,
+      minmax(
+        min(100%, 150px),
+        1fr
+      )
+    );
+  gap: 12px 14px;
 }
 
 .ai-task-filter-row label {
-  display: flex;
+  display: grid;
   min-width: 0;
-  gap: 8px;
-  align-items: center;
+  gap: 6px;
+  color: #1f2d3d;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .ai-task-filter-row span {
-  flex: 0 0 auto;
-  color: var(--color-neutral-600);
-  font-size: 13px;
+  color: inherit;
+  font: inherit;
 }
 
 .ai-task-filter-row :deep(.el-select),
+.ai-task-filter-row :deep(.el-date-editor),
 .ai-task-filter-row :deep(.el-input) {
+  width: 100%;
   min-width: 0;
-  flex: 1 1 auto;
 }
 
 .ai-task-query-actions {
   display: flex;
-  flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  gap: 8px;
-  align-items: center !important;
+  grid-column: -2 / -1;
+  gap: 10px;
+  align-items: end;
   justify-content: flex-end;
+  justify-self: end;
+  align-self: end;
   margin-left: auto;
+  padding-top: 4px;
   white-space: nowrap;
 }
 
 .ai-task-query-actions :deep(.el-button) {
   flex: 0 0 auto;
-  width: 76px !important;
-  min-width: 76px !important;
-  height: 40px !important;
+  min-width: 78px;
   margin: 0 !important;
-  padding: 0 10px !important;
-}
-
-.ai-task-query-button {
-  width: 76px !important;
-  min-width: 76px !important;
 }
 
 .task-table-card {
@@ -472,10 +450,6 @@ onBeforeUnmount(stopRefresh);
     gap: 8px;
   }
 
-  .ai-task-filter-row span {
-    font-size: 12px;
-  }
-
   .ai-task-filter-row :deep(.el-input__wrapper),
   .ai-task-filter-row :deep(.el-select__wrapper) {
     padding-right: 6px;
@@ -488,8 +462,7 @@ onBeforeUnmount(stopRefresh);
 
   .ai-task-query-actions :deep(.el-button),
   .ai-task-query-button {
-    width: 58px !important;
-    min-width: 58px !important;
+    min-width: 58px;
     padding: 0 6px !important;
   }
 }
