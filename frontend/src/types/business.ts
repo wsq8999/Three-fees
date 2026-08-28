@@ -349,6 +349,7 @@ export interface AiTaskListQuery {
   status?: AiTaskStatus | "";
   billingPointName?: string;
   cityName?: string;
+  district?: string;
   period?: string;
   page: number;
   size: number;
@@ -377,6 +378,7 @@ export interface AiTaskListItem {
   billingPointCode: string | null;
   billingPointName: string | null;
   cityName: string | null;
+  district: string | null;
   period: string | null;
   draftStatus: AiTaskDraftStatus;
   canRetry: boolean;
@@ -387,6 +389,7 @@ export interface AiTaskPage extends PageResult<AiTaskListItem> {
   summary: AiTaskSummary;
   filterOptions?: {
     cityNames: string[];
+    districts: string[];
     periods: string[];
   };
 }

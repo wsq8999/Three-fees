@@ -57,6 +57,7 @@ public class TaskController {
       @RequestParam(required = false) TaskStatus status,
       @RequestParam(required = false) String billingPointName,
       @RequestParam(required = false) String cityName,
+      @RequestParam(required = false) String district,
       @RequestParam(required = false) String period,
       @RequestParam(defaultValue = "0") int page,
       @RequestParam(defaultValue = "20") int size,
@@ -67,11 +68,15 @@ public class TaskController {
         loadAiImageTasks(status, actor).stream()
             .filter(item -> item.draftStatus() != TaskDraftStatus.FINALIZED)
             .toList();
-    List<TaskListItem> filtered =
+    List<TaskListItem> districtOptionItems =
         baseItems.stream()
             .filter(item -> matchesField(item.billingPointName(), billingPointName))
             .filter(item -> matchesField(item.cityName(), cityName))
             .filter(item -> matchesField(item.period(), period))
+            .toList();
+    List<TaskListItem> filtered =
+        districtOptionItems.stream()
+            .filter(item -> matchesField(item.district(), district))
             .sorted(Comparator.comparing(TaskListItem::updatedAt).reversed())
             .toList();
     int from = Math.min(safePage * safeSize, filtered.size());
@@ -83,7 +88,7 @@ public class TaskController {
         filtered.size(),
         filtered.isEmpty() ? 0 : (int) Math.ceil(filtered.size() / (double) safeSize),
         summary(filtered),
-        filterOptions(baseItems));
+        filterOptions(baseItems, districtOptionItems));
   }
 
   @GetMapping("/{publicId}")
@@ -202,6 +207,7 @@ public class TaskController {
         related.billingPointCode(),
         related.billingPointName(),
         related.cityName(),
+        related.district(),
         related.period(),
         draftStatus,
         canRetry,
@@ -213,7 +219,7 @@ public class TaskController {
     if (draftId == null) draftId = text(result, "draftId");
     RelatedTaskTarget draftTarget = draftTarget(draftId);
     return draftTarget == null
-        ? new RelatedTaskTarget(null, null, null, null, null, null, null, true)
+        ? new RelatedTaskTarget(null, null, null, null, null, null, null, null, true)
         : draftTarget;
   }
 
@@ -225,7 +231,8 @@ public class TaskController {
             SELECT d.public_id AS draft_id, d.formal_report_public_id AS report_id,
                    d.status AS draft_record_status, d.analysis_status,
                    d.analysis_submitted_at,
-                   s.billing_point_code, s.billing_point_name, c.name AS city_name, s.data_period
+                   s.billing_point_code, s.billing_point_name, c.name AS city_name,
+                   s.district_name AS district, s.data_period
               FROM report_draft d
               JOIN billing_point_snapshot s ON s.id = d.billing_point_snapshot_id
               JOIN city c ON c.code = s.city_code
@@ -238,6 +245,7 @@ public class TaskController {
                     rs.getString("billing_point_code"),
                     rs.getString("billing_point_name"),
                     rs.getString("city_name"),
+                    rs.getString("district"),
                     rs.getString("data_period"),
                     resolveDraftStatus(
                         rs.getString("draft_record_status"), rs.getString("analysis_status")),
@@ -293,15 +301,22 @@ public class TaskController {
         count(items, TaskStatus.FAILED));
   }
 
-  private TaskFilterOptions filterOptions(List<TaskListItem> items) {
+  private TaskFilterOptions filterOptions(
+      List<TaskListItem> citySourceItems, List<TaskListItem> districtSourceItems) {
     return new TaskFilterOptions(
-        items.stream()
+        citySourceItems.stream()
             .map(TaskListItem::cityName)
             .filter(value -> value != null && !value.isBlank())
             .distinct()
             .sorted()
             .toList(),
-        items.stream()
+        districtSourceItems.stream()
+            .map(TaskListItem::district)
+            .filter(value -> value != null && !value.isBlank())
+            .distinct()
+            .sorted()
+            .toList(),
+        citySourceItems.stream()
             .map(TaskListItem::period)
             .filter(value -> value != null && !value.isBlank())
             .distinct()
@@ -395,6 +410,7 @@ public class TaskController {
       String billingPointCode,
       String billingPointName,
       String cityName,
+      String district,
       String period,
       TaskDraftStatus draftStatus,
       boolean canRetry,
@@ -407,7 +423,7 @@ public class TaskController {
       long completedPendingConfirmation,
       long failed) {}
 
-  public record TaskFilterOptions(List<String> cityNames, List<String> periods) {}
+  public record TaskFilterOptions(List<String> cityNames, List<String> districts, List<String> periods) {}
 
   public enum TaskDraftStatus {
     EDITING,
@@ -423,6 +439,7 @@ public class TaskController {
       String billingPointCode,
       String billingPointName,
       String cityName,
+      String district,
       String period,
       TaskDraftStatus draftStatus,
       boolean analysisSubmitted) {}

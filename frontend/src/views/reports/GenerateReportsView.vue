@@ -69,7 +69,7 @@ function candidateAnalysisStatusLabel(candidate: ReportGenerationCandidate): str
   const taskLabels: Record<string, string> = {
     QUEUED: "排队中",
     RUNNING: "AI分析中",
-    RETRY_WAIT: "等待重试",
+    RETRY_WAIT: "等待自动重试",
     SUCCEEDED: "AI完成待确认",
     FAILED: "AI分析失败",
   };

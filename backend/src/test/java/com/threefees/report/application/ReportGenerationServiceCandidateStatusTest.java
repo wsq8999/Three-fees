@@ -52,7 +52,7 @@ class ReportGenerationServiceCandidateStatusTest {
     long noDraftSnapshot = seedOverLimitSnapshot("CANDIDATE-NONE", "无草稿报账点", "2026-04");
     long queuedSnapshot = seedOverLimitSnapshot("CANDIDATE-QUEUED", "排队中报账点", "2026-04");
     long runningSnapshot = seedOverLimitSnapshot("CANDIDATE-RUNNING", "分析中报账点", "2026-04");
-    long retrySnapshot = seedOverLimitSnapshot("CANDIDATE-RETRY", "等待重试报账点", "2026-04");
+    long retrySnapshot = seedOverLimitSnapshot("CANDIDATE-RETRY", "等待自动重试报账点", "2026-04");
     long completedSnapshot = seedOverLimitSnapshot("CANDIDATE-COMPLETED", "已分析报账点", "2026-04");
     long failedSnapshot = seedOverLimitSnapshot("CANDIDATE-FAILED", "分析失败报账点", "2026-04");
     long draftOnlySnapshot = seedOverLimitSnapshot("CANDIDATE-DRAFT-ONLY", "仅草稿状态报账点", "2026-04");
@@ -67,7 +67,7 @@ class ReportGenerationServiceCandidateStatusTest {
     seedTask(runningTaskId, "RUNNING");
     String retryTaskId = UUID.randomUUID().toString();
     String retryDraftId =
-        seedDraft(retrySnapshot, "CANDIDATE-RETRY", "等待重试报账点", "AI_ANALYZING", retryTaskId);
+        seedDraft(retrySnapshot, "CANDIDATE-RETRY", "等待自动重试报账点", "AI_ANALYZING", retryTaskId);
     seedTask(retryTaskId, "RETRY_WAIT");
     String completedTaskId = UUID.randomUUID().toString();
     String completedDraftId =

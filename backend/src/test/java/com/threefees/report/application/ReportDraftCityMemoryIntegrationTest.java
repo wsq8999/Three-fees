@@ -488,7 +488,7 @@ class ReportDraftCityMemoryIntegrationTest {
         "AI_IMAGE_ANALYSIS:DRAFT:" + draft.publicId() + ":CONTENT_VERSION:" + draft.currentVersion(),
         "{\"draftId\":\"" + draft.publicId() + "\",\"instruction\":\"测试\",\"imageFileIds\":[]}");
 
-    var hidden = taskController.list(null, null, null, null, 0, 20, actor);
+    var hidden = taskController.list(null, null, null, null, null, 0, 20, actor);
 
     assertThat(hidden.items()).isEmpty();
 
@@ -502,7 +502,7 @@ class ReportDraftCityMemoryIntegrationTest {
         """,
         draft.id());
 
-    var visible = taskController.list(null, null, null, null, 0, 20, actor);
+    var visible = taskController.list(null, null, null, null, null, 0, 20, actor);
 
     assertThat(visible.items()).hasSize(1);
     assertThat(visible.items().getFirst().relatedDraftId()).isEqualTo(draft.publicId());

@@ -785,6 +785,7 @@ export const businessApi = {
         status: query.status,
         billingPointName: query.billingPointName?.trim(),
         cityName: query.cityName?.trim(),
+        district: query.district?.trim(),
         period: query.period?.trim(),
         page: Math.max(0, query.page - 1),
         size: query.size,
@@ -804,7 +805,7 @@ export const businessApi = {
           completedPendingConfirmation: 0,
           failed: 0,
         },
-        filterOptions: result.filterOptions ?? { cityNames: [], periods: [] },
+        filterOptions: result.filterOptions ?? { cityNames: [], districts: [], periods: [] },
       };
     },
 

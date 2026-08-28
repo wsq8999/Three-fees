@@ -6,9 +6,11 @@ import { ElMessage } from "element-plus";
 
 import { businessApi } from "@/api/business-api";
 import PageState from "@/components/PageState.vue";
+import { useSessionStore } from "@/stores/session";
 import type { AiTaskListItem, AiTaskPage, AiTaskStatus } from "@/types/business";
 
 const router = useRouter();
+const session = useSessionStore();
 const loading = ref(false);
 const errorMessage = ref("");
 const pageData = ref<AiTaskPage | null>(null);
@@ -19,17 +21,25 @@ const filters = reactive({
   status: "" as AiTaskStatus | "",
   billingPointName: "",
   cityName: "",
+  district: "",
   period: "",
   page: 1,
   size: 10,
 });
 
 const cityOptions = computed(() => pageData.value?.filterOptions?.cityNames ?? []);
+const isCityLocked = computed(() => session.currentUser?.city != null);
+const visibleCityOptions = computed(() =>
+  session.currentUser?.city
+    ? [session.currentUser.city.name]
+    : cityOptions.value,
+);
+const districtOptions = computed(() => pageData.value?.filterOptions?.districts ?? []);
 
 const statusOptions: Array<{ label: string; value: AiTaskStatus }> = [
   { label: "排队中", value: "QUEUED" },
   { label: "AI分析中", value: "RUNNING" },
-  { label: "等待重试", value: "RETRY_WAIT" },
+  { label: "等待自动重试", value: "RETRY_WAIT" },
   { label: "AI完成待确认", value: "SUCCEEDED" },
   { label: "AI分析失败", value: "FAILED" },
 ];
@@ -78,7 +88,8 @@ function search(): void {
 function reset(): void {
   filters.status = "";
   filters.billingPointName = "";
-  filters.cityName = "";
+  filters.cityName = session.currentUser?.city?.name ?? "";
+  filters.district = "";
   filters.period = "";
   filters.page = 1;
   void load();
@@ -100,7 +111,7 @@ function taskStatusLabel(task: AiTaskListItem): string {
   const labels: Record<AiTaskStatus, string> = {
     QUEUED: "排队中",
     RUNNING: "AI分析中",
-    RETRY_WAIT: "等待重试",
+    RETRY_WAIT: "等待自动重试",
     SUCCEEDED: "AI完成待确认",
     FAILED: "AI分析失败",
   };
@@ -158,6 +169,7 @@ async function retryTask(task: AiTaskListItem): Promise<void> {
 }
 
 onMounted(() => {
+  filters.cityName = session.currentUser?.city?.name ?? filters.cityName;
   void load();
 });
 
@@ -190,17 +202,34 @@ onBeforeUnmount(stopRefresh);
       </label>
 
       <label>
-        <span>城市</span>
+        <span>所属地市</span>
         <ElSelect
           v-model="filters.cityName"
-          placeholder="全部城市"
+          :disabled="isCityLocked"
+          placeholder="全部地市"
           clearable
         >
           <ElOption
-            v-for="city in cityOptions"
+            v-for="city in visibleCityOptions"
             :key="city"
             :label="city"
             :value="city"
+          />
+        </ElSelect>
+      </label>
+
+      <label>
+        <span>所属区县</span>
+        <ElSelect
+          v-model="filters.district"
+          placeholder="全部区县"
+          clearable
+        >
+          <ElOption
+            v-for="district in districtOptions"
+            :key="district"
+            :label="district"
+            :value="district"
           />
         </ElSelect>
       </label>
@@ -267,6 +296,11 @@ onBeforeUnmount(stopRefresh);
       </ElTableColumn>
 
       <ElTableColumn prop="cityName" label="所属地市" min-width="130" show-overflow-tooltip />
+      <ElTableColumn label="所属区县" min-width="130" show-overflow-tooltip>
+        <template #default="scope">
+          {{ (scope.row as AiTaskListItem).district ?? "—" }}
+        </template>
+      </ElTableColumn>
       <ElTableColumn prop="period" label="账期" min-width="120" />
 
       <ElTableColumn label="AI任务状态" min-width="150">

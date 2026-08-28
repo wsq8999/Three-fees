@@ -153,7 +153,7 @@ describe("GenerateReportsView candidate status labels", () => {
     const wrapper = mountView([
       candidate("BP-A", "排队中报账点", "AI_ANALYZING", "QUEUED"),
       candidate("BP-B", "分析中报账点", "AI_ANALYZING", "RUNNING"),
-      candidate("BP-C", "等待重试报账点", "AI_ANALYZING", "RETRY_WAIT"),
+      candidate("BP-C", "等待自动重试报账点", "AI_ANALYZING", "RETRY_WAIT"),
       candidate("BP-D", "已分析报账点", "AI_COMPLETED_PENDING_CONFIRMATION", "SUCCEEDED"),
       candidate("BP-E", "分析失败报账点", "AI_FAILED", "FAILED"),
       candidate("BP-F", "未分析报账点", "PENDING_ANALYSIS"),
@@ -164,7 +164,7 @@ describe("GenerateReportsView candidate status labels", () => {
     expect(wrapper.text()).toContain("BP-A | 排队中报账点 | 南京市 | 2026-06");
     expect(wrapper.text()).toContain("排队中");
     expect(wrapper.text()).toContain("AI分析中");
-    expect(wrapper.text()).toContain("等待重试");
+    expect(wrapper.text()).toContain("等待自动重试");
     expect(wrapper.text()).toContain("AI完成待确认");
     expect(wrapper.text()).toContain("AI分析失败");
     expect(wrapper.text()).not.toContain("待分析");
