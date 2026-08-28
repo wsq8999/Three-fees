@@ -1,7 +1,7 @@
 import { parseProblemDetails, toApiProblem } from "./problem-details";
 
 export interface HttpClient {
-  get(path: string): Promise<unknown>;
+  get(path: string, options?: RequestOptions): Promise<unknown>;
   post(path: string, body: unknown, options?: RequestOptions): Promise<unknown>;
   postForm(
     path: string,
@@ -137,7 +137,7 @@ export function createHttpClient(options: HttpClientOptions): HttpClient {
   }
 
   return {
-    get: (path) => request("GET", path),
+    get: (path, options) => request("GET", path, undefined, "json", options),
     post: (path, body, options) => request("POST", path, body, "json", options),
     postForm: (path, body, options) =>
       request("POST", path, body, "json", options),

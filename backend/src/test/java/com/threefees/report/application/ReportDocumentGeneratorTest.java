@@ -305,6 +305,69 @@ class ReportDocumentGeneratorTest {
   }
 
   @Test
+  void marksImageOnlyHistoricalPreviewParagraphsForInlineFlow() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    byte[] imageBytes;
+    try (var imageOutput = new ByteArrayOutputStream()) {
+      ImageIO.write(new BufferedImage(80, 40, BufferedImage.TYPE_INT_RGB), "png", imageOutput);
+      imageBytes = imageOutput.toByteArray();
+    }
+    byte[] wordBytes;
+    try (var document = new XWPFDocument();
+        var output = new ByteArrayOutputStream()) {
+      for (String name : List.of("左图.png", "右图.png")) {
+        var paragraph = document.createParagraph();
+        paragraph
+            .createRun()
+            .addPicture(
+                new ByteArrayInputStream(imageBytes),
+                XWPFDocument.PICTURE_TYPE_PNG,
+                name,
+                Units.toEMU(90),
+                Units.toEMU(45));
+      }
+      document.write(output);
+      wordBytes = output.toByteArray();
+    }
+
+    String html = generator.extractWordPreviewHtml(wordBytes, "历史报告.docx");
+
+    assertThat(countOccurrences(html, "class=\"word-image-paragraph\"")).isEqualTo(2);
+    assertThat(html).contains("<p class=\"word-image-paragraph\"><span class=\"word-inline-image\"><img");
+  }
+
+  @Test
+  void keepsTextAfterImageInSeparateHistoricalPreviewParagraph() throws Exception {
+    var generator = new ReportDocumentGenerator("");
+    byte[] imageBytes;
+    try (var imageOutput = new ByteArrayOutputStream()) {
+      ImageIO.write(new BufferedImage(80, 40, BufferedImage.TYPE_INT_RGB), "png", imageOutput);
+      imageBytes = imageOutput.toByteArray();
+    }
+    byte[] wordBytes;
+    try (var document = new XWPFDocument();
+        var output = new ByteArrayOutputStream()) {
+      document
+          .createParagraph()
+          .createRun()
+          .addPicture(
+              new ByteArrayInputStream(imageBytes),
+              XWPFDocument.PICTURE_TYPE_PNG,
+              "现场图.png",
+              Units.toEMU(90),
+              Units.toEMU(45));
+      document.createParagraph().createRun().setText("text-after-image");
+      document.write(output);
+      wordBytes = output.toByteArray();
+    }
+
+    String html = generator.extractWordPreviewHtml(wordBytes, "历史报告.docx");
+
+    assertThat(html)
+        .contains("</span></p><p>text-after-image</p>");
+  }
+
+  @Test
   void emphasizesConcreteCauseInGeneratedWord() throws Exception {
     var generator = new ReportDocumentGenerator("");
     var sections =

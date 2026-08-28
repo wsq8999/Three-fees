@@ -798,54 +798,7 @@ public class AuditReportService {
             .findFirst()
             .orElseThrow(() -> new ResourceNotFoundException("正式报告"));
     requireScope(actor, detail.cityCode());
-    return refreshHistoricalPreview(detail);
-  }
-
-  private ReportDetail refreshHistoricalPreview(ReportDetail detail) {
-    if (!isHistoricalSource(detail.sourceType()) || detail.wordFileId() == null) {
-      return detail;
-    }
-    try {
-      var file = storedFileService.find(detail.wordFileId());
-      String previewHtml =
-          documentGenerator.extractWordPreviewHtml(
-              storedFileService.readBytes(file), file.originalName());
-      if (previewHtml == null || previewHtml.isBlank()) {
-        return detail;
-      }
-      return new ReportDetail(
-          detail.id(),
-          detail.reportNumber(),
-          detail.billingPointPeriodId(),
-          detail.billingPointCode(),
-          detail.billingPointName(),
-          detail.cityCode(),
-          detail.cityName(),
-          detail.district(),
-          detail.period(),
-          detail.periodStart(),
-          detail.periodEnd(),
-          detail.sourceType(),
-          detail.status(),
-          detail.actualEnergy(),
-          detail.actualAmount(),
-          detail.overLimitType(),
-          detail.maxRatio(),
-          detail.overLimitRatios(),
-          new ReportSections(detail.sections().title(), previewHtml, "", ""),
-          detail.wordFileId(),
-          detail.pdfFileId(),
-          detail.businessSnapshot(),
-          detail.generatedAt(),
-          detail.updatedAt(),
-          detail.updatedBy(),
-          detail.correctionReason(),
-          detail.correctedAt(),
-          detail.correctedBy(),
-          detail.version());
-    } catch (RuntimeException exception) {
-      return detail;
-    }
+    return detail;
   }
 
   private boolean isHistoricalSource(String sourceType) {

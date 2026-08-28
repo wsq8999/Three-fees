@@ -86,6 +86,10 @@ public class ReportDocumentGenerator {
           "(?<!^)(?=本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因[：:])");
   private static final Pattern CAUSE_LABEL =
       Pattern.compile("(?:本期(?:电量)?(?:同比|环比|额定(?:标杆)?)超标原因|超标原因(?:是|为)?)[：:，,]?");
+  private static final Pattern WORD_INLINE_IMAGE_SPAN =
+      Pattern.compile(
+          "(?is)<span\\b(?=[^>]*\\bclass=[\"']word-inline-image[\"'])[^>]*>\\s*<img\\b[^>]*>\\s*</span>");
+  private static final Pattern HTML_LINE_BREAK = Pattern.compile("(?is)<br\\s*/?>");
   private static final double WORD_PAGE_IMAGE_MAX_WIDTH_POINTS = 420;
   private static final int BODY_FIRST_LINE_INDENT_TWIPS = 480;
   private static final Set<String> CAUSE_LABEL_PHRASES =
@@ -1098,8 +1102,7 @@ public class ReportDocumentGenerator {
     }
   }
 
-  private void appendDocParagraph(
-      StringBuilder html, PicturesTable picturesTable, Paragraph paragraph) {
+  private void appendDocParagraph(StringBuilder html, PicturesTable picturesTable, Paragraph paragraph) {
     StringBuilder text = new StringBuilder();
     boolean wroteContent = false;
     for (int runIndex = 0; runIndex < paragraph.numCharacterRuns(); runIndex++) {
@@ -1145,7 +1148,38 @@ public class ReportDocumentGenerator {
     if (widthTwips <= 0 || heightTwips <= 0) {
       return Optional.empty();
     }
-    return Optional.of(new DisplaySize(twipsToPoints(widthTwips), twipsToPoints(heightTwips)));
+    double widthPoints = twipsToPoints(widthTwips);
+    double heightPoints = twipsToPoints(heightTwips);
+    Optional<ImageDimensions> dimensions = imageDimensions(picture.getContent());
+    if (dimensions.isPresent()) {
+      ImageDimensions image = dimensions.get();
+      double naturalRatio = (double) image.width() / (double) image.height();
+      if (naturalRatio > 0) {
+        heightPoints = widthPoints / naturalRatio;
+      }
+      double maxWidth = naturalRatio < 1 ? 160 : WORD_PAGE_IMAGE_MAX_WIDTH_POINTS;
+      if (widthPoints > maxWidth) {
+        double scale = maxWidth / widthPoints;
+        widthPoints *= scale;
+        heightPoints *= scale;
+      }
+    }
+    return Optional.of(new DisplaySize(widthPoints, heightPoints));
+  }
+
+  private Optional<ImageDimensions> imageDimensions(byte[] bytes) {
+    if (bytes == null || bytes.length == 0) {
+      return Optional.empty();
+    }
+    try {
+      BufferedImage image = ImageIO.read(new ByteArrayInputStream(bytes));
+      if (image == null || image.getWidth() <= 0 || image.getHeight() <= 0) {
+        return Optional.empty();
+      }
+      return Optional.of(new ImageDimensions(image.getWidth(), image.getHeight()));
+    } catch (IOException exception) {
+      return Optional.empty();
+    }
   }
 
   private double emuToPoints(long emu) {
@@ -1266,13 +1300,26 @@ public class ReportDocumentGenerator {
   }
 
   private void appendSingleHtmlParagraph(StringBuilder html, String contentHtml, String style) {
+    boolean imageOnly = isWordImageOnlyParagraph(contentHtml);
     html.append("<p");
+    if (imageOnly) {
+      html.append(" class=\"word-image-paragraph\"");
+    }
     if (style != null && !style.isBlank()) {
       html.append(" style=\"").append(escapeHtml(style)).append("\"");
     }
     html.append(">");
     html.append(contentHtml);
     html.append("</p>");
+  }
+
+  private boolean isWordImageOnlyParagraph(String contentHtml) {
+    if (contentHtml == null || !contentHtml.contains("word-inline-image")) {
+      return false;
+    }
+    String withoutImages = WORD_INLINE_IMAGE_SPAN.matcher(contentHtml).replaceAll("");
+    String withoutLineBreaks = HTML_LINE_BREAK.matcher(withoutImages).replaceAll("");
+    return withoutLineBreaks.replace("&nbsp;", "").trim().isBlank();
   }
 
   private List<String> splitCauseParagraphs(String value) {
@@ -1670,6 +1717,8 @@ public class ReportDocumentGenerator {
   private record RowImage(Element element, ImageSize size) {}
 
   private record DisplaySize(double widthPoints, double heightPoints) {}
+
+  private record ImageDimensions(int width, int height) {}
 
   private record DocTable(Table table, int startOffset, int endOffset) {}
 

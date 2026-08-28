@@ -743,7 +743,9 @@ function taskErrorMessage(errorCode: string | null): string {
 async function fetchReportById(id: string): Promise<ReportSummary> {
   return mapReport(
     asResult<BackendReportSummary>(
-      await httpClient.get(`/api/v1/reports/${encodeURIComponent(id)}`),
+      await httpClient.get(`/api/v1/reports/${encodeURIComponent(id)}`, {
+        timeoutMs: 0,
+      }),
     ),
   );
 }

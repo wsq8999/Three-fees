@@ -242,11 +242,83 @@ function normalizeReportHtmlWhitespace(value: string): string {
 }
 
 function normalizeHistoricalPreviewHtml(value: string): string {
-  return value
+  const html = value
     .trim()
     .replace(/Historical Word preview/gi, "")
     .replace(/Original Word file is the source of truth\./gi, "")
     .trim();
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  splitLargeImageTextParagraphs(template.content);
+  return template.innerHTML.trim();
+}
+
+function splitLargeImageTextParagraphs(root: DocumentFragment): void {
+  root.querySelectorAll<HTMLParagraphElement>("p").forEach((paragraph) => {
+    if (!paragraph.querySelector("img") || !hasLargeHistoricalImage(paragraph)) {
+      return;
+    }
+    const replacement = document.createDocumentFragment();
+    let textParagraph: HTMLParagraphElement | null = null;
+    let imageParagraph: HTMLParagraphElement | null = null;
+
+    const flushText = (): void => {
+      if (textParagraph === null) return;
+      if (normalizeReportText(textParagraph.textContent ?? "").length === 0) {
+        textParagraph = null;
+        return;
+      }
+      replacement.append(textParagraph);
+      textParagraph = null;
+    };
+    const flushImages = (): void => {
+      if (imageParagraph === null) return;
+      replacement.append(imageParagraph);
+      imageParagraph = null;
+    };
+
+    Array.from(paragraph.childNodes).forEach((node) => {
+      if (isImageNode(node)) {
+        flushText();
+        imageParagraph ??= historicalParagraphClone(paragraph, true);
+        imageParagraph.append(node.cloneNode(true));
+        return;
+      }
+      flushImages();
+      textParagraph ??= historicalParagraphClone(paragraph, false);
+      textParagraph.append(node.cloneNode(true));
+    });
+    flushText();
+    flushImages();
+    if (replacement.childNodes.length > 0) {
+      paragraph.replaceWith(replacement);
+    }
+  });
+}
+
+function historicalParagraphClone(
+  source: HTMLParagraphElement,
+  imageOnly: boolean,
+): HTMLParagraphElement {
+  const paragraph = document.createElement("p");
+  const style = source.getAttribute("style");
+  if (style !== null) paragraph.setAttribute("style", style);
+  if (imageOnly) paragraph.className = "word-image-paragraph";
+  return paragraph;
+}
+
+function isImageNode(node: Node): boolean {
+  return node instanceof HTMLElement && node.querySelector("img") !== null;
+}
+
+function hasLargeHistoricalImage(root: HTMLElement): boolean {
+  return Array.from(root.querySelectorAll<HTMLImageElement>("img")).some((image) => {
+    const width =
+      parseCssPixelValue(image.dataset.displayWidth ?? null) ??
+      parseCssPixelValue(image.getAttribute("width")) ??
+      parseCssPixelValue(cssProperty(image.getAttribute("style"), "width"));
+    return width !== undefined && width >= 240;
+  });
 }
 
 function clearPreviewImageHandlers(): void {
@@ -762,11 +834,22 @@ onBeforeUnmount(() => {
   width: min(794px, 100%);
   max-width: 100%;
   min-width: 0;
+  color: #000;
+  font-family: SimSun, "宋体", "Times New Roman", serif;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
 .word-preview-content--historical {
   width: 100%;
   max-width: 100%;
+}
+
+.word-preview-content--historical :deep(p) {
+  margin: 0 0 12px;
+  padding: 0;
+  line-height: 1.5;
+  white-space: normal;
 }
 
 .word-preview-content:not(.word-preview-content--historical) :deep(img) {
@@ -788,7 +871,7 @@ onBeforeUnmount(() => {
 
 .word-preview-content--historical :deep(img) {
   max-width: 100%;
-  height: auto;
+  height: auto !important;
   object-fit: contain;
 }
 
@@ -797,7 +880,21 @@ onBeforeUnmount(() => {
 }
 
 .word-preview-content--historical :deep(.word-inline-image) {
+  display: inline-block;
   max-width: 100%;
+  line-height: 0;
+  vertical-align: top;
+}
+
+.word-preview-content--historical :deep(.word-image-paragraph) {
+  display: block;
+  max-width: 100%;
+  line-height: 0;
+  vertical-align: top;
+}
+
+.word-preview-content--historical :deep(.word-inline-image > img) {
+  display: block;
 }
 
 .word-preview-content--historical :deep(table) {
